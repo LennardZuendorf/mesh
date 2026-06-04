@@ -1,0 +1,43 @@
+# --- Secrets & local config (never commit) ---
+.brain/
+config.toml
+config.local.toml
+.env
+.env.*
+*.secret
+
+# --- Brain CLI derived cache / search index (disposable) ---
+.brain-index/
+*.brain-index
+index.sqlite
+index.sqlite-*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.uv/
+.python-version
+
+# --- Testing / tooling ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
