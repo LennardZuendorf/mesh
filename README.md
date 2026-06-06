@@ -1,111 +1,89 @@
 # 🧠 Brain CLI
 
-> A thin, local-first broker that gives AI agents and a human **one shared interface** over
-> **Notes, Tasks, Memory, and Search** — plus first-class **agent handoffs**.
+> A thin coordination layer over a single Tolaria Markdown folder.
+> **Three verbs — `note`, `task`, `search`. One daemon. One folder. All agents.**
 
-**Status:** 📋 Specification / pre-implementation · **Stack:** Python · **Surface:** CLI-first (MCP later)
+**Status:** 📋 Specification / pre-implementation · **Stack:** Python · **Surface:** CLI-first (MCP over the same daemon)
 
-Brain CLI is the unification layer for a small knowledge mesh around Cowork agents (a Jira Agent,
-a PM Agent, a Notes Assistant, …). It doesn't replace the tools you already use — it standardizes
-*how* every agent reads, writes, searches, and hands off context, while the underlying systems
-remain the source of truth.
-
-```
-        Cowork agents  +  human operator
-                       │
-                  ┌────▼────┐
-                  │  brain  │   one interface · stable verbs · shared schemas
-                  └────┬────┘
-        ┌──────────┬───┴────┬───────────┬──────────────┐
-     Notes        Tasks   Memory      Search        Handoffs
-   Tolaria/      Todoist  local md   indexed.sh    md artifacts
-   Obsidian                store                   (the wedge)
-```
-
-## Why
-
-The bottleneck isn't a lack of agents — it's the lack of a **shared substrate**. Agents don't
-preserve structure, memory, or write-discipline across sessions, so autonomy feels fragile and
-fragmented. Brain CLI gives every agent the **same verbs, schemas, and routing rules** so they
-stop reinventing storage and start sharing context.
-
-## What it does
-
-| Domain | Backend | Brain commands |
-|---|---|---|
-| **Notes** | Tolaria + Obsidian vault (Markdown + frontmatter) | `brain notes search\|open\|upsert\|append` |
-| **Tasks** | Todoist | `brain tasks list\|add\|complete\|sync` |
-| **Memory** | local files-first Markdown store *(new)* | `brain memory remember\|recall` |
-| **Search** | `indexed.sh` (your own indexed search) | `brain search <query>` |
-| **Handoffs** | structured Markdown artifacts | `brain handoff create\|list\|claim` |
-| Cross-cutting | — | `brain recent`, `brain graph link`, `brain config`, `brain doctor` |
-
-```sh
-# Capture, recall, and hand off — across backends, one interface
-brain notes upsert "Onboarding Runbook" --frontmatter status=draft --stdin < runbook.md
-brain memory remember "API base URL is api.dib.internal" --scope dibtravel --tag infra
-brain tasks add "Review PRD section" --due tomorrow --project Brain
-brain handoff create --to data-agent --summary "ETL ready for QA" --ref note:Onboarding-Runbook
-brain search "vendor migration" --domain notes,memory --json
-```
-
-Human-readable by default; `--json` for agent consumption; atomic, idempotent, schema-validated writes.
-
-## Principles
-
-- **Markdown stays the human-readable source of truth.**
-- **Brain owns the interface, not the data** — backends are swappable behind stable commands.
-- **Thin broker, not a platform** — no required LLM, graph DB, daemon, or cloud.
-- **Local-first & privacy-first** — only Todoist (by design) leaves your machine.
-- **Retrieval added incrementally** — start simple, add hybrid search only if recall is the bottleneck.
-
-## What makes it different
-
-Surveyed tools (basic-memory, the official MCP memory server, Obsidian MCP servers, mem0, Letta,
-Graphiti, …) do memory or notes — **none offer a first-class handoff primitive**, and the closest
-competitor is AGPL. Brain's wedge: **agent handoffs + four-domain unification + a permissive
-license + a zero-infra, headless, files-first core.**
-
-## Architecture (at a glance)
-
-Hexagonal: thin entrypoints (CLI now, MCP later) → shared core services → **ports** (capability
-interfaces) → swappable **adapters** → backends. The CLI and the future MCP server call the same
-core, so they never drift.
+Brain CLI gives a human operator and a fleet of agents (a flights-agent, a tolaria-agent, …) one
+shared substrate for capturing knowledge and coordinating work. Notes and tasks are both plain
+`.md` files in the same folder — a task is just a note with `type: task`. One local daemon watches
+the folder, indexes it, and serves both the CLI and an MCP server from a single process.
 
 ```
-src/brain/
-├── cli/        # Typer app (thin)
-├── mcp/        # FastMCP server (thin, future)
-├── core/       # services — all domain logic + adapter registry
-├── ports/      # NotesPort, TasksPort, MemoryPort, SearchPort, HandoffPort
-├── adapters/   # tolaria/ todoist/ memory/ search/ handoffs/
-├── schemas/    # Pydantic models + frontmatter contracts
-└── storage/    # atomic writes, frontmatter I/O
+        agents  +  human operator
+                │
+           ┌────▼────┐
+           │  brain  │   note · task · search
+           └────┬────┘
+           ┌────▼─────┐
+           │  daemon  │   watcher + indexer + search
+           └────┬─────┘
+        ┌───────┴────────┐
+   Tolaria folder     indexed.sh
+   notes/ tasks/      (embeddings)
 ```
+
+## The whole idea
+
+- **Notes + search = memory.** Remembering is writing a note; recalling is searching. No separate memory store.
+- **Tasks = coordination = handoff.** Agents pass work by creating tasks, claiming them, finishing them, and wiring `blocks`/`blocked_by` — no bespoke handoff protocol.
+- **Markdown is the source of truth.** Every artifact is a human-readable `.md` file in Tolaria. Brain owns the *interface*, not the data. Git stays Tolaria's job.
+
+## Three verbs
+
+```bash
+# notes — capture & recall
+brain note new "Use CLID fallback for Lufthansa GDS" --type decision --tags ndc,lufthansa
+brain note append n-a3f2 "Confirmed: only needed for J/C class" --section Follow-ups --timestamp
+
+# tasks — coordinate & hand off
+brain task new "Audit NDC fallback logic" --owner flights-agent --priority high
+brain task ready --owner flights-agent          # what's unblocked & unclaimed?
+brain task claim t-c7d1                          # atomic — only one agent wins
+brain task finish t-c7d1 --outcome "All J/C fares resolved via CLID."   # unblocks dependents
+
+# search — hybrid (embeddings + BM25), JSON by default, always returns a path
+brain search "how did we handle the CLID fallback decision"
+brain search --tags ndc,flights --type note --meta-only   # deterministic tag pull, no embedding
+```
+
+Identity comes from `$BRAIN_AGENT` (drives `--owner` defaults and `--mine`). Config lives in
+`~/.brain/config.toml`. IDs are short hashes (`n-a3f2`, `t-c7d1`).
+
+## Architecture in one breath
+
+A daemon-centric but never daemon-*dependent* design: the `brain` CLI and the MCP server are thin
+clients talking to one local daemon over a unix socket; the daemon owns the file watcher, the
+index, and hybrid search. **If the daemon is down, the CLI falls back to direct file ops + lexical
+search** — it is never hard-blocked. The only pluggable piece is the embedder (`indexed` |
+`openai` | `local`).
+
+## What Brain deliberately does NOT do
+
+No vector DB to manage (indexed.sh handles it) · no web dashboard, no RBAC · **no memory
+primitive** (notes + search = memory) · **no separate handoff primitive** (tasks = handoff) · no
+Todoist or external task backend · no sequential IDs (hash IDs) · no git sync (Tolaria is already git).
 
 ## Roadmap
 
-- **Phase 1 (MVP):** thin broker over Tolaria/Obsidian + Todoist; memory store; `indexed.sh`
-  search; first-class handoffs; `--json`, `--dry-run`, `doctor`.
-- **Phase 2:** `brain-mcp` MCP server (same core) + optional local hybrid search
-  (SQLite FTS5 + sqlite-vec + RRF) — only if retrieval becomes the bottleneck.
-- **Phase 3:** GBrain (graph/entity reasoning) — only if scale/complexity demand it, as another
-  swappable backend.
+- **Phase 1 (MVP):** `note` + `task` + `search` over the Tolaria folder; daemon watcher + indexed.sh hybrid search; full claim/finish/blocks coordination; `$BRAIN_AGENT`; graceful daemon-down fallback.
+- **Phase 2:** MCP server over the same daemon + a Claude Code `SessionStart` hook for context injection.
+- **Phase 3:** pluggable embedders (`openai`/`local`) and richer ranking — only if recall becomes the bottleneck.
 
 ## Specification
 
-The full product requirements & design live in **[`spec/README.md`](spec/README.md)** — personas
-and use cases, the complete command surface, architecture, note schemas, NFRs, security, the
-competitive landscape, and open questions.
+The full product & technical spec lives in **[`spec/README.md`](spec/README.md)** — personas and
+use cases, the complete command surface, daemon architecture, the note/task data model, search
+internals, coordination/concurrency guarantees, the MCP surface, NFRs, security, and open questions.
 
 ## Status & open questions
 
-This repo is currently a **specification**. Before implementation we need to resolve a few things
-(see [the spec's Open Questions](spec/README.md#15-open-questions--assumptions)), notably: the
-exact **Tolaria** and **`indexed.sh`** interfaces, **Todoist** auth, where **memory/handoff**
-files live, and final **naming** (`brain` vs the `memory` repo) and **license** (MIT vs Apache-2.0).
+This repo is currently a **specification**. The main blocking unknown is the exact **`indexed.sh`**
+interface (flags, query syntax, output format). Other decisions to confirm: a `task release`
+command, whether to withhold all destructive ops from MCP, `[tasks].collections` semantics, and
+Windows transport. See [the spec's Open Questions](spec/README.md#17-open-questions--decisions).
 
 ## License
 
-To be decided — a **permissive** license (MIT or Apache-2.0) is recommended as a deliberate
-differentiator vs. AGPL-licensed alternatives. See the spec's *Security, Privacy & Trust* section.
+To be decided — a **permissive** license (MIT or Apache-2.0) is recommended.
