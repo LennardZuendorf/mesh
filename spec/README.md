@@ -1,7 +1,7 @@
 # Brain CLI — Product & Technical Specification
 
 > **Status:** Draft v0.2 (rewrite) · **Date:** 2026-06-06 · **Owner:** Lennard Zündorf
-> **Repo:** `memory` · **Command:** `brain` · **Stack:** Python · **Surface:** 3 verbs (`note`, `task`, `search`)
+> **Repo:** `brain` · **Command:** `brain` · **Stack:** Python · **Surface:** 3 verbs (`note`, `task`, `search`)
 > One daemon · one Tolaria folder · all agents. CLI-first; MCP over the same daemon.
 
 This is the canonical specification for **Brain CLI**. It is the source of truth for scope,
@@ -614,7 +614,7 @@ collections  = ["flights-agent", "tolaria-agent", "lennard"]
 ## 13. Repository / Package Layout
 
 ```
-memory/
+brain/
 ├── pyproject.toml              # uv/pipx; entry point: brain = brain.cli:app
 ├── README.md
 ├── spec/
@@ -727,8 +727,8 @@ Each lists the question and the **default** Brain proceeds with until resolved.
    title, resolved to ID via the index; ambiguous slugs error and ask for the ID.
 8. **ID hash input.** Hash over `created + title` (not body), so identical re-runs differ by
    timestamp; confirm this is desired over a content hash. *Default:* time+title as specified.
-9. **Naming.** Command is `brain`, repo is `memory`. *Default:* keep `brain`; repo rename is a
-   separate decision.
+9. **Naming.** ✅ Resolved — repo and command are both `brain` (the repository was renamed from
+   `memory` to `brain`).
 
 ---
 
