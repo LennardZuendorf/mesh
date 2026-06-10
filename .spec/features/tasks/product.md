@@ -67,7 +67,23 @@ The system SHALL report tasks that are `open`, unclaimed, and have all `blocked_
 - **When** an agent runs `brain task ready --owner flights-agent`
 - **Then** only unblocked, unclaimed tasks are returned, JSON-friendly
 
-Reference requirements as R1, R2, R3, R4 in the feature plan's Requirements Trace.
+### Requirement: Cancel or delete a task
+
+The system SHALL cancel a task — appending an optional `--reason`, setting `status: cancelled`, and moving it to `tasks/done/` — and SHALL delete a task as a hard, `--force`-guarded removal of the file.
+
+#### Scenario: Cancel a task
+
+- **Given** an open task `t-c7d1`
+- **When** `brain task cancel t-c7d1 --reason "no longer relevant"` runs
+- **Then** its `status` becomes `cancelled`, the reason is recorded, and the file moves to `tasks/done/`
+
+#### Scenario: Guarded delete
+
+- **Given** a task `t-c7d1` exists
+- **When** `brain task delete t-c7d1 --force` runs
+- **Then** the file is removed and the task no longer appears in `task list`
+
+Reference requirements as R1, R2, R3, R4, R5 in the feature plan's Requirements Trace.
 
 ## User Experience
 

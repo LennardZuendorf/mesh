@@ -57,14 +57,27 @@ The system SHALL support `--meta-only` (drop snippet/body) and `--full` (whole b
 - **When** `--meta-only` is set
 - **Then** results omit snippets/bodies to minimise tokens
 
-Reference requirements as R1, R2, R3 in the feature plan's Requirements Trace.
+### Requirement: Degrade to lexical-only when the daemon is down
+
+The system SHALL return lexical-only (BM25/substring) results when the daemon or embedder is unavailable, MUST keep returning the same JSON result shape, and MUST print a one-line notice to stderr (suppressed under `--quiet`).
+
+#### Scenario: Search with no daemon
+
+- **Given** the daemon is stopped
+- **When** `brain search "ndc"` runs
+- **Then** lexical-only results are returned in the usual JSON shape and a one-line notice is printed to stderr, suppressed under `--quiet`
+
+Reference requirements as R1, R2, R3, R4 in the feature plan's Requirements Trace.
 
 ## User Experience
 
 ```
 $ brain search "CLID fallback decision"                       # hybrid, JSON by default
 $ brain search --tags ndc,flights --type note --meta-only     # deterministic, zero-cost
+$ brain search "ndc"                                          # daemon down: lexical-only + stderr notice
 ```
+
+Results are JSON by default; `--json` is also accepted explicitly and is available on every command.
 
 ## Non-Goals
 

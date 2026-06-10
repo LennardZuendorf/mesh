@@ -32,6 +32,7 @@ Memory must exist before anything can recall or coordinate over it. This plan st
 | R2 | [Amend notes without rewriting](product.md#requirement-amend-notes-without-rewriting) | notes/3 |
 | R3 | [Retrieve and list notes](product.md#requirement-retrieve-and-list-notes) | notes/4 |
 | R4 | [Resolve wikilinks](product.md#requirement-resolve-wikilinks) | notes/5 |
+| R5 | [Delete notes](product.md#requirement-delete-notes) | notes/6 |
 
 Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
@@ -169,6 +170,30 @@ src/brain/core/wikilinks.py
 
 ---
 
+### notes/6 — `note delete`
+
+**Goal:** Hard, guarded deletion of a note by id|slug, with a `--force` bypass for the confirmation prompt.
+
+**Requirements:** R5
+
+**Dependencies:** notes/2
+
+**Files:**
+
+```
+src/brain/cli/note.py
+src/brain/core/notes.py
+```
+
+**Test scenarios:**
+
+- `note delete --force` removes the file; the note disappears from `note list`.
+- Without `--force`, deletion prompts for confirmation.
+
+**Verification:** `uv run pytest tests/notes/test_delete.py`
+
+---
+
 ## Progress
 
 | Unit | Status |
@@ -178,3 +203,4 @@ src/brain/core/wikilinks.py
 | notes/3 | NOT STARTED |
 | notes/4 | NOT STARTED |
 | notes/5 | NOT STARTED |
+| notes/6 | NOT STARTED |

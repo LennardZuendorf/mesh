@@ -29,7 +29,7 @@ src/brain/index/fusion.py    # RRF merge, threshold, recency boost
 
 ## Contract / API
 
-Command: `search "<query>" [--type note|task] [--tags] [--owner] [--status] [--limit 10] [--threshold 0.0-1.0] [--meta-only] [--full]`. The `"<query>"` is optional when `--tags` is given (deterministic tag pull). JSON by default.
+Command: `search "<query>" [--type note|task] [--tags] [--owner] [--status] [--limit 10] [--threshold 0.0-1.0] [--meta-only] [--full]`. The `"<query>"` is optional when `--tags` is given (deterministic tag pull). Results are JSON by default; `--json` is also accepted explicitly.
 
 Result schema:
 
@@ -50,7 +50,8 @@ Result schema:
 - **Two retrievers.** (1) BM25/substring over title, tags, body — always in-process, even daemon-down. (2) Semantic: the configured embedder embeds the query; cosine similarity against cached document vectors supplied by the backend.
 - **RRF merge.** `score(d) = Σ 1/(k + rank_i(d))` over each retriever `i` (`k≈60`), avoiding normalisation of incomparable BM25 and cosine scores. The fused list is filtered by `--threshold` (default `0.65` from config) and may receive a **recency boost** weighted by `updated` so fresh docs float up among near-ties.
 - **Tag-pull fast path.** `--tags` with no query skips both retrievers entirely and returns matching documents by frontmatter alone — zero embedding cost, fully reproducible.
-- **Embedder pluggability.** `[search].embedder` selects `indexed | openai | local` behind one adapter interface (`embed(texts) -> vectors`). Switching embedders requires only a `brain reindex`.
+- **Daemon-down degradation.** When the daemon or embedder is unavailable, only the lexical retriever runs; results keep the same JSON shape and a one-line notice is printed to stderr (suppressed under `--quiet`). The connect-then-fallback path itself is owned by the daemon feature.
+- **Embedder pluggability.** `[search].embedder` selects `indexed | openai | local` behind one adapter interface (`embed(texts) -> vectors`). Switching embedders requires only a `brain reindex` (the `reindex` command is owned by the daemon feature).
 
 ## Performance Budget
 

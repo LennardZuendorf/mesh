@@ -41,7 +41,7 @@ The system SHALL expose the note/task/search commands as `brain_*` MCP tools bac
 
 - **Given** the MCP tool list
 - **When** an agent inspects it
-- **Then** `task cancel`, `task delete`, and admin commands (`daemon`, `reindex`, `status`) are absent
+- **Then** `task cancel`, `task delete`, `note delete`, and admin commands (`daemon`, `reindex`, `status`) are absent
 
 ### Requirement: Warm-start context injection
 

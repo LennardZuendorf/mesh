@@ -28,9 +28,10 @@ Notes are only memory once they are recallable. This plan builds the always-avai
 
 | ID | Requirement | Units |
 |---|---|---|
-| R1 | [Hybrid retrieval across notes and tasks](product.md#requirement-hybrid-retrieval-across-notes-and-tasks) | search/2, search/3 |
+| R1 | [Hybrid retrieval across notes and tasks](product.md#requirement-hybrid-retrieval-across-notes-and-tasks) | search/1, search/2, search/3 |
 | R2 | [Deterministic tag pull](product.md#requirement-deterministic-tag-pull) | search/1 |
 | R3 | [Token-budgeted output](product.md#requirement-token-budgeted-output) | search/1, search/3 |
+| R4 | [Degrade to lexical-only when the daemon is down](product.md#requirement-degrade-to-lexical-only-when-the-daemon-is-down) | search/1, search/2 |
 
 Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
@@ -51,9 +52,9 @@ Units are `search/n` — assigned once, never renumbered. Cite IDs in commits an
 
 ### search/1 — Lexical retriever, tag-pull, output schema
 
-**Goal:** In-process BM25/substring, the query-less `--tags` fast path, and the JSON result schema with `--meta-only`/`--full`.
+**Goal:** In-process BM25/substring, the query-less `--tags` fast path, the JSON result schema (always `id`/`type`/`title`/`score`/`path`) with `--meta-only`/`--full`, and the daemon-down stderr notice.
 
-**Requirements:** R2, R3
+**Requirements:** R1, R2, R3, R4
 
 **Dependencies:** —
 
@@ -68,6 +69,7 @@ src/brain/cli/search.py
 
 - Tag-only pull returns matches by frontmatter with no embedding call.
 - Results always carry `id`, `type`, `title`, `score`, `path`; `--meta-only` drops bodies.
+- With the daemon down, results stay JSON-shaped and a one-line stderr notice prints, suppressed under `--quiet`.
 
 **Verification:** `uv run pytest tests/search/test_lexical_tagpull.py`
 
@@ -75,9 +77,9 @@ src/brain/cli/search.py
 
 ### search/2 — Embedder adapter
 
-**Goal:** Pluggable `embed(texts) -> vectors` with the `indexed` backend and a BM25-only fallback.
+**Goal:** Pluggable `embed(texts) -> vectors` with the `indexed` backend and a BM25-only fallback when unavailable.
 
-**Requirements:** R1
+**Requirements:** R1, R4
 
 **Dependencies:** search/1
 

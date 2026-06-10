@@ -68,6 +68,7 @@ src/brain/daemon/client.py
 
 - A request is served warm when the daemon is up.
 - With the daemon stopped, the same client call writes/reads via direct file ops.
+- The socket is created `0600` in the per-user runtime dir, owned by the running user.
 
 **Verification:** `uv run pytest tests/daemon/test_socket_fallback.py`
 

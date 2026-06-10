@@ -67,7 +67,17 @@ The system SHALL resolve `[[Title]]` and `[[n-id]]` references in note bodies to
 - **When** the note is saved
 - **Then** `n-a3f2` appears in the note's `related` array and the body text is preserved
 
-Reference requirements as R1, R2, R3, R4 in the feature plan's Requirements Trace.
+### Requirement: Delete notes
+
+The system SHALL delete a note by `<id|slug>`, prompting for confirmation unless `--force` is given. Deletion is a hard removal of the file — there is no soft-delete or trash.
+
+#### Scenario: Guarded delete
+
+- **Given** a note `n-a3f2` exists
+- **When** `brain note delete n-a3f2 --force` runs
+- **Then** the file is removed and `n-a3f2` no longer appears in `note list` or search
+
+Reference requirements as R1, R2, R3, R4, R5 in the feature plan's Requirements Trace.
 
 ## User Experience
 
@@ -79,9 +89,10 @@ n-a3f2  notes/decisions/n-a3f2.md
 
 $ brain note append n-a3f2 "Confirmed: only needed for J/C class" --section "Follow-ups" --timestamp
 $ brain note update n-a3f2 --tags +confirmed
+$ brain note get n-a3f2 --json        # machine-readable; --json is available on every command
 ```
 
 ## Non-Goals
 
-- Note deletion semantics beyond a guarded `note delete` (no soft-delete/trash).
+- Soft-delete, trash, or recovery — `note delete` is a hard, guarded removal.
 - Full-text ranking or semantic recall — that is the search feature.

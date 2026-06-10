@@ -32,6 +32,7 @@ Once memory exists, agents need to pass work without a human relay. This plan ad
 | R2 | [Atomic claim](product.md#requirement-atomic-claim) | tasks/3 |
 | R3 | [Idempotent finish that unblocks dependents](product.md#requirement-idempotent-finish-that-unblocks-dependents) | tasks/4 |
 | R4 | [Find ready work](product.md#requirement-find-ready-work) | tasks/5 |
+| R5 | [Cancel or delete a task](product.md#requirement-cancel-or-delete-a-task) | tasks/5, tasks/6 |
 
 Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
@@ -145,9 +146,9 @@ src/brain/cli/task.py
 
 ### tasks/5 — Readiness, listing, cancel
 
-**Goal:** `task ready`/`--mine`/`--ready` readiness computation, `task list`/`get`, and `task cancel`.
+**Goal:** `task ready`/`--mine`/`--ready` readiness computation, `task list`/`get`, and `task cancel` (reason + move to `done/`).
 
-**Requirements:** R4
+**Requirements:** R4, R5
 
 **Dependencies:** tasks/4
 
@@ -167,6 +168,30 @@ src/brain/cli/task.py
 
 ---
 
+### tasks/6 — `task delete`
+
+**Goal:** Hard, guarded deletion of a task by id, with a `--force` bypass for the confirmation prompt.
+
+**Requirements:** R5
+
+**Dependencies:** tasks/2
+
+**Files:**
+
+```
+src/brain/cli/task.py
+src/brain/core/tasks.py
+```
+
+**Test scenarios:**
+
+- `task delete --force` removes the file; the task disappears from `task list`.
+- Without `--force`, deletion prompts for confirmation.
+
+**Verification:** `uv run pytest tests/tasks/test_delete.py`
+
+---
+
 ## Progress
 
 | Unit | Status |
@@ -176,3 +201,4 @@ src/brain/cli/task.py
 | tasks/3 | NOT STARTED |
 | tasks/4 | NOT STARTED |
 | tasks/5 | NOT STARTED |
+| tasks/6 | NOT STARTED |

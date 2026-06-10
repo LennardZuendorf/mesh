@@ -22,8 +22,10 @@ Notes are Markdown files with YAML frontmatter, manipulated through `core/notes.
 src/brain/cli/note.py        # brain note new|append|update|delete|get|list
 src/brain/core/notes.py      # note CRUD, section-aware append, field updates
 src/brain/core/wikilinks.py  # [[link]] -> ID resolution, related graph
-src/brain/core/ids.py        # shared hash-ID generation (cross-cutting)
-src/brain/schemas/note.py    # pydantic Note model (cross-cutting)
+src/brain/core/ids.py        # shared hash-ID generation (cross-cutting, see root tech.md)
+src/brain/schemas/note.py    # pydantic Note model (cross-cutting, see root tech.md)
+src/brain/storage/files.py   # atomic write + folder routing (cross-cutting, see root tech.md)
+src/brain/storage/sandbox.py # path sandbox (cross-cutting, see root tech.md)
 ```
 
 ---
@@ -50,8 +52,8 @@ Command surface:
 | `note new` | `"<title>" [--type] [--tags] [--owner] [--body "<str>"] [--file <path>]` | Create a note; `--file` ingests body, else `$EDITOR` |
 | `note append` | `<id\|slug> "<content>" [--section "<heading>"] [--timestamp]` | Append content, optionally under a heading / with a timestamp |
 | `note update` | `<id\|slug> [--title] [--tags (+tag/-tag)] [--type] [--body]` | Update fields; `+tag`/`-tag` add/remove, bare list replaces |
-| `note delete` | `<id\|slug> [--force]` | Delete; prompts unless `--force` |
-| `note get` | `<id\|slug> [--full \| --meta \| --related]` | Default: frontmatter + first 200 chars |
+| `note delete` | `<id\|slug> [--force]` | Hard delete; prompts unless `--force` |
+| `note get` | `<id\|slug> [--full \| --meta \| --related]` | Default: frontmatter + first 200 chars; `--full` returns the whole body, `--meta` frontmatter only, `--related` inlines related notes' frontmatter |
 | `note list` | `[--tags] [--owner] [--type] [--since <ISO>] [--limit 20] [--sort updated\|created\|title]` | List notes |
 
 ## Implementation Detail
