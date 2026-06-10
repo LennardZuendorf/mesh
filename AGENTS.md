@@ -9,7 +9,8 @@
 
 **This is a spec-driven repository. The spec is the source of truth — code follows the spec, never the other way around.**
 
-The canonical product & technical contract lives in **[`spec/README.md`](spec/README.md)**.
+The canonical product & technical contract lives in **[`.spec/`](.spec/)** — start at
+[`.spec/product.md`](.spec/product.md), [`.spec/tech.md`](.spec/tech.md), and [`.spec/plan.md`](.spec/plan.md).
 
 Before you touch anything:
 
@@ -19,7 +20,8 @@ Before you touch anything:
      `.claude/skills/spec/` (project) or `~/.claude/skills/spec/` (user). Invoke it with `/spec`.
    - **If the `spec` skill is missing, stop and install it before proceeding.** Tell the user it's
      not installed rather than working around it.
-2. **Read `spec/README.md` end to end** before writing code or docs.
+2. **Read the `.spec/` root layer** (`product.md`, `tech.md`, `design.md`, `plan.md`, `lessons.md`) before
+   writing code or docs; follow links down into `.spec/features/<name>/` as needed.
 3. **Any change that contradicts or extends the spec updates the spec first** — via the `spec`
    skill, with user confirmation — *then* the implementation follows.
 4. Keep the surface honest: this project's whole thesis is staying at **three verbs**. New
@@ -120,7 +122,11 @@ brain/
 ├── AGENTS.md            # this guide  (CLAUDE.md is a symlink to it)
 ├── CLAUDE.md -> AGENTS.md
 ├── README.md            # short overview
-├── spec/README.md       # THE SPEC — source of truth
+├── .spec/               # THE SPEC — source of truth (managed via the `spec` skill)
+│   ├── product.md       # root: mini PRD            ├── tech.md     # root: architecture
+│   ├── design.md        # root: CLI design language  ├── plan.md     # root: feature sequence
+│   ├── lessons.md       # root: accumulated lessons
+│   └── features/        # notes, tasks, daemon, search, mcp (product + tech + plan each)
 └── src/brain/
     ├── cli/             # typer app: note, task, search, daemon, status (thin)
     ├── mcp/             # FastMCP server over the same daemon (thin)

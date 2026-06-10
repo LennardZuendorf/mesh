@@ -21,7 +21,7 @@ CLI-first (MCP over the same daemon); hybrid search via `indexed.sh`; identity v
 
 📋 **Spec stage** — no implementation yet. This is a **spec-driven** repo.
 
-- **The spec is the source of truth:** [`spec/README.md`](spec/README.md)
+- **The spec is the source of truth:** [`.spec/`](.spec/) — start at [`.spec/product.md`](.spec/product.md)
 - **Working in this repo?** Read [`AGENTS.md`](AGENTS.md) first.
 
 ## License
