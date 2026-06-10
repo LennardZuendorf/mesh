@@ -1,0 +1,114 @@
+---
+type: entrypoint
+scope: technical
+children: []
+updated: 2026-06-10
+---
+
+# Brain — Technical Architecture
+
+Brain is a thin coordination layer over one Tolaria Markdown folder. The architecture is daemon-centric but never daemon-dependent: a single local daemon owns the file watcher, the index, and search, while both the `brain` CLI and the MCP server are thin clients that talk to it over a unix domain socket. Write primitives (atomic file ops, locks, path sandboxing) live in the shared `core`/`storage` layer, not the daemon, so every command works with degraded search when the daemon is down. Feature-level implementation detail lives under `.spec/features/<name>/`.
+
+---
+
+## Design Philosophy
+
+1. **Daemon is an accelerator, not a gatekeeper.** The watcher and index make things fast; the CLI degrades to direct file ops + lexical search when the daemon is down. Availability never depends on a running process.
+2. **All writes are atomic and idempotent.** Every write is temp-file + `os.replace`. `task claim` is an atomic test-and-set (`O_EXCL`); `task finish` is atomic and idempotent across files — crash recovery is "just run it again."
+3. **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys untouched; never inject machinery into bodies.
+4. **One folder, one index, one search.** No second pipeline, no storage abstraction beyond "markdown files on disk." The only adapter that earns its keep is the pluggable embedder.
+5. **Agent content is data.** Titles, bodies, tags, and outcomes are inert — written to frontmatter/body, never `eval`'d or shell-interpolated.
+
+---
+
+## Architecture Overview
+
+```
+brain/
+├── pyproject.toml            # uv/pipx; entry point: brain = brain.cli:app
+├── README.md
+├── .spec/                    # Design docs (source of truth)
+└── src/brain/
+    ├── cli/                  # typer app: note, task, search, daemon, status (thin)   → features/notes, tasks, search, daemon
+    ├── mcp/                  # FastMCP server over the same daemon (thin)              → features/mcp
+    ├── daemon/               # asyncio unix-socket server: watcher + indexer + search  → features/daemon
+    ├── core/                 # domain logic: ids, notes, tasks, wikilinks             → features/notes, tasks
+    ├── index/                # bm25, embedder adapter, RRF fusion, watch              → features/search, daemon
+    ├── schemas/              # pydantic models (note, task, config)                   → cross-cutting (this doc)
+    └── storage/              # atomic writes, O_EXCL locks, path sandbox              → cross-cutting (this doc)
+```
+
+The daemon holds warm state that is expensive to rebuild per invocation: parsed frontmatter index, the wikilink/ID resolution graph, the BM25 term index, and the embedding cache. A `watchdog` observer watches `tolaria_path` so edits by humans, Tolaria, or other agents are reflected without an explicit reindex.
+
+---
+
+## Tech Stack
+
+**Inherited:** Python 3.11+, `uv` (dev tooling), the Tolaria vault (the one Markdown folder, Git-managed by Tolaria), and `indexed.sh` (hybrid-search embeddings backend behind the `indexed` embedder).
+
+**Added:** `typer` (CLI), `python-frontmatter` (YAML frontmatter I/O), `pydantic` v2 (schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search is in-process BM25 + a pluggable embedder with RRF merge. Packaging via `uv` (dev) / `pipx` (end-user install).
+
+---
+
+## State / Data Contracts
+
+Cross-cutting contracts that span every feature. Feature folders consume these; they are defined here once.
+
+| Contract | Location | Invariant |
+|---|---|---|
+| **Note/task frontmatter** | `schemas/note.py`, `schemas/task.py` | A task is a note with `type: task`. Only agreed keys are written; unknown keys round-trip untouched. `created`/`updated` are ISO-8601 UTC; `updated` bumps on every write. |
+| **Hash IDs** | `core/ids.py` | `<prefix>-<hash>`, `hash = b32(sha256(created_iso + "\0" + title))[:4]`, lowercased. `n-` for any note type, `t-` for tasks. Never sequential. Collisions extend the hash by one char until unique. |
+| **Folder routing** | `storage/files.py` | File location is *derived* from `type`/`status`, never authoritative on its own; frontmatter and folder must agree, reconciled on watch events. Notes under `notes/{observations,decisions,logs,references}/`; tasks under `tasks/{open,done}/`. |
+| **Atomic write** | `storage/files.py` | Every write is temp-file + `os.replace`. No partial writes are ever observable. |
+| **Atomic claim lock** | `storage/locks.py` | `task claim` acquires `O_EXCL` on `tasks/.locks/<id>.lock`, re-reads frontmatter, verifies `claimed_by == ~`, writes, releases. Two agents cannot both win. Runs identically in daemon and fallback mode. |
+| **Path sandbox** | `storage/sandbox.py` | Every resolved path must remain within `tolaria_path` after `realpath`; `..` traversal, absolute escapes, and symlink escapes are rejected. IDs/slugs map to files through the index, never raw user paths. |
+| **Exit codes** | `cli/` | `0` success · `1` generic error · `2` usage/validation · `3` not found · `4` already claimed · `5` blocked. |
+| **Configuration** | `~/.brain/config.toml` + `$BRAIN_AGENT` | `[core]` (tolaria_path, agent_name), `[search]` (embedder, hybrid, threshold), `[tasks]` (collections). `$BRAIN_AGENT` overrides `agent_name` per session and drives `--owner`/`--mine`. Embedder API keys come from env/keyring — never the vault or `config.toml`. |
+
+---
+
+## Build vs Inherit
+
+| Source | Approx. Lines | What |
+|---|---|---|
+| **Tolaria vault** (inherited) | n/a | The Markdown folder and its Git history — the data and its versioning |
+| **indexed.sh** (inherited) | n/a | Embeddings and their storage, behind the `indexed` embedder adapter |
+| **Brain** (this project) | small Python surface | The three-verb CLI, the daemon (watcher + indexer + search), the MCP server, and the shared core/storage primitives |
+
+---
+
+## Build Sequence
+
+| Order | Component | Feature |
+|---|---|---|
+| 1 | Note schema, CRUD, wikilinks, `brain note` | notes |
+| 2 | Task schema, lifecycle, claim/finish/blocks, `brain task` | tasks |
+| 3 | Socket server, watcher, incremental index, fallback shim, admin commands | daemon |
+| 4 | BM25 + embedder adapter + RRF fusion, tag-pull, `brain search` | search |
+| 5 | FastMCP server (`brain_*` tools) + SessionStart hook | mcp |
+
+Map build order to features. Unit-level detail lives in feature `plan.md` — not here.
+
+---
+
+## Features
+
+| Feature | Covers |
+|---|---|
+| **[features/notes/](features/notes/tech.md)** | Note schema, CRUD/append/sections, wikilink resolution; `core/notes.py`, `core/wikilinks.py`, `cli/note.py` |
+| **[features/tasks/](features/tasks/tech.md)** | Task lifecycle, atomic claim/finish, blocks/blocked_by, concurrency; `core/tasks.py`, `storage/locks.py`, `cli/task.py` |
+| **[features/daemon/](features/daemon/tech.md)** | Socket server, watchdog observer, incremental reindex, daemon-down fallback; `daemon/`, `index/watch.py` |
+| **[features/search/](features/search/tech.md)** | BM25, embedder adapter, RRF fusion + threshold + recency boost, tag-pull; `index/bm25.py`, `index/embedder.py`, `index/fusion.py` |
+| **[features/mcp/](features/mcp/tech.md)** | FastMCP tool mapping, exposed/withheld surface, SessionStart hook; `mcp/server.py` |
+
+Feature-level files, APIs, and algorithms live in `features/<name>/tech.md` — not here.
+
+## Risks & Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| `indexed.sh` interface unknown (blocking) | Wrap behind the `indexed` embedder adapter; fall back to BM25-only if it can't produce embeddings |
+| Windows lacks native unix domain sockets | Fall back to loopback TCP (127.0.0.1, token-gated) or a named pipe when a unix socket is unavailable |
+| Concurrent claim race | `O_EXCL` lockfile test-and-set; the same path runs with no daemon, so the guarantee holds in fallback mode |
+| Partial multi-file `finish` on crash | Each step is individually atomic and the whole op is idempotent; re-running `finish` is a no-op |
+| Untrusted agent content | Treated as inert data; path access sandboxed to `tolaria_path`; socket is `0600`, per-user runtime dir |
