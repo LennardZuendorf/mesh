@@ -26,26 +26,26 @@ src/brain/mcp/server.py      # FastMCP server exposing the brain_* tools
 
 ## Contract / API
 
-Tool → CLI mapping (exposed), one row per tool so the 1:1 mapping is verifiable:
+Tool → CLI mapping (exposed), one row per tool so the 1:1 mapping is verifiable. Each tool carries a behaviour annotation so an agent can self-select safe tools:
 
-| MCP tool | CLI equivalent |
-|---|---|
-| `brain_note_new` | `note new` |
-| `brain_note_get` | `note get` |
-| `brain_note_list` | `note list` |
-| `brain_note_update` | `note update` |
-| `brain_note_append` | `note append` |
-| `brain_task_new` | `task new` |
-| `brain_task_get` | `task get` |
-| `brain_task_list` | `task list` |
-| `brain_task_claim` | `task claim` |
-| `brain_task_finish` | `task finish` |
-| `brain_task_update` | `task update` |
-| `brain_search` | `search` |
+| MCP tool | CLI equivalent | Annotation |
+|---|---|---|
+| `brain_note_new` | `note new` | write |
+| `brain_note_get` | `note get` | read-only |
+| `brain_note_list` | `note list` | read-only |
+| `brain_note_update` | `note update` | idempotent |
+| `brain_note_append` | `note append` | write |
+| `brain_task_new` | `task new` | write |
+| `brain_task_get` | `task get` | read-only |
+| `brain_task_list` | `task list` | read-only |
+| `brain_task_claim` | `task claim` | idempotent |
+| `brain_task_finish` | `task finish` | idempotent |
+| `brain_task_release` | `task release` | idempotent |
+| `brain_task_cancel` | `task cancel` | destructive |
+| `brain_task_update` | `task update` | idempotent |
+| `brain_search` | `search` | read-only |
 
-**Withheld from MCP:** `task cancel`, `task delete`, `note delete`, and the admin/local-only commands `daemon start|stop|status`, `reindex`, `status`. Rationale: destructive ops and infrastructure ops are kept off the agent surface; humans run those from a shell. `finish`/`claim` are safe, reversible coordination moves and stay exposed.
-
-**Note on the inherited asymmetry:** the original design exposed `brain_note_delete` while withholding `task delete`/`cancel`. The recommended resolution (reflected above) is to withhold `note delete` too, so **no** destructive op is agent-callable — see Open Questions.
+**Withheld from MCP:** `note delete`, `task delete`, and the admin/local-only commands `daemon start|stop|status`, `reindex`, `status`. Rationale: hard-delete (irrecoverable file removal) and infrastructure ops stay off the agent surface; humans run those from a shell. `task cancel` is exposed but annotated `destructive` — it is reversible coordination (moves the file to `done/`, unblocks dependents), not data loss, and the PM-style `tolaria-agent` needs it to de-scope stale work.
 
 ## Implementation Detail
 
@@ -54,4 +54,4 @@ Tool → CLI mapping (exposed), one row per tool so the 1:1 mapping is verifiabl
 
 ## Open Questions
 
-1. **Destructive-op asymmetry.** The original design exposed `brain_note_delete` while withholding `task delete`/`cancel`. Should `note delete` also be withheld for consistency, so no destructive op is agent-callable? *Recommended default:* withhold `note delete` too (reflected in the table above); revisit only if agents genuinely need to delete notes.
+None. *Resolved (2026-06-10):* every tool carries a `read-only`/`idempotent`/`write`/`destructive` annotation; `task cancel` is exposed (annotated `destructive`); hard `note delete`/`task delete` and admin ops stay human-only. See root [product.md](../../product.md) Open Question #2.

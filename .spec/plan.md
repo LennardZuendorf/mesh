@@ -72,4 +72,4 @@ This single linear arc **is** the roadmap (small, single-goal repo). Cross-featu
 
 ## Current Focus
 
-Bootstrapping the spec is complete; the next gate is human sign-off to begin implementing **notes** (feature 1). No code lands until that feature's plan units are approved. No work starts on `tasks` until `notes` is DONE.
+The spec has passed a review-and-hardening pass (internal consistency, persona walk-throughs, and a competitive read against GBrain and the agent-memory field): the note `type → folder` map, exit-code ownership, config keys, `task release`, cancel-unblocks-dependents, minimal `task list` status/ownership visibility, MCP tool annotations + exposed `task cancel`, and daemon-independent wikilink resolution are all now specified, and every feature's Open Questions are closed. The next gate is human sign-off on the **notes** (feature 1) unit plan — see [features/notes/plan.md](features/notes/plan.md). No code lands until those units are approved; no work starts on `tasks` until `notes` is DONE.

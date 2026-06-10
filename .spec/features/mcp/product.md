@@ -29,7 +29,7 @@ The MCP surface lets agents drive Brain natively, over the same daemon and the s
 
 ### Requirement: Expose safe commands as MCP tools
 
-The system SHALL expose the note/task/search commands as `brain_*` MCP tools backed by the same daemon, returning JSON, and MUST withhold destructive and infrastructure operations from the agent surface.
+The system SHALL expose the note/task/search commands as `brain_*` MCP tools backed by the same daemon, returning JSON; each tool MUST carry a behaviour annotation (`read-only` | `idempotent` | `destructive`) so an agent can self-select safe tools; and the surface MUST withhold hard-delete and infrastructure operations.
 
 #### Scenario: Agent claims a task over MCP
 
@@ -37,11 +37,11 @@ The system SHALL expose the note/task/search commands as `brain_*` MCP tools bac
 - **When** it calls `brain_task_claim`
 - **Then** the same atomic claim runs as the CLI path and JSON is returned
 
-#### Scenario: Destructive ops are not agent-callable
+#### Scenario: Tools are annotated and hard-deletes are withheld
 
 - **Given** the MCP tool list
 - **When** an agent inspects it
-- **Then** `task cancel`, `task delete`, `note delete`, and admin commands (`daemon`, `reindex`, `status`) are absent
+- **Then** every tool carries a `read-only`/`idempotent`/`destructive` annotation; `brain_task_cancel` is present (annotated `destructive`, but reversible coordination); and `note delete`, `task delete`, and admin commands (`daemon`, `reindex`, `status`) are absent
 
 ### Requirement: Warm-start context injection
 
@@ -68,4 +68,4 @@ Reference requirements as R1, R2 in the feature plan's Requirements Trace.
 ## Non-Goals
 
 - No MCP-only capability — every tool maps to an existing CLI command.
-- No exposure of destructive or infrastructure operations to agents.
+- No exposure of hard-delete (`note delete`, `task delete`) or infrastructure operations (`daemon`, `reindex`, `status`) to agents. Reversible coordination (`task cancel`) is exposed but annotated `destructive`.

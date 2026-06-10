@@ -70,8 +70,10 @@ src/brain/storage/sandbox.py
 
 **Test scenarios:**
 
-- A created note validates against the schema and lands under the type-derived subfolder.
-- Path escapes outside `tolaria_path` are rejected.
+- A `type: note` lands at `notes/<id>.md` (root); `type: decision|log|reference` lands under `notes/decisions/|logs/|references/` per the root `type → folder` map.
+- A created note validates against the schema; hash ID is `n-` + `b32(sha256(created+\0+title))[:4]`; a forced hash collision extends by one char.
+- Atomic write is temp-file + `os.replace`; no partial file is ever observable.
+- Path escapes outside `tolaria_path` (`..`, absolute, symlink) are rejected.
 
 **Verification:** `uv run pytest tests/notes/test_schema.py tests/notes/test_storage.py`
 
@@ -93,7 +95,9 @@ src/brain/cli/note.py
 
 **Test scenarios:**
 
-- `brain note new` writes a valid file and prints the ID and path.
+- `brain note new` writes a valid file and prints `<id>  <path>`; `--json` prints `{id, path}`.
+- Body source order is `--body` → `--file` → `$EDITOR`; on a non-interactive path (no TTY / `--json`) with neither `--body` nor `--file`, it exits `2` instead of launching an editor.
+- `--owner` defaults to `$BRAIN_AGENT` when omitted.
 
 **Verification:** `uv run pytest tests/notes/test_new.py`
 
@@ -140,8 +144,9 @@ src/brain/core/notes.py
 
 **Test scenarios:**
 
-- `note get` defaults to frontmatter + 200-char preview; `--full` returns the body.
-- `note list --tags --since` filters correctly.
+- `note get` defaults to frontmatter + 200-char preview; `--full` returns the body; `--meta-only` drops the body.
+- `note get <slug>` resolves a slug to its ID; an ambiguous slug exits `2` and lists candidates; an unknown id|slug exits `3`.
+- `note list --tags a,b` is AND; `--any-tag` is OR; `--since 7d` and `--since <ISO>` both filter by recency; `--sort` honours updated|created|title.
 
 **Verification:** `uv run pytest tests/notes/test_get_list.py`
 
@@ -163,8 +168,9 @@ src/brain/core/wikilinks.py
 
 **Test scenarios:**
 
-- Title and ID links resolve into a deduplicated `related` array.
-- Unresolvable links stay verbatim and are reported as dangling.
+- `[[Title]]`, `[[n-id]]`, and `[[t-id]]` resolve into a deduplicated `related` array; resolution runs on an on-disk scan with no daemon.
+- Unresolvable links stay verbatim in the body and are reported as dangling.
+- A resolved task ID in `related` provides the note↔task provenance link.
 
 **Verification:** `uv run pytest tests/notes/test_wikilinks.py`
 
@@ -193,6 +199,14 @@ src/brain/core/notes.py
 **Verification:** `uv run pytest tests/notes/test_delete.py`
 
 ---
+
+## Execution Order
+
+Units are sequential along their dependency chain: `notes/1 → notes/2 → {notes/3, notes/4, notes/6}`, then `notes/3 → notes/5`. `notes/4` and `notes/6` may proceed in parallel once `notes/2` lands. The whole feature is `DONE` when all six units pass and `brain note` round-trips a note over the vault with no daemon.
+
+## Open Questions
+
+None. Slug normalization, headless-create, folder routing, recency `--since`, and daemon-independent wikilink resolution are specified in [tech.md](tech.md) and root [tech.md](../../tech.md). Ready for the human gate to begin the build.
 
 ## Progress
 

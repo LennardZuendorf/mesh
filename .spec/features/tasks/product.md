@@ -20,7 +20,7 @@ The `task` verb is how work is coordinated and handed off. A task is a note with
 
 | | |
 |---|---|
-| **Owns** | The `brain task` command surface; task lifecycle (`open`/`claimed`/`done`/`cancelled`); the `status`, `priority`, `claimed_by`, `blocks`, `blocked_by` fields; atomic claim and idempotent finish; readiness computation; coordination exit codes (`4` claimed, `5` blocked) |
+| **Owns** | The `brain task` command surface; task lifecycle (`open`/`claimed`/`done`/`cancelled`); the `status`, `priority`, `claimed_by`, `blocks`, `blocked_by` fields; atomic claim, idempotent finish, idempotent cancel (which unblocks dependents), release; readiness computation; listing by status/owner/`--mine`; coordination exit codes (`4` claimed; `5` blocked, emitted only by the opt-in `claim --strict` gate) |
 | **Does not own** | Note bodies and note-only fields (notes feature); the shared frontmatter/ID/atomic-write contracts (root tech.md); search/ranking (search feature); the watcher (daemon feature) |
 
 ---
@@ -67,15 +67,35 @@ The system SHALL report tasks that are `open`, unclaimed, and have all `blocked_
 - **When** an agent runs `brain task ready --owner flights-agent`
 - **Then** only unblocked, unclaimed tasks are returned, JSON-friendly
 
+### Requirement: Release a claimed task
+
+The system SHALL release a claimed task back to `open` — clearing `claimed_by` and setting `status: open` — so an agent can hand back work it cannot finish. Release is idempotent on an already-open task.
+
+#### Scenario: Hand work back
+
+- **Given** a task `t-c7d1` claimed by `flights-agent`
+- **When** `brain task release t-c7d1` runs
+- **Then** `claimed_by` becomes `~`, `status` becomes `open`, and the task is `ready` again if its `blocked_by` are all `done`
+
+### Requirement: List tasks by status and ownership
+
+The system SHALL list tasks filtered by `--status` (`open`/`claimed`/`done`/`cancelled`), `--owner`, `--mine`, and tags — so the operator can see in-progress work and an agent can recover the tasks it has claimed but not finished.
+
+#### Scenario: See what I am mid-way through
+
+- **Given** several tasks across statuses
+- **When** an agent runs `brain task list --mine --status claimed --json`
+- **Then** only its own claimed, unfinished tasks are returned
+
 ### Requirement: Cancel or delete a task
 
-The system SHALL cancel a task — appending an optional `--reason`, setting `status: cancelled`, and moving it to `tasks/done/` — and SHALL delete a task as a hard, `--force`-guarded removal of the file.
+The system SHALL cancel a task — appending an optional `--reason`, setting `status: cancelled`, moving it to `tasks/done/`, and removing its ID from every dependent's `blocked_by` (symmetric with `finish`, so cancelling a blocker never strands its dependents) — and SHALL delete a task as a hard, `--force`-guarded removal of the file. Cancel is idempotent.
 
-#### Scenario: Cancel a task
+#### Scenario: Cancel a task and clear its dependents
 
-- **Given** an open task `t-c7d1`
+- **Given** an open task `t-c7d1` that is `blocked_by` of a downstream task
 - **When** `brain task cancel t-c7d1 --reason "no longer relevant"` runs
-- **Then** its `status` becomes `cancelled`, the reason is recorded, and the file moves to `tasks/done/`
+- **Then** its `status` becomes `cancelled`, the reason is recorded, the file moves to `tasks/done/`, and the downstream task's `blocked_by` no longer lists `t-c7d1`
 
 #### Scenario: Guarded delete
 
@@ -83,7 +103,7 @@ The system SHALL cancel a task — appending an optional `--reason`, setting `st
 - **When** `brain task delete t-c7d1 --force` runs
 - **Then** the file is removed and the task no longer appears in `task list`
 
-Reference requirements as R1, R2, R3, R4, R5 in the feature plan's Requirements Trace.
+Reference requirements as R1–R7 in the feature plan's Requirements Trace (R5 = cancel/delete, R6 = release, R7 = list by status/ownership).
 
 ## User Experience
 

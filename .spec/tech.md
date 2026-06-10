@@ -56,14 +56,14 @@ Cross-cutting contracts that span every feature. Feature folders consume these; 
 
 | Contract | Location | Invariant |
 |---|---|---|
-| **Note/task frontmatter** | `schemas/note.py`, `schemas/task.py` | A task is a note with `type: task`. Only agreed keys are written; unknown keys round-trip untouched. `created`/`updated` are ISO-8601 UTC; `updated` bumps on every write. |
+| **Note/task frontmatter** | `schemas/note.py`, `schemas/task.py` | A task is a note with `type: task`. Only agreed keys are written; unknown keys round-trip untouched. `created`/`updated` are ISO-8601 UTC. `updated` bumps on any **content or frontmatter write** (create, append, field update, claim, finish, cancel); a pure index reconcile or folder-move that the watcher applies to match frontmatter does **not** bump `updated`. |
 | **Hash IDs** | `core/ids.py` | `<prefix>-<hash>`, `hash = b32(sha256(created_iso + "\0" + title))[:4]`, lowercased. `n-` for any note type, `t-` for tasks. Never sequential. Collisions extend the hash by one char until unique. |
-| **Folder routing** | `storage/files.py` | File location is *derived* from `type`/`status`, never authoritative on its own; frontmatter and folder must agree, reconciled on watch events. Notes under `notes/{observations,decisions,logs,references}/`; tasks under `tasks/{open,done}/`. |
+| **Folder routing** | `storage/files.py` | File location is *derived* from `type`/`status`, never authoritative on its own; frontmatter and folder must agree, reconciled on watch events. Note `type → folder`: `note → notes/` (root), `log → notes/logs/`, `decision → notes/decisions/`, `reference → notes/references/`. Tasks route by `status`: `open`/`claimed → tasks/open/`, `done`/`cancelled → tasks/done/`. |
 | **Atomic write** | `storage/files.py` | Every write is temp-file + `os.replace`. No partial writes are ever observable. |
 | **Atomic claim lock** | `storage/locks.py` | `task claim` acquires `O_EXCL` on `tasks/.locks/<id>.lock`, re-reads frontmatter, verifies `claimed_by == ~`, writes, releases. Two agents cannot both win. Runs identically in daemon and fallback mode. |
 | **Path sandbox** | `storage/sandbox.py` | Every resolved path must remain within `tolaria_path` after `realpath`; `..` traversal, absolute escapes, and symlink escapes are rejected. IDs/slugs map to files through the index, never raw user paths. |
-| **Exit codes** | `cli/` | `0` success · `1` generic error · `2` usage/validation · `3` not found · `4` already claimed · `5` blocked. |
-| **Configuration** | `~/.brain/config.toml` + `$BRAIN_AGENT` | `[core]` (tolaria_path, agent_name), `[search]` (embedder, hybrid, threshold), `[tasks]` (collections). `$BRAIN_AGENT` overrides `agent_name` per session and drives `--owner`/`--mine`. Embedder API keys come from env/keyring — never the vault or `config.toml`. |
+| **Exit codes** | `cli/` | `0` success · `1` generic error · `2` usage/validation · `3` not found · `4` already claimed · `5` blocked. `4` is emitted only by `task claim` (lost race). `5` is emitted only by the opt-in strict gate `task claim --strict` on a task with unfinished `blocked_by`; the default `claim`/`finish` never emit `5`. |
+| **Configuration** | `~/.brain/config.toml` + `$BRAIN_AGENT` | `[core]` (`tolaria_path`, `agent_name`), `[search]` (`embedder`, `hybrid` = bool, default `true`; `false` forces lexical-only · `threshold` = float `0.0–1.0`, default `0.65`), `[tasks]` (`collections` = the known set of valid agent identities, used to validate `--owner`/`claimed_by` and to group `--mine`; **not** a folder split). `$BRAIN_AGENT` overrides `agent_name` per session and drives `--owner`/`--mine`. Embedder API keys come from env/keyring — never the vault or `config.toml`. |
 
 ---
 

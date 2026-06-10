@@ -31,7 +31,7 @@ src/brain/cli/admin.py       # daemon start|stop|status, reindex, status
 
 - **Transport.** Unix domain socket in a per-user runtime dir, created `0600`, owned by the running user, so other local users cannot drive it. Requests/responses are JSON framed over the socket. (Windows: loopback TCP or named pipe fallback — see open questions.)
 - **Warm state held:** parsed frontmatter index, wikilink/ID resolution graph, BM25 term index, embedding cache keyed off the embedder.
-- **Admin commands:** `daemon start|stop|status`; `reindex` (full rebuild from the folder); `status` (counts: notes, tasks by status, index freshness — last event and pending re-embeds — and dangling links).
+- **Admin commands:** `daemon start|stop|status` (daemon process lifecycle — `daemon status` reports whether the daemon is up and the socket path); `reindex` (full rebuild from the folder); and the distinct top-level `brain status` (vault/index health: counts of notes and tasks-by-status, index freshness — last watch event and pending re-embeds — and dangling links). `brain status` ≠ `brain daemon status`: the former describes the data, the latter the process. `brain status` is intentionally a health report, not a team work-dashboard — in-progress and per-owner work is surfaced by `task list --status/--owner/--mine`.
 
 ## Implementation Detail
 

@@ -37,7 +37,7 @@ Note frontmatter (see root tech.md for the canonical schema invariant):
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `id` | string | yes | `n-` + hash; assigned on create, never changes |
-| `type` | enum | yes | `note` \| `log` \| `decision` \| `reference`; drives subfolder |
+| `type` | enum | yes | `note` \| `log` \| `decision` \| `reference`; drives folder (`note → notes/` root; others → `notes/<type-plural>/`), per root tech.md routing |
 | `title` | string | yes | Human title; also feeds the ID hash |
 | `tags` | list[str] | no | Lowercase; AND/OR filtering and tag-pull |
 | `owner` | string | no | Defaults to `$BRAIN_AGENT` / `agent_name` |
@@ -49,23 +49,23 @@ Command surface:
 
 | Command | Args | Description |
 |---|---|---|
-| `note new` | `"<title>" [--type] [--tags] [--owner] [--body "<str>"] [--file <path>]` | Create a note; `--file` ingests body, else `$EDITOR` |
+| `note new` | `"<title>" [--type] [--tags] [--owner] [--body "<str>"] [--file <path>]` | Create a note. Body source: `--body`, else `--file`, else `$EDITOR` **only on an interactive TTY**; on a machine path (`--json`/MCP/no TTY) with no `--body`/`--file`, exit `2` rather than block on an editor |
 | `note append` | `<id\|slug> "<content>" [--section "<heading>"] [--timestamp]` | Append content, optionally under a heading / with a timestamp |
 | `note update` | `<id\|slug> [--title] [--tags (+tag/-tag)] [--type] [--body]` | Update fields; `+tag`/`-tag` add/remove, bare list replaces |
 | `note delete` | `<id\|slug> [--force]` | Hard delete; prompts unless `--force` |
-| `note get` | `<id\|slug> [--full \| --meta \| --related]` | Default: frontmatter + first 200 chars; `--full` returns the whole body, `--meta` frontmatter only, `--related` inlines related notes' frontmatter |
-| `note list` | `[--tags] [--owner] [--type] [--since <ISO>] [--limit 20] [--sort updated\|created\|title]` | List notes |
+| `note get` | `<id\|slug> [--full \| --meta-only \| --related]` | Default: frontmatter + first 200 chars; `--full` returns the whole body, `--meta-only` frontmatter only, `--related` inlines related notes' frontmatter (resolved on-disk, daemon-independent) |
+| `note list` | `[--tags] [--owner] [--type] [--since <ISO\|duration>] [--limit 20] [--sort updated\|created\|title]` | List notes; `--since` accepts an ISO timestamp or a duration (e.g. `24h`, `7d`) for "what changed recently" |
 
 ## Implementation Detail
 
 - **Section-aware append.** `--section "<heading>"` finds the matching `##` heading and appends beneath it, creating the heading at the end if absent. `--timestamp` prefixes the appended block with an ISO-8601 line. The whole note is rewritten atomically (temp + `os.replace`).
 - **Field updates.** `--tags +x,-y` mutates the set additively; a bare `--tags a,b` replaces it. `--type` changes drive a folder move (atomic rename) to keep folder routing consistent with frontmatter.
-- **Slug resolution.** `<id|slug>` accepts a kebab-cased title resolved to an ID through the index; ambiguous slugs error and ask for the ID.
+- **Slug resolution.** `<id|slug>` accepts either a hash ID or a slug. An argument matching `^[nt]-[a-z0-9]{4,}$` is treated as an ID; anything else is a slug. A slug is the title lowercased, non-alphanumerics collapsed to single hyphens, leading/trailing hyphens trimmed. Slugs resolve to an ID through the index by exact normalized-title match; a slug matching two or more notes errors with exit `2` and lists the candidate IDs.
 
 <!-- merge -->
-Wikilink resolution is shared with tasks and the daemon's index: `core/wikilinks.py` resolves `[[Title]]` (title match → ID) and `[[t-c7d1]]` (ID passthrough), maintaining a deduplicated `related` set. Unresolvable links stay verbatim in the body and surface via `brain status` as dangling. This belongs to the project-wide resolution contract.
+Wikilink resolution is shared with tasks and the daemon's index: `core/wikilinks.py` resolves `[[Title]]` (normalized-title match → ID), `[[n-id]]`, and `[[t-id]]` (ID passthrough), maintaining a deduplicated `related` set. It runs against an on-disk title/ID scan and is **daemon-independent** — the daemon only caches the resolution, so wikilinks resolve identically when the daemon is down (and in feature 1, before a daemon exists). Unresolvable links stay verbatim in the body and surface via `brain status` as dangling. This belongs to the project-wide resolution contract.
 <!-- /merge -->
 
 ## Open Questions
 
-1. **`slug` definition.** Confirm slug = kebab-cased title resolved via the index, with ambiguous slugs erroring. *Default:* yes.
+None — slug normalization, headless-create behaviour, folder routing, and daemon-independent wikilink resolution are now specified above.

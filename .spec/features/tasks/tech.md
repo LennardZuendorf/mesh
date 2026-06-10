@@ -19,7 +19,7 @@ Tasks reuse the note schema and storage primitives and add a status machine plus
 ## Files
 
 ```
-src/brain/cli/task.py        # brain task new|update|delete|claim|finish|cancel|list|get|ready
+src/brain/cli/task.py        # brain task new|update|delete|claim|finish|release|cancel|list|get|ready
 src/brain/core/tasks.py      # lifecycle, claim/finish, blocks/blocked_by, readiness
 src/brain/storage/locks.py   # O_EXCL lockfiles for atomic claim
 src/brain/schemas/task.py    # pydantic Task model (note fields + extras)
@@ -47,13 +47,14 @@ Command surface:
 |---|---|---|
 | `task new` | `"<title>" [--tags] [--owner] [--priority] [--blocks] [--blocked-by] [--body]` | Create in `tasks/open/` |
 | `task update` | `<id> [--title] [--tags +/-] [--priority] [--blocks] [--blocked-by] [--body]` | Update fields |
-| `task claim` | `<id> [--owner <name>]` | Atomic claim; sets `claimed_by`, `status=claimed`; fails (exit 4) if taken |
+| `task claim` | `<id> [--owner <name>] [--strict]` | Atomic claim; sets `claimed_by`, `status=claimed`; fails (exit 4) if taken. `--strict` refuses (exit 5) a task with unfinished `blocked_by` |
 | `task finish` | `<id> [--outcome "<summary>"]` | Append outcome, move to `done/`, unblock dependents |
-| `task cancel` | `<id> [--reason "<str>"]` | Cancel; append reason, set `status=cancelled`, move to `done/` |
+| `task release` | `<id>` | Return a claimed task to `open`: clear `claimed_by`, set `status=open`; idempotent |
+| `task cancel` | `<id> [--reason "<str>"]` | Cancel; append reason, set `status=cancelled`, move to `done/`, **unblock dependents** (same as finish); idempotent |
 | `task delete` | `<id> [--force]` | Hard delete; prompts unless `--force` |
-| `task list` | `[--status (default open)] [--tags] [--owner] [--mine] [--ready] [--limit 20]` | List tasks |
-| `task get` | `<id> [--full \| --meta]` | Show a task |
-| `task ready` | `[--owner] [--tags]` | Unblocked, unclaimed tasks; JSON-friendly |
+| `task list` | `[--status open\|claimed\|done\|cancelled (default open)] [--tags] [--owner] [--mine] [--limit 20]` | List tasks; combine `--mine --status claimed` for "my in-progress work" |
+| `task get` | `<id> [--full \| --meta-only]` | Show a task |
+| `task ready` | `[--owner] [--tags]` | Unblocked, unclaimed tasks; JSON-friendly. Equivalent to `list --status open` filtered to fully-unblocked tasks |
 
 All commands accept the global `--json` (machine-readable) and `--quiet` (IDs/paths only) flags; `task ready` and `task list` are JSON-friendly by default.
 
@@ -64,7 +65,8 @@ Lifecycle: `open → claimed` (claim) · `claimed → open` (release/re-claim) �
 - **Atomic claim.** Acquire `O_EXCL` on `tasks/.locks/<id>.lock`; under the lock, re-read frontmatter, verify `claimed_by == ~`, write `claimed_by` + `status=claimed` via temp + `os.replace`, release. If already claimed by another, exit `4` without mutation. `O_EXCL` create is the portable atomic test-and-set; an atomic-rename variant is equivalent on the same filesystem.
 - **Idempotent finish.** Three individually-atomic steps: (1) append outcome + `status=done`; (2) rename `tasks/open/<id>.md → tasks/done/<id>.md`; (3) for each dependent listing `<id>` in `blocked_by`, remove the entry. The whole op is idempotent — re-running on a done task, or removing an already-gone entry, is a no-op. Crash recovery is "run it again."
 - **Readiness.** A task is *ready* when it is `open`, unclaimed, and every `blocked_by` task is `done`. `task ready` and `--mine` (`owner == $BRAIN_AGENT or claimed_by == $BRAIN_AGENT`) answer "what should I pick up?"
-- **Cancel and delete.** `task cancel` appends an optional `--reason`, sets `status=cancelled`, and atomically renames into `tasks/done/`. `task delete` is a hard removal of the file, prompting unless `--force`.
+- **Release.** `task release` clears `claimed_by` (→ `~`) and sets `status=open` via temp + `os.replace`; on an already-open task it is a no-op. The file stays in `tasks/open/`.
+- **Cancel and delete.** `task cancel` appends an optional `--reason`, sets `status=cancelled`, atomically renames into `tasks/done/`, and then runs the same dependent-unblock pass as `finish` (remove `<id>` from each task listing it in `blocked_by`). The whole op is idempotent. `task delete` is a hard removal of the file, prompting unless `--force`.
 - **Exit codes.** `claim` returns `4` when the task is already claimed by another (above). Exit `5` (blocked) is reserved for an operation refused because the task still has unfinished `blocked_by` prerequisites — e.g. a strict claim/start gate. The default `claim` does **not** enforce readiness (an agent may claim a blocked task); see the Open Question for which command, if any, enforces `5`.
 
 <!-- merge -->
@@ -73,5 +75,4 @@ The atomic-claim (`O_EXCL`) and idempotent multi-file finish patterns are the pr
 
 ## Open Questions
 
-1. **`release`/`unclaim` command.** The lifecycle allows `claimed → open` but no command exposes it. *Default:* add `brain task release <id>` (clears `claimed_by`, status→open); confirm naming.
-2. **Exit `5` (blocked) trigger.** Which command, if any, refuses an action on a still-blocked task? *Default:* reserve `5` for an opt-in strict gate (e.g. `task claim --strict` / a future `task start`); the default `claim`/`finish` do not enforce readiness. Confirm before IMPL.
+None. *Resolved (2026-06-10):* (1) `brain task release <id>` exposes the `claimed → open` transition; (2) exit `5` (blocked) is emitted **only** by the opt-in `task claim --strict` gate on a task with unfinished `blocked_by` — the default `claim`/`finish` never enforce readiness.

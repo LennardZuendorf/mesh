@@ -11,6 +11,8 @@ Brain is a thin coordination layer over a single Tolaria Markdown folder. It giv
 
 **One-liner:** Three verbs, one daemon, one folder, all agents — notes + search are the memory, tasks are the handoff.
 
+**Positioning:** A shared Markdown brain for a human and their agents — *memory and handoff in one folder, with no database to run.* Memory tools (Mem0, Zep, Letta, Cognee, Basic Memory) remember but don't coordinate; coordination tools (shared task files, agent-team task lists) coordinate but don't remember. Brain does both over one plain-Markdown substrate, and unlike the maximalist take ([GBrain](https://github.com/garrytan/gbrain): Markdown → Postgres/pgvector, an entity knowledge graph, a synthesis layer, a background enrichment loop, and a job queue), Brain keeps crash-safe, idempotent handoff with **no running process required** — the daemon only accelerates, it never gates.
+
 ---
 
 ## Story
@@ -80,10 +82,14 @@ Feature-level UX and requirements live in `features/<name>/product.md` — not h
 
 ## Non-Goals
 
-- **No "memory" primitive.** Notes + search *are* memory.
+- **No "memory" primitive.** Memory is just notes you can search — the same files a human and their agents already read and write. There is no second store.
 - **No separate handoff primitive.** Tasks + claim/finish + blocks/blocked_by *are* handoff.
+- **No database to operate.** No SQL, no vector DB. The embedder backend (indexed.sh) owns embeddings and their storage; everything else is Markdown on disk. (Contrast GBrain, which syncs Markdown into Postgres/pgvector.)
 - **No Todoist or external task backend.** Tasks are Markdown files in the Tolaria folder.
-- **No vector DB to operate.** The embedder backend (indexed.sh) owns embeddings and their storage.
+- **No background enrichment loop.** No "dream cycle" dedup, salience scoring, or contradiction-finding — Brain reflects the files as they are; the calling agent does the thinking.
+- **No synthesis / answer layer.** `search` returns ranked files with a `path`; the agent reads and synthesizes. Brain never composes prose answers.
+- **No job queue or orchestration.** Tasks are durable *state*, not a runtime — the agent loop owns scheduling and execution.
+- **No knowledge graph.** Wikilinks resolve to a flat, deduplicated `related` set; there is no typed-edge entity graph to maintain.
 - **No web dashboard, no RBAC.** The terminal, the files, and `$BRAIN_AGENT` are the whole access model.
 - **No sequential IDs.** IDs are short content hashes.
 - **No git sync.** The Tolaria folder already is a Git repo; sync is Tolaria's job.
@@ -92,5 +98,5 @@ Feature-level UX and requirements live in `features/<name>/product.md` — not h
 ## Open Questions
 
 1. **indexed.sh interface (blocking).** Exact CLI flags, query syntax, and output format are unconfirmed. *Default:* wrap it behind the `indexed` embedder adapter; assume it produces document embeddings the daemon caches; fall back to BM25-only if unavailable.
-2. **MCP destructive-op surface.** Should any destructive op (`note delete`, `task delete`/`cancel`) be agent-callable? *Recommended default:* withhold all destructive ops from MCP; humans run them from a shell.
-3. **`[tasks].collections` semantics.** Allow-list of valid agent identities vs. folder split vs. display grouping. *Default:* the known set of agent identities for validation and `--mine`/grouping; not a folder split.
+2. **MCP destructive-op surface.** *Resolved (2026-06-10):* every MCP tool is annotated `read-only` / `idempotent` / `destructive` (Basic-Memory-style) so agents self-select safe tools. `task cancel` is exposed (it is reversible coordination, moving the file to `done/`, not data loss); hard `note delete` / `task delete` and admin ops (`daemon`, `reindex`, `status`) stay human-only. See [features/mcp/product.md](features/mcp/product.md).
+3. **`[tasks].collections` semantics.** *Resolved (2026-06-10):* the known set of valid agent identities, used to validate `--owner`/`claimed_by` and to group `--mine`; **not** a folder split. See [tech.md](tech.md) State / Data Contracts.

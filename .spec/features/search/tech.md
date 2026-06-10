@@ -52,6 +52,7 @@ Result schema:
 - **Tag-pull fast path.** `--tags` with no query skips both retrievers entirely and returns matching documents by frontmatter alone — zero embedding cost, fully reproducible.
 - **Daemon-down degradation.** When the daemon or embedder is unavailable, only the lexical retriever runs; results keep the same JSON shape and a one-line notice is printed to stderr (suppressed under `--quiet`). The connect-then-fallback path itself is owned by the daemon feature.
 - **Embedder pluggability.** `[search].embedder` selects `indexed | openai | local` behind one adapter interface (`embed(texts) -> vectors`). Switching embedders requires only a `brain reindex` (the `reindex` command is owned by the daemon feature).
+- **Hybrid toggle.** `[search].hybrid` (default `true`) gates the semantic retriever: `false` forces lexical-only even when a daemon/embedder is available — the same code path as daemon-down degradation, minus the stderr notice. `--threshold` (default `0.65` from config) overrides the configured value per call.
 
 ## Performance Budget
 

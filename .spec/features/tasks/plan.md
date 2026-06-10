@@ -33,6 +33,8 @@ Once memory exists, agents need to pass work without a human relay. This plan ad
 | R3 | [Idempotent finish that unblocks dependents](product.md#requirement-idempotent-finish-that-unblocks-dependents) | tasks/4 |
 | R4 | [Find ready work](product.md#requirement-find-ready-work) | tasks/5 |
 | R5 | [Cancel or delete a task](product.md#requirement-cancel-or-delete-a-task) | tasks/5, tasks/6 |
+| R6 | [Release a claimed task](product.md#requirement-release-a-claimed-task) | tasks/5 |
+| R7 | [List tasks by status and ownership](product.md#requirement-list-tasks-by-status-and-ownership) | tasks/5 |
 
 Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
@@ -144,11 +146,11 @@ src/brain/cli/task.py
 
 ---
 
-### tasks/5 — Readiness, listing, cancel
+### tasks/5 — Readiness, listing, release, cancel
 
-**Goal:** `task ready`/`--mine`/`--ready` readiness computation, `task list`/`get`, and `task cancel` (reason + move to `done/`).
+**Goal:** `task ready` readiness computation; `task list --status/--owner/--mine`; `task get`; `task release` (claimed → open); and `task cancel` (reason + move to `done/` + unblock dependents).
 
-**Requirements:** R4, R5
+**Requirements:** R4, R5, R6, R7
 
 **Dependencies:** tasks/4
 
@@ -161,10 +163,12 @@ src/brain/cli/task.py
 
 **Test scenarios:**
 
-- `task ready` returns only open, unclaimed, fully-unblocked tasks.
-- `--mine` matches owner or claimer.
+- `task ready` returns only open, unclaimed, fully-unblocked tasks; `--mine` matches owner or claimer.
+- `task list --status claimed --mine` returns only the caller's claimed, unfinished tasks.
+- `task release` returns a claimed task to `open`, clearing `claimed_by`; re-running is a no-op.
+- `task cancel` sets `status=cancelled`, moves to `done/`, and removes the ID from a dependent's `blocked_by`; re-running is a no-op.
 
-**Verification:** `uv run pytest tests/tasks/test_ready_list.py`
+**Verification:** `uv run pytest tests/tasks/test_ready_list.py tests/tasks/test_release_cancel.py`
 
 ---
 

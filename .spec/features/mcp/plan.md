@@ -65,7 +65,8 @@ src/brain/mcp/server.py
 **Test scenarios:**
 
 - `brain_task_claim` runs the same atomic claim as the CLI and returns JSON.
-- `task cancel`/`task delete`/admin commands are absent from the tool list.
+- Every exposed tool carries a `read-only`/`idempotent`/`write`/`destructive` annotation.
+- `brain_task_cancel` is present (annotated `destructive`); `note delete`/`task delete`/admin commands are absent from the tool list.
 
 **Verification:** `uv run pytest tests/mcp/test_tools.py`
 
@@ -82,12 +83,14 @@ src/brain/mcp/server.py
 **Files:**
 
 ```
-src/brain/mcp/server.py
+hooks/session_start.json     # Claude Code SessionStart hook config (the deliverable artifact)
+docs/mcp-setup.md            # how to install the hook
 ```
 
 **Test scenarios:**
 
 - The hook command emits compact `--meta-only --json` output suitable for injection.
+- The hook is a `SessionStart` (not `PreToolUse`) entry and runs once per session.
 
 **Verification:** `uv run pytest tests/mcp/test_session_hook.py`
 

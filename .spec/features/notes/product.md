@@ -29,13 +29,19 @@ The `note` verb captures and recalls knowledge as plain Markdown files in the To
 
 ### Requirement: Create notes
 
-The system SHALL create a note as a single Markdown file with schema-valid YAML frontmatter and a content-hash ID, routed to a subfolder derived from its `type` (`note` | `log` | `decision` | `reference`).
+The system SHALL create a note as a single Markdown file with schema-valid YAML frontmatter and a content-hash ID, routed by `type`: the default `note` lands directly under `notes/`; `log`, `decision`, and `reference` land under `notes/logs/`, `notes/decisions/`, `notes/references/` respectively (canonical `type → folder` map in root [tech.md](../../tech.md)).
 
 #### Scenario: Capture a decision
 
 - **Given** an operator runs `brain note new "Use CLID fallback for Lufthansa GDS" --type decision --tags ndc,lufthansa`
 - **When** the command completes
 - **Then** a `.md` file is written under `notes/decisions/` with a `n-` hash ID, `created`/`updated` timestamps, and the given title and tags
+
+#### Scenario: Headless create requires a body source
+
+- **Given** an agent runs `brain note new "..."` over MCP or with `--json` and supplies neither `--body` nor `--file`
+- **When** the command runs on a non-interactive (machine) path
+- **Then** it exits `2` (usage) rather than launching `$EDITOR`; an interactive terminal session still opens `$EDITOR`
 
 ### Requirement: Amend notes without rewriting
 
@@ -49,7 +55,7 @@ The system SHALL append content (optionally under a named heading and/or with a 
 
 ### Requirement: Retrieve and list notes
 
-The system SHALL return a note by `<id|slug>` (frontmatter + a body preview by default; `--full`, `--meta`, or `--related` on request) and MUST list notes filtered by tags, owner, type, and recency.
+The system SHALL return a note by `<id|slug>` (frontmatter + a body preview by default; `--full`, `--meta-only`, or `--related` on request) and MUST list notes filtered by tags, owner, type, and recency (`--since`).
 
 #### Scenario: Read a note by ID
 
@@ -59,7 +65,7 @@ The system SHALL return a note by `<id|slug>` (frontmatter + a body preview by d
 
 ### Requirement: Resolve wikilinks
 
-The system SHALL resolve `[[Title]]` and `[[n-id]]` references in note bodies to canonical IDs and MUST maintain the `related` array as the resolved, deduplicated set, leaving unresolvable links verbatim.
+The system SHALL resolve `[[Title]]`, `[[n-id]]`, and `[[t-id]]` references in note bodies to canonical IDs and MUST maintain the `related` array as the resolved, deduplicated set, leaving unresolvable links verbatim. Resolution lives in `core/wikilinks.py` and runs against an on-disk title/ID scan, so it works identically with the daemon down (the daemon only caches the result); a task ID in `related` is the note↔task provenance link.
 
 #### Scenario: Link by title
 
