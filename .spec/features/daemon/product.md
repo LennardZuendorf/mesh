@@ -72,3 +72,10 @@ $ brain search "ndc"    # still works: lexical-only + stderr notice
 
 - No system service / init integration — the daemon is user-launched.
 - No multi-host or networked daemon — one local process per user.
+
+## Prior Art & Inspiration
+
+**Anchor — the Language Server (LSP) pattern:** a warm server holds expensive state (parsed index, graph) while thin clients connect over a socket and the editor still works if the server dies.
+
+- **Borrow:** accelerator-not-gatekeeper; warm in-memory state that is expensive to rebuild per call; thin clients (CLI and MCP) over one local socket; kill it anytime.
+- **Differ:** brain's daemon never becomes a system of record — contrast [GBrain](https://github.com/garrytan/gbrain), whose `serve` **syncs Markdown into Postgres/PGLite**. brain's warm state is ephemeral and disposable; the files on disk remain the only truth, and every write path runs identically with the daemon down.

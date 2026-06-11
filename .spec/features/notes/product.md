@@ -102,3 +102,10 @@ $ brain note get n-a3f2 --json        # machine-readable; --json is available on
 
 - Soft-delete, trash, or recovery — `note delete` is a hard, guarded removal.
 - Full-text ranking or semantic recall — that is the search feature.
+
+## Prior Art & Inspiration
+
+**Anchor — [Basic Memory](https://github.com/basicmachines-co/basic-memory):** a Markdown knowledge base where AI and humans write the *same* Obsidian-compatible files, with notes linked by relations.
+
+- **Borrow:** files as the shared substrate both a person and an agent read and write; plain Markdown a human can open and diff; links as the connective tissue.
+- **Differ:** brain keeps a flat, deduplicated `related` set, **not** a knowledge graph; there is no SQLite/DB store — the files are truth and the index lives in the daemon (Basic Memory syncs into local SQLite).

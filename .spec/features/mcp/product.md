@@ -69,3 +69,10 @@ Reference requirements as R1, R2 in the feature plan's Requirements Trace.
 
 - No MCP-only capability — every tool maps to an existing CLI command.
 - No exposure of hard-delete (`note delete`, `task delete`) or infrastructure operations (`daemon`, `reindex`, `status`) to agents. Reversible coordination (`task cancel`) is exposed but annotated `destructive`.
+
+## Prior Art & Inspiration
+
+**Anchor — [Basic Memory MCP](https://github.com/basicmachines-co/basic-memory):** an MCP server over a Markdown vault whose tools carry read-only / destructive behaviour hints so an agent can self-select safe operations.
+
+- **Borrow:** per-tool `read-only`/`idempotent`/`write`/`destructive` annotations (already adopted here); strict JSON; a 1:1 mapping from tool to the underlying command.
+- **Differ:** brain withholds hard-delete and admin entirely while exposing reversible `cancel`; adds **no** MCP-only capability; and stays local stdio over the same daemon — contrast [GBrain](https://github.com/garrytan/gbrain)'s 30+ tools with HTTP transport and OAuth 2.1.

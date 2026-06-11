@@ -83,3 +83,11 @@ Results are JSON by default; `--json` is also accepted explicitly and is availab
 
 - Managing or storing vectors — `indexed.sh` owns embeddings and their storage.
 - Re-ranking models beyond RRF + recency unless Phase-1/2 recall metrics prove a need.
+
+## Prior Art & Inspiration
+
+**Anchor — [GBrain search](https://github.com/garrytan/gbrain):** hybrid retrieval that fuses vector and BM25 results with Reciprocal Rank Fusion over a Markdown-sourced corpus.
+
+- **Borrow:** the RRF fusion model itself; always return a `path` to the source file; surface "already exists" / create-safety hints so a fleet of agents stops writing duplicate notes.
+- **Differ:** brain returns ranked *files* only — **no `think` synthesis layer** (the calling agent reads and reasons); no pgvector or DB — embeddings live behind `indexed.sh` and search degrades to BM25 when they're absent.
+- **Cousin — [memweave](https://towardsdatascience.com/memweave-zero-infra-ai-agent-memory-with-markdown-and-sqlite-no-vector-database-required/):** the same zero-infra hybrid (BM25 + vectors) over Markdown, validating "no vector DB required" as a real axis.

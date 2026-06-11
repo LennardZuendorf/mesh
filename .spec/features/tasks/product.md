@@ -117,3 +117,11 @@ $ brain task finish t-c7d1 --outcome "All J/C fares resolved via CLID fallback."
 
 - Scheduling, orchestration, or any agent runtime — Brain is not an agent platform.
 - An external task backend — tasks are Markdown files, never Todoist or an API.
+
+## Prior Art & Inspiration
+
+**Anchor — [tick-md](https://purplehorizons.io/blog/tick-md-multi-agent-coordination-markdown):** multi-agent coordination in a single git-tracked Markdown file, where agents claim tasks and a file-lock stops two agents colliding.
+
+- **Borrow:** the file *is* the coordination; a claim is a lock; everything stays inspectable in plain Markdown under Git.
+- **Differ:** brain uses an `O_EXCL` atomic test-and-set plus idempotent finish and a `blocks`/`blocked_by` dependency graph, so handoff is crash-safe with **no process running** — tick-md only locks one file; GBrain needs a Postgres job queue ("Minions") for the same guarantee.
+- **Contrast — [Claude Code Agent Teams](https://www.mindstudio.ai/blog/claude-code-agent-teams-parallel-collaboration):** a shared task list scoped to one session; brain's tasks are durable across sessions and agents.
