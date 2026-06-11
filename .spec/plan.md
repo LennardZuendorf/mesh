@@ -8,7 +8,7 @@ updated: 2026-06-10
 
 # Brain — Implementation Plan
 
-Brain is at **spec stage** — no implementation has landed yet. Delivery is a single linear arc: the five features compose into one tool, built bottom-up so each is a closed, testable box before the next starts. The MVP (Phase 1) is `notes → tasks → daemon → search`; the agent surface (`mcp`) follows in Phase 2. Current focus is the first feature, `notes`.
+Brain is at **spec stage** — no implementation has landed yet. Delivery is a single linear arc: the five features compose into one tool, built bottom-up so each is a closed, testable box before the next starts. The MVP (Phase 1) is `notes → tasks → daemon → search`; the agent surface (`memory`) follows in Phase 2. Build-vs-integrate is settled per cluster: Brain owns writes + the task core, **wraps `indexed`** for search, **coexists with Tolaria** for vault reads, and frames the agent surface as **memory**. Current focus is the first feature, `notes`.
 
 **Parent specs:** [product.md](product.md), [tech.md](tech.md), [design.md](design.md)
 
@@ -17,10 +17,10 @@ Brain is at **spec stage** — no implementation has landed yet. Delivery is a s
 | Feature | Product | Plan | Status |
 |---|---|---|---|
 | [notes](features/notes/product.md) | `.spec/` + feature | [plan.md](features/notes/plan.md) | planned |
-| [tasks](features/tasks/product.md) | `.spec/` + feature | [plan.md](features/tasks/plan.md) | planned |
+| [tasks](features/tasks/product.md) | `.spec/` + feature | [plan.md](features/tasks/plan.md) | planned (v1) |
 | [daemon](features/daemon/product.md) | `.spec/` + feature | [plan.md](features/daemon/plan.md) | planned |
 | [search](features/search/product.md) | `.spec/` + feature | [plan.md](features/search/plan.md) | planned |
-| [mcp](features/mcp/product.md) | `.spec/` + feature | [plan.md](features/mcp/plan.md) | planned |
+| [memory](features/memory/product.md) | `.spec/` + feature | [plan.md](features/memory/plan.md) | planned |
 
 ---
 
@@ -31,20 +31,20 @@ Nothing is built. All five features are spec-ahead-of-code; `src/brain/` does no
 ## Feature Boundaries
 
 ```
-notes   ── owns ──>  note schema, brain note CLI, wikilink resolution
-tasks   ── owns ──>  task schema, lifecycle, claim/finish/blocks, locks
-daemon  ── owns ──>  socket server, watcher, incremental index, fallback shim
-search  ── owns ──>  BM25, embedder adapter, RRF fusion, tag-pull, brain search
-mcp     ── owns ──>  FastMCP brain_* tools, SessionStart hook
+notes   ── owns ──>  note schema, writes, direct reads, brain note CLI, wikilink resolution
+tasks   ── owns ──>  task schema, v1 lifecycle (claim/finish/cancel/list), O_EXCL locks
+daemon  ── owns ──>  socket server, watcher, warm frontmatter index, drives indexed, fallback shim
+search  ── owns ──>  indexed wrapper, tag-pull, substring fallback, freshness bridge, brain search
+memory  ── owns ──>  FastMCP brain_* tools + annotations, recent_activity, build_context, SessionStart hook
 ```
 
 | Layer | Owns | Does not own |
 |---|---|---|
-| **notes** | `core/notes.py`, `core/wikilinks.py`, `cli/note.py`, note frontmatter | Task lifecycle, search ranking, daemon |
-| **tasks** | `core/tasks.py`, `storage/locks.py`, `cli/task.py`, task lifecycle/concurrency | Note CRUD, search ranking, daemon |
-| **daemon** | `daemon/server.py`, `daemon/client.py`, `index/watch.py`, admin commands | Ranking algorithm (search), domain logic (core) |
-| **search** | `index/bm25.py`, `index/embedder.py`, `index/fusion.py`, `cli/search.py` | The watcher/index storage (daemon), schemas |
-| **mcp** | `mcp/server.py`, tool mapping, SessionStart hook | The CLI, daemon internals, core primitives |
+| **notes** | `core/notes.py`, `core/wikilinks.py`, `cli/note.py`, note frontmatter, writes + direct reads | Task lifecycle, search ranking, daemon, the vault/git (Tolaria) |
+| **tasks** | `core/tasks.py`, `storage/locks.py`, `cli/task.py`, v1 lifecycle/concurrency | Note CRUD, search ranking, daemon, the deferred dependency graph |
+| **daemon** | `daemon/server.py`, `daemon/client.py`, `index/watch.py`, admin commands | Ranking engine (`indexed`), domain logic (core) |
+| **search** | `index/indexed_client.py`, `index/tagpull.py`, `index/fallback.py`, `cli/search.py` | The ranking engine itself (`indexed`); watcher/index (daemon); schemas |
+| **memory** | `mcp/server.py`, tool mapping + annotations, `core/activity.py`, `core/context.py`, SessionStart hook | The CLI, daemon internals, core write primitives, `indexed` |
 
 Cross-cutting contracts (frontmatter schema, IDs, atomic writes, path sandbox, exit codes, config) live in root [tech.md](tech.md), not in any one feature.
 
@@ -57,10 +57,10 @@ Whole-feature delivery order with **binary** gates — a downstream feature star
 | Order | Feature | Deliverable | Test | Status | Starts when |
 |---:|---|---|---|---|---|
 | 1 | notes | `brain note` surface, note schema, wikilinks over the vault | `tests/notes/` | NOT STARTED | — |
-| 2 | tasks | `brain task` surface, lifecycle, atomic claim/finish, blocks | `tests/tasks/` | NOT STARTED | notes DONE |
-| 3 | daemon | socket server, watcher, incremental index, daemon-down fallback | `tests/daemon/` | NOT STARTED | tasks DONE |
-| 4 | search | hybrid BM25 + embeddings + RRF, tag-pull, JSON output | `tests/search/` | NOT STARTED | daemon DONE |
-| 5 | mcp | `brain_*` MCP tools + SessionStart hook (Phase 2) | `tests/mcp/` | NOT STARTED | search DONE |
+| 2 | tasks | `brain task` v1 — atomic claim/finish, cancel, list (dependency graph deferred) | `tests/tasks/` | NOT STARTED | notes DONE |
+| 3 | daemon | socket server, watcher, warm index, drives `indexed`, daemon-down fallback | `tests/daemon/` | NOT STARTED | tasks DONE |
+| 4 | search | `indexed` wrapper + tag-pull + substring fallback + freshness bridge, JSON output | `tests/search/` | NOT STARTED | daemon DONE |
+| 5 | memory | `brain_*` MCP tools + annotations + `recent_activity`/`build_context` + SessionStart hook (Phase 2) | `tests/memory/` | NOT STARTED | search DONE |
 
 This single linear arc **is** the roadmap (small, single-goal repo). Cross-feature order is **only** here; feature plans declare same-feature unit deps only.
 
@@ -72,4 +72,4 @@ This single linear arc **is** the roadmap (small, single-goal repo). Cross-featu
 
 ## Current Focus
 
-The spec has passed a review-and-hardening pass (internal consistency, persona walk-throughs, and a competitive read against GBrain and the agent-memory field): the note `type → folder` map, exit-code ownership, config keys, `task release`, cancel-unblocks-dependents, minimal `task list` status/ownership visibility, MCP tool annotations + exposed `task cancel`, and daemon-independent wikilink resolution are all now specified, and every feature's Open Questions are closed. The next gate is human sign-off on the **notes** (feature 1) unit plan — see [features/notes/plan.md](features/notes/plan.md). No code lands until those units are approved; no work starts on `tasks` until `notes` is DONE.
+The spec has passed a review-and-hardening pass plus a **build-vs-integrate** pass per cluster (research vs Tolaria, `indexed`, tick-md, basic-memory). Settled: **notes** own writes + cheap direct reads and coexist with Tolaria's MCP; **tasks** self-build a **minimal v1** (claim/finish/cancel/list; dependency graph deferred); **search** is a thin wrapper over the first-party **`indexed`** engine (tag-pull + substring fallback retained, daemon drives `indexed index update`); the **`mcp` cluster is renamed `memory`** and gains `recent_activity` + `build_context` + a warm-start hook. One residual contract to finalize: the exact `indexed index search` flags / JSON field names (co-defined, not blocking). The next gate is human sign-off on the **notes** (feature 1) unit plan — see [features/notes/plan.md](features/notes/plan.md). No code lands until those units are approved; no work starts on `tasks` until `notes` is DONE.

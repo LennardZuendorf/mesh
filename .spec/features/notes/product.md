@@ -10,6 +10,8 @@ updated: 2026-06-10
 
 The `note` verb captures and recalls knowledge as plain Markdown files in the Tolaria vault. A note is the unit of memory: writing one is remembering, and (via the search feature) finding one is recalling. Notes are authored and consumed by both the human operator and agents.
 
+Brain **owns writes** (atomic temp+`os.replace`, hash IDs, wikilink resolution) and cheap **direct reads** (`get`/`list` by frontmatter scan), and **coexists** with Tolaria on the same folder: Tolaria owns the vault and its Git history and exposes its own filesystem-direct MCP (`read_note`/`search_notes`/`list_notes`/`get_vault_context`/…) over these very files. Brain writes vault-native files Tolaria can also serve, delegates heavy *recall* to the search feature (`indexed`), and may call Tolaria's read tools — but never depends on Tolaria running, because a note is just a Markdown file Brain can read directly.
+
 **Parent:** [../../product.md](../../product.md)
 **Architecture:** [tech.md](tech.md)
 **Plan:** [plan.md](plan.md)
@@ -21,7 +23,7 @@ The `note` verb captures and recalls knowledge as plain Markdown files in the To
 | | |
 |---|---|
 | **Owns** | The `brain note` command surface; note frontmatter (`id`, `type`, `title`, `tags`, `owner`, `created`, `updated`, `related`); body authoring (append, sections); wikilink resolution and the `related` graph |
-| **Does not own** | Task fields and lifecycle (tasks feature); ranking and retrieval (search feature); the watcher/index (daemon feature); cross-cutting schema/ID/storage contracts (root tech.md) |
+| **Does not own** | The vault, its Git history, and the Tolaria MCP's read tools (Tolaria coexists on the same folder); task fields and lifecycle (tasks feature); ranking and retrieval (search feature); the watcher/index (daemon feature); cross-cutting schema/ID/storage contracts (root tech.md) |
 
 ---
 
@@ -105,7 +107,7 @@ $ brain note get n-a3f2 --json        # machine-readable; --json is available on
 
 ## Prior Art & Inspiration
 
-**Anchor — [Basic Memory](https://github.com/basicmachines-co/basic-memory):** a Markdown knowledge base where AI and humans write the *same* Obsidian-compatible files, with notes linked by relations.
+**Coexisting tool — [Tolaria](https://github.com/refactoringhq/tolaria):** the files-first, git-first Markdown vault Brain runs over. Its standalone MCP (`read_note`/`create_note`/`append_to_note`/`edit_note_frontmatter`/`link_notes`/`search_notes`/`list_notes`/`get_vault_context`/`delete_note`) maps near-1:1 to Brain's note surface, but documents **no** atomicity/`O_EXCL`/hash-ID/wikilink guarantees — which is exactly why Brain owns writes and only delegates/aligns reads. Brain sits *beside* Tolaria on one folder, not subordinate to it.
 
-- **Borrow:** files as the shared substrate both a person and an agent read and write; plain Markdown a human can open and diff; links as the connective tissue.
-- **Differ:** brain keeps a flat, deduplicated `related` set, **not** a knowledge graph; there is no SQLite/DB store — the files are truth and the index lives in the daemon (Basic Memory syncs into local SQLite).
+- **Conceptual anchor — [Basic Memory](https://github.com/basicmachines-co/basic-memory):** AI and humans write the *same* Markdown files, linked by relations. **Borrow:** files as the shared substrate; links as connective tissue. **Differ:** Brain keeps a flat, deduplicated `related` set, not a knowledge graph, and adds no DB store.
+- **Surface reference — [mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian):** confirms the canonical note-tool surface (get/list/search/append/patch/delete), though it hard-depends on the Obsidian app — a poorer fit than Tolaria's headless, filesystem-direct server.

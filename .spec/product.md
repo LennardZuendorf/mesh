@@ -30,7 +30,7 @@ At a project level, Brain must:
 1. **Stay at three verbs.** `note`, `task`, and `search` fully cover capture, coordination, and recall over one Tolaria folder. Net-new top-level primitives require a spec change and explicit sign-off.
 2. **Keep Markdown the source of truth.** Every note and task is a human-readable `.md` file with schema-valid frontmatter; Brain owns the interface, not the data.
 3. **Make handoff work through tasks alone.** `owner`, `claimed_by`, `claim`/`finish`/`cancel`, and `blocks`/`blocked_by` are the entire coordination model — no separate handoff concept.
-4. **Recall is hybrid search.** Embeddings merged with BM25/substring, re-ranked, across notes and tasks at once, returning JSON with a `path` to the underlying file.
+4. **Recall is hybrid search via `indexed`.** Ranked retrieval (lexical + dense-vector) is delegated to the first-party `indexed` engine across notes and tasks at once; Brain returns JSON with a `path` to the underlying file and degrades to a substring scan when `indexed` is unavailable.
 5. **Identity is `$BRAIN_AGENT`.** A per-session environment variable drives `--owner` defaults and `--mine` filters with zero configuration ceremony.
 6. **Degrade gracefully.** Every command reads and writes files even when the daemon is down; the daemon is an accelerator, never a gatekeeper.
 7. **Stay inside the folder.** All file access is sandboxed to `tolaria_path`; agent content is treated as inert data, never instructions or shell input.
@@ -64,11 +64,11 @@ Not "everyone" — a concrete operator-plus-agents team sharing one Tolaria vaul
 
 | Feature | Covers |
 |---|---|
-| **[features/notes/](features/notes/product.md)** | The `note` verb — capture and recall of knowledge as Markdown notes |
-| **[features/tasks/](features/tasks/product.md)** | The `task` verb — coordination and handoff via claimable, dependency-aware task files |
-| **[features/daemon/](features/daemon/product.md)** | The warm accelerator — file watcher, indexer, socket server, graceful fallback |
-| **[features/search/](features/search/product.md)** | The `search` verb — hybrid retrieval across notes and tasks, plus deterministic tag pulls |
-| **[features/mcp/](features/mcp/product.md)** | The agent surface — MCP tools over the same daemon, plus the SessionStart context hook |
+| **[features/notes/](features/notes/product.md)** | The `note` verb — capture and recall as Markdown notes; Brain owns writes, coexists with Tolaria for vault reads |
+| **[features/tasks/](features/tasks/product.md)** | The `task` verb — coordination and handoff via claimable task files (v1: claim/finish/cancel/list; dependency graph deferred) |
+| **[features/daemon/](features/daemon/product.md)** | The warm accelerator — file watcher, frontmatter index, socket server, drives `indexed`, graceful fallback |
+| **[features/search/](features/search/product.md)** | The `search` verb — hybrid retrieval delegated to `indexed`, plus deterministic tag pulls and a substring fallback |
+| **[features/memory/](features/memory/product.md)** | The agent surface — annotated MCP tools, `recent_activity` + `build_context`, and the SessionStart warm-start hook |
 
 Feature-level UX and requirements live in `features/<name>/product.md` — not here.
 
@@ -78,13 +78,13 @@ Feature-level UX and requirements live in `features/<name>/product.md` — not h
 |---|---|---|
 | **1: MVP** | `note`, `task`, `search`, and the daemon over the Tolaria folder | All three verbs usable from the CLI; coordination complete (claim/finish/blocks); hybrid search with graceful degradation |
 | **2: Agent surface** | MCP tools + SessionStart context injection | Every safe CLI command exposed as an MCP tool returning JSON; warm-start hook injects top relevant snippets |
-| **3: Richer retrieval** | Pluggable embedders and improved ranking | `embedder=openai\|local` options land **only if** recall proves to be the bottleneck in Phase 1/2 metrics |
+| **3: Richer coordination & retrieval** | The deferred task **dependency graph** (`blocks`/`blocked_by` readiness, `release`, strict gate, unblock-cascade) and any retrieval tuning | Graph lands when the v1 claim/finish core is proven; retrieval tuning lives in `indexed` and only if Phase 1/2 metrics show recall is the bottleneck |
 
 ## Non-Goals
 
 - **No "memory" primitive.** Memory is just notes you can search — the same files a human and their agents already read and write. There is no second store.
 - **No separate handoff primitive.** Tasks + claim/finish + blocks/blocked_by *are* handoff.
-- **No database to operate.** No SQL, no vector DB. The embedder backend (indexed.sh) owns embeddings and their storage; everything else is Markdown on disk. (Contrast GBrain, which syncs Markdown into Postgres/pgvector.)
+- **No database to operate.** No SQL, no vector DB to run. The first-party `indexed` engine owns ingest/embeddings/ranking; everything else is Markdown on disk. (Contrast GBrain, which syncs Markdown into Postgres/pgvector.)
 - **No Todoist or external task backend.** Tasks are Markdown files in the Tolaria folder.
 - **No background enrichment loop.** No "dream cycle" dedup, salience scoring, or contradiction-finding — Brain reflects the files as they are; the calling agent does the thinking.
 - **No synthesis / answer layer.** `search` returns ranked files with a `path`; the agent reads and synthesizes. Brain never composes prose answers.
@@ -97,6 +97,6 @@ Feature-level UX and requirements live in `features/<name>/product.md` — not h
 
 ## Open Questions
 
-1. **indexed.sh interface (blocking).** Exact CLI flags, query syntax, and output format are unconfirmed. *Default:* wrap it behind the `indexed` embedder adapter; assume it produces document embeddings the daemon caches; fall back to BM25-only if unavailable.
-2. **MCP destructive-op surface.** *Resolved (2026-06-10):* every MCP tool is annotated `read-only` / `idempotent` / `destructive` (Basic-Memory-style) so agents self-select safe tools. `task cancel` is exposed (it is reversible coordination, moving the file to `done/`, not data loss); hard `note delete` / `task delete` and admin ops (`daemon`, `reindex`, `status`) stay human-only. See [features/mcp/product.md](features/mcp/product.md).
+1. **`indexed` search-result contract (first-party).** `indexed` does the ranked retrieval; Brain's `search` wraps it. Exact CLI flags and JSON field names are **co-defined** (owner maintains `indexed`) against `indexed index search --help`, not reverse-engineered — so this is a contract decision, not an external unknown. Brain falls back to a built-in substring scan when `indexed` is absent. See [features/search/tech.md](features/search/tech.md).
+2. **MCP destructive-op surface.** *Resolved (2026-06-10):* every MCP tool is annotated `read-only` / `idempotent` / `destructive` (Basic-Memory-style) so agents self-select safe tools. `task cancel` is exposed (it is reversible coordination, moving the file to `done/`, not data loss); hard `note delete` / `task delete` and admin ops (`daemon`, `reindex`, `status`) stay human-only. See [features/memory/product.md](features/memory/product.md).
 3. **`[tasks].collections` semantics.** *Resolved (2026-06-10):* the known set of valid agent identities, used to validate `--owner`/`claimed_by` and to group `--mine`; **not** a folder split. See [tech.md](tech.md) State / Data Contracts.

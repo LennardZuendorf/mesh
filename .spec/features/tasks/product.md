@@ -8,7 +8,9 @@ updated: 2026-06-10
 
 # Feature: Tasks — Product
 
-The `task` verb is how work is coordinated and handed off. A task is a note with `type: task` plus lifecycle fields. Agents and the human create tasks, claim them, finish them, and wire dependencies — coordination is durable and inspectable, living in files rather than a chat transcript. There is no separate handoff mechanism; tasks *are* the handoff.
+The `task` verb is how work is coordinated and handed off. A task is a note with `type: task` plus lifecycle fields. Agents and the human create tasks, claim them, and finish them — coordination is durable and inspectable, living in files rather than a chat transcript. There is no separate handoff mechanism; tasks *are* the handoff.
+
+**v1 scope:** the differentiating core — per-file Markdown tasks with hash IDs, an atomic `O_EXCL` claim, idempotent finish, cancel, and listing by status/owner. The **dependency graph** (`blocks`/`blocked_by` readiness, `release`, the strict gate, and finish/cancel unblock-cascade) is a deliberately **deferred** later phase; `blocked_by` edges may be *recorded* in v1 but are inert until then.
 
 **Parent:** [../../product.md](../../product.md)
 **Architecture:** [tech.md](tech.md)
@@ -20,8 +22,9 @@ The `task` verb is how work is coordinated and handed off. A task is a note with
 
 | | |
 |---|---|
-| **Owns** | The `brain task` command surface; task lifecycle (`open`/`claimed`/`done`/`cancelled`); the `status`, `priority`, `claimed_by`, `blocks`, `blocked_by` fields; atomic claim, idempotent finish, idempotent cancel (which unblocks dependents), release; readiness computation; listing by status/owner/`--mine`; coordination exit codes (`4` claimed; `5` blocked, emitted only by the opt-in `claim --strict` gate) |
+| **Owns** | The `brain task` command surface; task lifecycle (`open`/`claimed`/`done`/`cancelled`); the `status`, `priority`, `claimed_by` fields; atomic claim, idempotent finish, idempotent cancel, delete; listing by status/owner/`--mine`; the `4` (already claimed) coordination exit code |
 | **Does not own** | Note bodies and note-only fields (notes feature); the shared frontmatter/ID/atomic-write contracts (root tech.md); search/ranking (search feature); the watcher (daemon feature) |
+| **Deferred (later phase)** | The dependency graph: `blocks`/`blocked_by` readiness (`task ready`), `task release`, the strict claim gate (exit `5`), and the finish/cancel unblock-cascade |
 
 ---
 
@@ -29,13 +32,13 @@ The `task` verb is how work is coordinated and handed off. A task is a note with
 
 ### Requirement: Create and update tasks
 
-The system SHALL create a task in `tasks/open/` with lifecycle fields and MUST update its fields (`title`, `tags`, `priority`, `blocks`, `blocked_by`, body) in place.
+The system SHALL create a task in `tasks/open/` with lifecycle fields and MUST update its fields (`title`, `tags`, `priority`, body) in place. A `--blocked-by`/`--blocks` edge MAY be recorded in frontmatter for the future graph phase but is not acted upon in v1.
 
-#### Scenario: File a task with a dependency
+#### Scenario: File a task
 
-- **Given** an agent runs `brain task new "Verify NDC config" --priority high --blocked-by t-c7d1`
+- **Given** an agent runs `brain task new "Verify NDC config" --priority high`
 - **When** the command completes
-- **Then** a task file is created in `tasks/open/` with `status: open` and `t-c7d1` in its `blocked_by`
+- **Then** a task file is created in `tasks/open/` with `status: open`, a `t-` hash ID, and `claimed_by: ~`
 
 ### Requirement: Atomic claim
 
@@ -47,35 +50,15 @@ The system SHALL guarantee that two agents cannot both claim the same task; a cl
 - **When** both run
 - **Then** exactly one succeeds and the other exits `4` (already claimed) without mutating the file
 
-### Requirement: Idempotent finish that unblocks dependents
+### Requirement: Idempotent finish
 
-The system SHALL append an outcome, set `status: done`, move the file to `tasks/done/`, and remove the task's ID from every dependent's `blocked_by`; re-running finish MUST be a no-op.
+The system SHALL append an optional outcome, set `status: done`, and move the file to `tasks/done/`; re-running finish MUST be a no-op. (Unblocking dependents arrives with the deferred graph phase.)
 
-#### Scenario: Finish clears a blocker
+#### Scenario: Finish a task
 
-- **Given** `t-c7d1` is `blocked_by` of a downstream task and is claimed
-- **When** `brain task finish t-c7d1` runs
-- **Then** `t-c7d1` moves to `done/`, the downstream task's `blocked_by` no longer lists it, and a second `finish t-c7d1` changes nothing
-
-### Requirement: Find ready work
-
-The system SHALL report tasks that are `open`, unclaimed, and have all `blocked_by` prerequisites `done`, and MUST support `--mine` and tag/owner filters.
-
-#### Scenario: Pick up the next task
-
-- **Given** several open tasks, some still blocked
-- **When** an agent runs `brain task ready --owner flights-agent`
-- **Then** only unblocked, unclaimed tasks are returned, JSON-friendly
-
-### Requirement: Release a claimed task
-
-The system SHALL release a claimed task back to `open` — clearing `claimed_by` and setting `status: open` — so an agent can hand back work it cannot finish. Release is idempotent on an already-open task.
-
-#### Scenario: Hand work back
-
-- **Given** a task `t-c7d1` claimed by `flights-agent`
-- **When** `brain task release t-c7d1` runs
-- **Then** `claimed_by` becomes `~`, `status` becomes `open`, and the task is `ready` again if its `blocked_by` are all `done`
+- **Given** a claimed task `t-c7d1`
+- **When** `brain task finish t-c7d1 --outcome "All J/C fares resolved via CLID fallback."` runs
+- **Then** `t-c7d1` moves to `done/` with `status: done` and the outcome recorded, and a second `finish t-c7d1` changes nothing
 
 ### Requirement: List tasks by status and ownership
 
@@ -89,13 +72,13 @@ The system SHALL list tasks filtered by `--status` (`open`/`claimed`/`done`/`can
 
 ### Requirement: Cancel or delete a task
 
-The system SHALL cancel a task — appending an optional `--reason`, setting `status: cancelled`, moving it to `tasks/done/`, and removing its ID from every dependent's `blocked_by` (symmetric with `finish`, so cancelling a blocker never strands its dependents) — and SHALL delete a task as a hard, `--force`-guarded removal of the file. Cancel is idempotent.
+The system SHALL cancel a task — appending an optional `--reason`, setting `status: cancelled`, and moving it to `tasks/done/` (idempotent) — and SHALL delete a task as a hard, `--force`-guarded removal of the file.
 
-#### Scenario: Cancel a task and clear its dependents
+#### Scenario: Cancel a task
 
-- **Given** an open task `t-c7d1` that is `blocked_by` of a downstream task
+- **Given** an open task `t-c7d1`
 - **When** `brain task cancel t-c7d1 --reason "no longer relevant"` runs
-- **Then** its `status` becomes `cancelled`, the reason is recorded, the file moves to `tasks/done/`, and the downstream task's `blocked_by` no longer lists `t-c7d1`
+- **Then** its `status` becomes `cancelled`, the reason is recorded, and the file moves to `tasks/done/`
 
 #### Scenario: Guarded delete
 
@@ -103,25 +86,26 @@ The system SHALL cancel a task — appending an optional `--reason`, setting `st
 - **When** `brain task delete t-c7d1 --force` runs
 - **Then** the file is removed and the task no longer appears in `task list`
 
-Reference requirements as R1–R7 in the feature plan's Requirements Trace (R5 = cancel/delete, R6 = release, R7 = list by status/ownership).
+Reference requirements as R1–R5 in the feature plan's Requirements Trace. The deferred graph phase (readiness, release, strict gate, unblock-cascade) gets fresh requirement IDs when it is scheduled.
 
 ## User Experience
 
 ```
-$ brain task ready --owner flights-agent --json
+$ brain task new "Verify NDC config for LH" --priority high --owner flights-agent
+$ brain task list --mine --status claimed --json
 $ brain task claim t-c7d1 --owner flights-agent          # atomic; exit 4 if taken
 $ brain task finish t-c7d1 --outcome "All J/C fares resolved via CLID fallback."
 ```
-
-## Non-Goals
-
-- Scheduling, orchestration, or any agent runtime — Brain is not an agent platform.
-- An external task backend — tasks are Markdown files, never Todoist or an API.
 
 ## Prior Art & Inspiration
 
 **Anchor — [tick-md](https://purplehorizons.io/blog/tick-md-multi-agent-coordination-markdown):** multi-agent coordination in a single git-tracked Markdown file, where agents claim tasks and a file-lock stops two agents colliding.
 
-- **Borrow:** the file *is* the coordination; a claim is a lock; everything stays inspectable in plain Markdown under Git.
-- **Differ:** brain uses an `O_EXCL` atomic test-and-set plus idempotent finish and a `blocks`/`blocked_by` dependency graph, so handoff is crash-safe with **no process running** — tick-md only locks one file; GBrain needs a Postgres job queue ("Minions") for the same guarantee.
-- **Contrast — [Claude Code Agent Teams](https://www.mindstudio.ai/blog/claude-code-agent-teams-parallel-collaboration):** a shared task list scoped to one session; brain's tasks are durable across sessions and agents.
+- **Borrow:** the file *is* the coordination; a claim is a lock; everything stays inspectable in plain Markdown under Git. (For the later graph phase: tick's Mermaid/ASCII dependency-graph rendering.)
+- **Differ:** Brain uses an `O_EXCL` atomic test-and-set over **per-task files with hash IDs**, crash-safe with **no process running** — tick centralizes into one `TICK.md` with an advisory `.tick.lock`+timeout and **sequential IDs**, which Brain's spec forbids. Brain self-builds because routing into tick would surrender per-file storage, `O_EXCL`, and hash IDs for no real delivery-speed gain.
+- **Contrast — [Claude Code Agent Teams](https://www.mindstudio.ai/blog/claude-code-agent-teams-parallel-collaboration):** a shared task list scoped to one session; Brain's tasks are durable across sessions and agents.
+
+## Non-Goals
+
+- Scheduling, orchestration, or any agent runtime — Brain is not an agent platform.
+- An external task backend — tasks are Markdown files, never Todoist, tick's container format, or an API.

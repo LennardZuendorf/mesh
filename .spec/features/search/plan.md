@@ -8,19 +8,19 @@ updated: 2026-06-10
 
 # Feature: Search — Implementation Plan
 
-Search delivers hybrid recall over notes and tasks plus the deterministic tag pull. It is a closed, testable box: lexical search works standalone, and the semantic half plugs into the daemon's embedding cache. This completes the Phase-1 MVP.
+Search delivers recall over notes and tasks by wrapping `indexed` (the engine) and adding the deterministic tag pull plus an always-available substring fallback. It is a closed, testable box: tag-pull and fallback work standalone, and ranked retrieval rides `indexed`. This completes the Phase-1 MVP.
 
 **Parent:** [../../plan.md](../../plan.md)
 **Requirements:** [product.md](product.md)
 **Architecture:** [tech.md](tech.md)
 
-**Feature gate:** Starts when **daemon** is `DONE` (root [plan.md](../../plan.md) Feature Sequence) — semantic search rides the daemon's index/cache, and the lexical path reuses its fallback. Does not depend on any other feature's units.
+**Feature gate:** Starts when **daemon** is `DONE` (root [plan.md](../../plan.md) Feature Sequence) — the daemon hosts the warm frontmatter index the wrapper resolves paths against and drives `indexed index update`. Does not depend on any other feature's units.
 
 ---
 
 ## Problem Frame
 
-Notes are only memory once they are recallable. This plan builds the always-available lexical retriever and the deterministic tag pull first, then the embedder adapter, then RRF fusion with threshold and recency — so each scoring layer is testable before the next is added.
+Notes are only memory once they are recallable. Brain does not build a ranking engine — `indexed` owns that. This plan builds the always-available tag-pull + substring fallback first (so recall degrades, never disappears), then the `indexed` wrapper that maps engine results into Brain's JSON, then the freshness bridge that keeps `indexed` current with the vault.
 
 ---
 
@@ -28,10 +28,10 @@ Notes are only memory once they are recallable. This plan builds the always-avai
 
 | ID | Requirement | Units |
 |---|---|---|
-| R1 | [Hybrid retrieval across notes and tasks](product.md#requirement-hybrid-retrieval-across-notes-and-tasks) | search/1, search/2, search/3 |
+| R1 | [Hybrid retrieval across notes and tasks](product.md#requirement-hybrid-retrieval-across-notes-and-tasks) | search/2, search/3 |
 | R2 | [Deterministic tag pull](product.md#requirement-deterministic-tag-pull) | search/1 |
-| R3 | [Token-budgeted output](product.md#requirement-token-budgeted-output) | search/1, search/3 |
-| R4 | [Degrade to lexical-only when the daemon is down](product.md#requirement-degrade-to-lexical-only-when-the-daemon-is-down) | search/1, search/2 |
+| R3 | [Token-budgeted output](product.md#requirement-token-budgeted-output) | search/1, search/2 |
+| R4 | [Degrade to substring-scan when the engine is down](product.md#requirement-degrade-to-lexical-only-when-the-daemon-is-down) | search/1, search/2 |
 
 Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
@@ -39,8 +39,9 @@ Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
 ## Key Technical Decisions
 
-1. **RRF over score normalisation.** Fuse ranks, not incomparable BM25/cosine magnitudes.
-2. **Lexical + tag-pull are daemon-free.** Recall degrades, never disappears, when the daemon is down.
+1. **Delegate ranking to `indexed`.** Brain neither embeds nor fuses; the wrapper maps `indexed`'s ranked hits into a stable Brain JSON shape, resolving frontmatter via the warm index.
+2. **Tag-pull + substring are engine-free.** Recall degrades, never disappears, when `indexed`/the daemon is down.
+3. **Co-designed contract.** Because `indexed` is first-party, the brain↔indexed result contract is defined jointly (see [tech.md](tech.md) Open Question 1).
 
 ---
 
@@ -50,74 +51,61 @@ Units are `search/n` — assigned once, never renumbered. Cite IDs in commits an
 
 ---
 
-### search/1 — Lexical retriever, tag-pull, output schema
+### search/1 — Tag-pull, substring fallback, output schema
 
-**Goal:** In-process BM25/substring, the query-less `--tags` fast path, the JSON result schema (always `id`/`type`/`title`/`score`/`path`) with `--meta-only`/`--full`, and the daemon-down stderr notice.
+**Goal:** The query-less `--tags` fast path, the always-available substring scan, the JSON result schema (always `id`/`type`/`title`/`score`/`path`) with `--meta-only`/`--full`, and the engine-down stderr notice.
 
-**Requirements:** R1, R2, R3, R4
+**Requirements:** R2, R3, R4
 
 **Dependencies:** —
 
-**Files:**
-
-```
-src/brain/index/bm25.py
-src/brain/cli/search.py
-```
+**Files:** `src/brain/index/tagpull.py`, `src/brain/index/fallback.py`, `src/brain/cli/search.py`
 
 **Test scenarios:**
 
-- Tag-only pull returns matches by frontmatter with no embedding call.
+- Tag-only pull returns matches by frontmatter with no engine call.
 - Results always carry `id`, `type`, `title`, `score`, `path`; `--meta-only` drops bodies.
-- With the daemon down, results stay JSON-shaped and a one-line stderr notice prints, suppressed under `--quiet`.
+- With `indexed`/daemon down, substring results stay JSON-shaped and a one-line stderr notice prints, suppressed under `--quiet`.
 
-**Verification:** `uv run pytest tests/search/test_lexical_tagpull.py`
+**Verification:** `uv run pytest tests/search/test_tagpull_fallback.py`
 
 ---
 
-### search/2 — Embedder adapter
+### search/2 — `indexed` wrapper + result mapping
 
-**Goal:** Pluggable `embed(texts) -> vectors` with the `indexed` backend and a BM25-only fallback when unavailable.
+**Goal:** `indexed_client` invokes `indexed index search ... --json` (or its MCP), maps each hit to Brain's schema by resolving the file `path` through the frontmatter index, passes `--limit`/`--threshold`, and applies the recency tiebreak.
 
-**Requirements:** R1, R4
+**Requirements:** R1, R3, R4
 
 **Dependencies:** search/1
 
-**Files:**
-
-```
-src/brain/index/embedder.py
-```
+**Files:** `src/brain/index/indexed_client.py`, `src/brain/cli/search.py`
 
 **Test scenarios:**
 
-- With the backend present, queries produce vectors; absent, search falls back to lexical only.
+- A query routes to `indexed`, and hits are returned in Brain's JSON shape with resolved `id`/`type`/`title`/`path`.
+- When `indexed` is unavailable, the wrapper transparently falls back to search/1's substring scan.
 
-**Verification:** `uv run pytest tests/search/test_embedder.py`
+**Verification:** `uv run pytest tests/search/test_indexed_client.py`
 
 ---
 
-### search/3 — RRF fusion + threshold + recency
+### search/3 — Freshness bridge
 
-**Goal:** Merge retrievers via RRF, apply `--threshold`, and add the recency boost.
+**Goal:** Drive `indexed index update` from the daemon's watch events (incremental) and expose `brain reindex` → full `indexed` rebuild, so the vector index tracks the vault despite `indexed`'s pull-based model.
 
-**Requirements:** R1, R3
+**Requirements:** R1
 
 **Dependencies:** search/2
 
-**Files:**
-
-```
-src/brain/index/fusion.py
-src/brain/cli/search.py
-```
+**Files:** `src/brain/index/indexed_client.py` (update/rebuild calls; wired into the daemon watcher)
 
 **Test scenarios:**
 
-- Fused ranking beats either retriever alone on a benchmark query set.
-- `--threshold` filters low-relevance hits; recency lifts fresh near-ties.
+- A file create/modify/delete triggers an incremental `indexed index update`.
+- `brain reindex` performs a full rebuild and subsequent searches reflect it.
 
-**Verification:** `uv run pytest tests/search/test_fusion.py`
+**Verification:** `uv run pytest tests/search/test_freshness.py`
 
 ---
 

@@ -29,7 +29,7 @@ The daemon is the warm accelerator that makes Brain feel instant. It watches the
 
 ### Requirement: Serve a warm index over a socket
 
-The system SHALL run one local daemon that holds the parsed frontmatter index, the resolution graph, and the search indices, serving CLI and MCP clients over a unix domain socket.
+The system SHALL run one local daemon that holds the parsed frontmatter index and the wikilink resolution graph, drives `indexed index update` on changes, and serves CLI and MCP clients over a unix domain socket.
 
 #### Scenario: Warm read
 

@@ -8,7 +8,7 @@ updated: 2026-06-10
 
 # Feature: Tasks — Implementation Plan
 
-Tasks delivers coordination: lifecycle, atomic claim, idempotent finish, and dependency-driven readiness. It is a closed, testable box that works over the vault with no daemon. Concurrency correctness is the acceptance bar.
+Tasks (v1) delivers the differentiating coordination core: per-file Markdown tasks, atomic `O_EXCL` claim, idempotent finish, cancel, and listing by status/owner. Concurrency correctness is the acceptance bar. The dependency graph is a deferred later phase.
 
 **Parent:** [../../plan.md](../../plan.md)
 **Requirements:** [product.md](product.md)
@@ -20,7 +20,7 @@ Tasks delivers coordination: lifecycle, atomic claim, idempotent finish, and dep
 
 ## Problem Frame
 
-Once memory exists, agents need to pass work without a human relay. This plan adds the task schema and lifecycle, then the two correctness-critical operations — atomic claim and idempotent finish — and finally readiness/listing. Claim and finish come before readiness because readiness is only meaningful once finish can clear blockers.
+Once memory exists, agents need to pass work without a human relay. This plan adds the task schema and lifecycle, then the correctness-critical atomic claim and idempotent finish, then listing/cancel/delete. v1 stops short of the `blocks`/`blocked_by` dependency graph — edges may be recorded but are inert.
 
 ---
 
@@ -30,11 +30,9 @@ Once memory exists, agents need to pass work without a human relay. This plan ad
 |---|---|---|
 | R1 | [Create and update tasks](product.md#requirement-create-and-update-tasks) | tasks/1, tasks/2 |
 | R2 | [Atomic claim](product.md#requirement-atomic-claim) | tasks/3 |
-| R3 | [Idempotent finish that unblocks dependents](product.md#requirement-idempotent-finish-that-unblocks-dependents) | tasks/4 |
-| R4 | [Find ready work](product.md#requirement-find-ready-work) | tasks/5 |
+| R3 | [Idempotent finish](product.md#requirement-idempotent-finish) | tasks/4 |
+| R4 | [List tasks by status and ownership](product.md#requirement-list-tasks-by-status-and-ownership) | tasks/5 |
 | R5 | [Cancel or delete a task](product.md#requirement-cancel-or-delete-a-task) | tasks/5, tasks/6 |
-| R6 | [Release a claimed task](product.md#requirement-release-a-claimed-task) | tasks/5 |
-| R7 | [List tasks by status and ownership](product.md#requirement-list-tasks-by-status-and-ownership) | tasks/5 |
 
 Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
@@ -43,7 +41,8 @@ Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 ## Key Technical Decisions
 
 1. **`O_EXCL` lockfile for claim.** Portable atomic test-and-set; runs identically with no daemon.
-2. **Finish is three atomic steps, idempotent as a whole.** Re-running is always safe — the recovery story for any crash.
+2. **Finish is two atomic steps, idempotent as a whole.** Re-running is always safe — the recovery story for any crash.
+3. **Graph deferred.** `blocks`/`blocked_by` are stored but inert; readiness/release/unblock/strict ship in a later phase, keeping v1 small.
 
 ---
 
@@ -55,22 +54,17 @@ Units are `tasks/n` — assigned once, never renumbered. Cite IDs in commits and
 
 ### tasks/1 — Task schema and folder routing
 
-**Goal:** Pydantic Task model (note fields + status/priority/claimed_by/blocks/blocked_by) and `open`/`done` routing.
+**Goal:** Pydantic Task model (note fields + status/priority/claimed_by, inert blocks/blocked_by) and `open`/`done` routing.
 
 **Requirements:** R1
 
 **Dependencies:** —
 
-**Files:**
-
-```
-src/brain/schemas/task.py
-src/brain/core/tasks.py
-```
+**Files:** `src/brain/schemas/task.py`, `src/brain/core/tasks.py`
 
 **Test scenarios:**
 
-- A task validates and lands in `tasks/open/` with `status: open`.
+- A task validates and lands in `tasks/open/` with `status: open`, a `t-` hash ID, and `claimed_by: ~`.
 
 **Verification:** `uv run pytest tests/tasks/test_schema.py`
 
@@ -78,21 +72,18 @@ src/brain/core/tasks.py
 
 ### tasks/2 — `task new` and `task update`
 
-**Goal:** Create and field-update tasks from the CLI, including `blocks`/`blocked_by`.
+**Goal:** Create and field-update tasks from the CLI; `--blocks`/`--blocked-by` are recorded but inert.
 
 **Requirements:** R1
 
 **Dependencies:** tasks/1
 
-**Files:**
-
-```
-src/brain/cli/task.py
-```
+**Files:** `src/brain/cli/task.py`
 
 **Test scenarios:**
 
-- `task new --blocked-by t-c7d1` records the dependency edge.
+- `task new` writes a valid file and prints `<id>  <path>`.
+- `--blocked-by t-c7d1` records the edge in frontmatter (no readiness behaviour in v1).
 
 **Verification:** `uv run pytest tests/tasks/test_new_update.py`
 
@@ -106,13 +97,7 @@ src/brain/cli/task.py
 
 **Dependencies:** tasks/2
 
-**Files:**
-
-```
-src/brain/storage/locks.py
-src/brain/core/tasks.py
-src/brain/cli/task.py
-```
+**Files:** `src/brain/storage/locks.py`, `src/brain/core/tasks.py`, `src/brain/cli/task.py`
 
 **Test scenarios:**
 
@@ -122,53 +107,41 @@ src/brain/cli/task.py
 
 ---
 
-### tasks/4 — Idempotent finish + unblock
+### tasks/4 — Idempotent finish
 
-**Goal:** Append outcome, move to `done/`, strip the ID from dependents' `blocked_by`; safe to re-run.
+**Goal:** Append outcome, set `status=done`, move to `done/`; safe to re-run.
 
 **Requirements:** R3
 
 **Dependencies:** tasks/3
 
-**Files:**
-
-```
-src/brain/core/tasks.py
-src/brain/cli/task.py
-```
+**Files:** `src/brain/core/tasks.py`, `src/brain/cli/task.py`
 
 **Test scenarios:**
 
-- Finish moves the file and clears the blocker on a dependent.
+- Finish moves the file to `done/` and records the outcome.
 - A second finish is a no-op.
 
 **Verification:** `uv run pytest tests/tasks/test_finish.py`
 
 ---
 
-### tasks/5 — Readiness, listing, release, cancel
+### tasks/5 — Listing and cancel
 
-**Goal:** `task ready` readiness computation; `task list --status/--owner/--mine`; `task get`; `task release` (claimed → open); and `task cancel` (reason + move to `done/` + unblock dependents).
+**Goal:** `task list --status/--owner/--mine`, `task get`, and `task cancel` (reason + move to `done/`, idempotent).
 
-**Requirements:** R4, R5, R6, R7
+**Requirements:** R4, R5
 
 **Dependencies:** tasks/4
 
-**Files:**
-
-```
-src/brain/core/tasks.py
-src/brain/cli/task.py
-```
+**Files:** `src/brain/core/tasks.py`, `src/brain/cli/task.py`
 
 **Test scenarios:**
 
-- `task ready` returns only open, unclaimed, fully-unblocked tasks; `--mine` matches owner or claimer.
 - `task list --status claimed --mine` returns only the caller's claimed, unfinished tasks.
-- `task release` returns a claimed task to `open`, clearing `claimed_by`; re-running is a no-op.
-- `task cancel` sets `status=cancelled`, moves to `done/`, and removes the ID from a dependent's `blocked_by`; re-running is a no-op.
+- `task cancel` sets `status=cancelled` and moves to `done/`; re-running is a no-op.
 
-**Verification:** `uv run pytest tests/tasks/test_ready_list.py tests/tasks/test_release_cancel.py`
+**Verification:** `uv run pytest tests/tasks/test_list_cancel.py`
 
 ---
 
@@ -180,12 +153,7 @@ src/brain/cli/task.py
 
 **Dependencies:** tasks/2
 
-**Files:**
-
-```
-src/brain/cli/task.py
-src/brain/core/tasks.py
-```
+**Files:** `src/brain/cli/task.py`, `src/brain/core/tasks.py`
 
 **Test scenarios:**
 
@@ -195,6 +163,10 @@ src/brain/core/tasks.py
 **Verification:** `uv run pytest tests/tasks/test_delete.py`
 
 ---
+
+## Deferred (later phase)
+
+The dependency graph — `task ready` readiness, `task release`, the `claim --strict` gate (exit `5`), and the finish/cancel unblock-cascade — is out of v1 scope and gets fresh `tasks/n` units when scheduled.
 
 ## Progress
 

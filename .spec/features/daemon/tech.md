@@ -8,7 +8,7 @@ updated: 2026-06-10
 
 # Feature: Daemon — Architecture
 
-The daemon is an `asyncio` unix-socket server that owns warm state and a `watchdog` observer. CLI and MCP are thin clients; on startup each tries to connect to the socket and, on failure, transparently falls back to direct file operations plus in-process BM25. The daemon accelerates and coordinates but never gates: write primitives live in `core`/`storage`, so the fallback path is the same code.
+The daemon is an `asyncio` unix-socket server that owns warm state and a `watchdog` observer. CLI and MCP are thin clients; on startup each tries to connect to the socket and, on failure, transparently falls back to direct file operations plus the search feature's substring scan. The daemon accelerates and coordinates but never gates: write primitives live in `core`/`storage`, so the fallback path is the same code.
 
 **Parent:** [../../tech.md](../../tech.md)
 **Requirements:** [product.md](product.md)
@@ -30,14 +30,14 @@ src/brain/cli/admin.py       # daemon start|stop|status, reindex, status
 ## Contract / API
 
 - **Transport.** Unix domain socket in a per-user runtime dir, created `0600`, owned by the running user, so other local users cannot drive it. Requests/responses are JSON framed over the socket. (Windows: loopback TCP or named pipe fallback — see open questions.)
-- **Warm state held:** parsed frontmatter index, wikilink/ID resolution graph, BM25 term index, embedding cache keyed off the embedder.
-- **Admin commands:** `daemon start|stop|status` (daemon process lifecycle — `daemon status` reports whether the daemon is up and the socket path); `reindex` (full rebuild from the folder); and the distinct top-level `brain status` (vault/index health: counts of notes and tasks-by-status, index freshness — last watch event and pending re-embeds — and dangling links). `brain status` ≠ `brain daemon status`: the former describes the data, the latter the process. `brain status` is intentionally a health report, not a team work-dashboard — in-progress and per-owner work is surfaced by `task list --status/--owner/--mine`.
+- **Warm state held:** parsed frontmatter index (powers `list`/`get`/tag-pull/`recent_activity`) and the wikilink/ID resolution graph (powers `related`/`build_context`). Ranking state (lexical + vectors) lives in `indexed`, not the daemon.
+- **Admin commands:** `daemon start|stop|status` (daemon process lifecycle — `daemon status` reports whether the daemon is up and the socket path); `reindex` (full rebuild from the folder); and the distinct top-level `brain status` (vault/index health: counts of notes and tasks-by-status, index freshness — last watch event and pending `indexed` updates — and dangling links). `brain status` ≠ `brain daemon status`: the former describes the data, the latter the process. `brain status` is intentionally a health report, not a team work-dashboard — in-progress and per-owner work is surfaced by `task list --status/--owner/--mine`.
 
 ## Implementation Detail
 
-- **Fallback shim.** `daemon/client.py` attempts the socket connect; on failure (down / stale socket) it routes calls to the same `core`/`storage` functions the daemon would, with a BM25/substring search pass. Embeddings are unavailable in this mode, so `search` returns lexical results and prints a one-line stderr notice unless `--quiet`.
-- **Watcher.** A `watchdog` observer on `tolaria_path` triggers incremental reindex on create/modify/delete: re-parse frontmatter, update BM25 terms, re-embed the changed document, and reconcile folder location against `type`/`status`.
-- **Freshness.** `brain status` reports the last watch event and any pending re-embeds.
+- **Fallback shim.** `daemon/client.py` attempts the socket connect; on failure (down / stale socket) it routes calls to the same `core`/`storage` functions the daemon would, with the search feature's built-in substring scan. `indexed`-backed ranking is unavailable in this mode, so `search` returns substring results and prints a one-line stderr notice unless `--quiet`.
+- **Watcher.** A `watchdog` observer on `tolaria_path` triggers, on create/modify/delete: re-parse frontmatter into the warm index, refresh the wikilink graph, reconcile folder location against `type`/`status`, and fire an incremental `indexed index update` so the search engine tracks the vault (bridging `indexed`'s pull-based model).
+- **Freshness.** `brain status` reports the last watch event and any pending `indexed index update` work.
 
 <!-- merge -->
 Graceful degradation is a project-wide invariant, not a daemon feature detail: availability never depends on the daemon. The connect-then-fallback contract and the rule that all write primitives live outside the daemon belong in root tech.md.

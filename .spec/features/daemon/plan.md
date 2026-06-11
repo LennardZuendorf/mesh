@@ -76,7 +76,7 @@ src/brain/daemon/client.py
 
 ### daemon/2 — Watcher + incremental reindex
 
-**Goal:** `watchdog` observer that reparses, re-embeds, and reconciles folder routing on file events.
+**Goal:** `watchdog` observer that reparses the warm index, fires `indexed index update`, and reconciles folder routing on file events.
 
 **Requirements:** R2
 

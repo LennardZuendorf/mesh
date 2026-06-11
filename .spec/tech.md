@@ -16,7 +16,7 @@ Brain is a thin coordination layer over one Tolaria Markdown folder. The archite
 1. **Daemon is an accelerator, not a gatekeeper.** The watcher and index make things fast; the CLI degrades to direct file ops + lexical search when the daemon is down. Availability never depends on a running process.
 2. **All writes are atomic and idempotent.** Every write is temp-file + `os.replace`. `task claim` is an atomic test-and-set (`O_EXCL`); `task finish` is atomic and idempotent across files — crash recovery is "just run it again."
 3. **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys untouched; never inject machinery into bodies.
-4. **One folder, one index, one search.** No second pipeline, no storage abstraction beyond "markdown files on disk." The only adapter that earns its keep is the pluggable embedder.
+4. **One folder, one index, one search.** No second pipeline, no storage abstraction beyond "markdown files on disk." Ranked retrieval is delegated to the first-party `indexed` engine; Brain keeps only the thin wrapper, tag-pull, and substring fallback.
 5. **Agent content is data.** Titles, bodies, tags, and outcomes are inert — written to frontmatter/body, never `eval`'d or shell-interpolated.
 
 ---
@@ -30,23 +30,23 @@ brain/
 ├── .spec/                    # Design docs (source of truth)
 └── src/brain/
     ├── cli/                  # typer app: note, task, search, daemon, status (thin)   → features/notes, tasks, search, daemon
-    ├── mcp/                  # FastMCP server over the same daemon (thin)              → features/mcp
-    ├── daemon/               # asyncio unix-socket server: watcher + indexer + search  → features/daemon
-    ├── core/                 # domain logic: ids, notes, tasks, wikilinks             → features/notes, tasks
-    ├── index/                # bm25, embedder adapter, RRF fusion, watch              → features/search, daemon
+    ├── mcp/                  # FastMCP memory server over the same daemon (thin)       → features/memory
+    ├── daemon/               # asyncio unix-socket server: watcher + warm index        → features/daemon
+    ├── core/                 # domain logic: ids, notes, tasks, wikilinks, activity, context → features/notes, tasks, memory
+    ├── index/                # indexed client, tag-pull, substring fallback, watch     → features/search, daemon
     ├── schemas/              # pydantic models (note, task, config)                   → cross-cutting (this doc)
     └── storage/              # atomic writes, O_EXCL locks, path sandbox              → cross-cutting (this doc)
 ```
 
-The daemon holds warm state that is expensive to rebuild per invocation: parsed frontmatter index, the wikilink/ID resolution graph, the BM25 term index, and the embedding cache. A `watchdog` observer watches `tolaria_path` so edits by humans, Tolaria, or other agents are reflected without an explicit reindex.
+The daemon holds warm state that is expensive to rebuild per invocation: the parsed frontmatter index and the wikilink/ID resolution graph. Ranking state (lexical + vectors) is owned by `indexed`, not the daemon. A `watchdog` observer watches `tolaria_path` so edits by humans, Tolaria, or other agents are reflected without an explicit reindex, and fires `indexed index update` to keep the search engine current.
 
 ---
 
 ## Tech Stack
 
-**Inherited:** Python 3.11+, `uv` (dev tooling), the Tolaria vault (the one Markdown folder, Git-managed by Tolaria), and `indexed.sh` (hybrid-search embeddings backend behind the `indexed` embedder).
+**Inherited / integrated:** Python 3.11+, `uv` (dev tooling), the Tolaria vault + its filesystem-direct MCP (the one Markdown folder, Git-managed by Tolaria), and `indexed` (first-party hybrid-search engine: ingest + embeddings + ranked retrieval, CLI/MCP) that Brain's `search` wraps.
 
-**Added:** `typer` (CLI), `python-frontmatter` (YAML frontmatter I/O), `pydantic` v2 (schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search is in-process BM25 + a pluggable embedder with RRF merge. Packaging via `uv` (dev) / `pipx` (end-user install).
+**Added:** `typer` (CLI), `python-frontmatter` (YAML frontmatter I/O), `pydantic` v2 (schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search is delegated to `indexed` (first-party hybrid engine); Brain keeps only a deterministic tag-pull + a substring fallback in-process. Packaging via `uv` (dev) / `pipx` (end-user install).
 
 ---
 
@@ -63,7 +63,7 @@ Cross-cutting contracts that span every feature. Feature folders consume these; 
 | **Atomic claim lock** | `storage/locks.py` | `task claim` acquires `O_EXCL` on `tasks/.locks/<id>.lock`, re-reads frontmatter, verifies `claimed_by == ~`, writes, releases. Two agents cannot both win. Runs identically in daemon and fallback mode. |
 | **Path sandbox** | `storage/sandbox.py` | Every resolved path must remain within `tolaria_path` after `realpath`; `..` traversal, absolute escapes, and symlink escapes are rejected. IDs/slugs map to files through the index, never raw user paths. |
 | **Exit codes** | `cli/` | `0` success · `1` generic error · `2` usage/validation · `3` not found · `4` already claimed · `5` blocked. `4` is emitted only by `task claim` (lost race). `5` is emitted only by the opt-in strict gate `task claim --strict` on a task with unfinished `blocked_by`; the default `claim`/`finish` never emit `5`. |
-| **Configuration** | `~/.brain/config.toml` + `$BRAIN_AGENT` | `[core]` (`tolaria_path`, `agent_name`), `[search]` (`embedder`, `hybrid` = bool, default `true`; `false` forces lexical-only · `threshold` = float `0.0–1.0`, default `0.65`), `[tasks]` (`collections` = the known set of valid agent identities, used to validate `--owner`/`claimed_by` and to group `--mine`; **not** a folder split). `$BRAIN_AGENT` overrides `agent_name` per session and drives `--owner`/`--mine`. Embedder API keys come from env/keyring — never the vault or `config.toml`. |
+| **Configuration** | `~/.brain/config.toml` + `$BRAIN_AGENT` | `[core]` (`tolaria_path`, `agent_name`), `[search]` (`collection` = the `indexed` collection name for this vault · `hybrid` = bool, default `true`; `false` forces the built-in substring fallback · `threshold` = float `0.0–1.0`, default `0.65`), `[tasks]` (`collections` = the known set of valid agent identities, used to validate `--owner`/`claimed_by` and to group `--mine`; **not** a folder split). `$BRAIN_AGENT` overrides `agent_name` per session and drives `--owner`/`--mine`. Embedder API keys come from env/keyring — never the vault or `config.toml`. |
 
 ---
 
@@ -71,9 +71,9 @@ Cross-cutting contracts that span every feature. Feature folders consume these; 
 
 | Source | Approx. Lines | What |
 |---|---|---|
-| **Tolaria vault** (inherited) | n/a | The Markdown folder and its Git history — the data and its versioning |
-| **indexed.sh** (inherited) | n/a | Embeddings and their storage, behind the `indexed` embedder adapter |
-| **Brain** (this project) | small Python surface | The three-verb CLI, the daemon (watcher + indexer + search), the MCP server, and the shared core/storage primitives |
+| **Tolaria vault + MCP** (inherited) | n/a | The Markdown folder and its Git history — the data and its versioning — plus Tolaria's filesystem-direct MCP read tools, which Brain coexists with on the same folder |
+| **`indexed`** (first-party, integrated) | n/a | The search engine: ingest, embeddings, and hybrid ranked retrieval over the vault. Brain's `search` cluster is a thin wrapper; the brain↔indexed contract is co-designed |
+| **Brain** (this project) | small Python surface | The three-verb CLI, the daemon (watcher + warm frontmatter index; drives `indexed index update`), the memory MCP surface, and shared core/storage primitives. Brain **owns all writes** (atomic + `O_EXCL` claim + hash IDs + wikilinks); it **delegates ranking** to `indexed` and **coexists with Tolaria** for vault reads |
 
 ---
 
@@ -82,10 +82,10 @@ Cross-cutting contracts that span every feature. Feature folders consume these; 
 | Order | Component | Feature |
 |---|---|---|
 | 1 | Note schema, CRUD, wikilinks, `brain note` | notes |
-| 2 | Task schema, lifecycle, claim/finish/blocks, `brain task` | tasks |
-| 3 | Socket server, watcher, incremental index, fallback shim, admin commands | daemon |
-| 4 | BM25 + embedder adapter + RRF fusion, tag-pull, `brain search` | search |
-| 5 | FastMCP server (`brain_*` tools) + SessionStart hook | mcp |
+| 2 | Task schema, atomic claim/finish, cancel, list (v1; dependency graph deferred), `brain task` | tasks |
+| 3 | Socket server, watcher, warm frontmatter index, fallback shim, admin commands | daemon |
+| 4 | `indexed` wrapper + tag-pull + substring fallback + freshness bridge, `brain search` | search |
+| 5 | FastMCP memory server (`brain_*` tools + `recent_activity` + `build_context`) + SessionStart hook | memory |
 
 Map build order to features. Unit-level detail lives in feature `plan.md` — not here.
 
@@ -95,11 +95,11 @@ Map build order to features. Unit-level detail lives in feature `plan.md` — no
 
 | Feature | Covers |
 |---|---|
-| **[features/notes/](features/notes/tech.md)** | Note schema, CRUD/append/sections, wikilink resolution; `core/notes.py`, `core/wikilinks.py`, `cli/note.py` |
-| **[features/tasks/](features/tasks/tech.md)** | Task lifecycle, atomic claim/finish, blocks/blocked_by, concurrency; `core/tasks.py`, `storage/locks.py`, `cli/task.py` |
-| **[features/daemon/](features/daemon/tech.md)** | Socket server, watchdog observer, incremental reindex, daemon-down fallback; `daemon/`, `index/watch.py` |
-| **[features/search/](features/search/tech.md)** | BM25, embedder adapter, RRF fusion + threshold + recency boost, tag-pull; `index/bm25.py`, `index/embedder.py`, `index/fusion.py` |
-| **[features/mcp/](features/mcp/tech.md)** | FastMCP tool mapping, exposed/withheld surface, SessionStart hook; `mcp/server.py` |
+| **[features/notes/](features/notes/tech.md)** | Note schema, CRUD/append/sections, direct reads, wikilink resolution; `core/notes.py`, `core/wikilinks.py`, `cli/note.py` |
+| **[features/tasks/](features/tasks/tech.md)** | Task lifecycle, atomic claim/finish, cancel, list (v1); `core/tasks.py`, `storage/locks.py`, `cli/task.py` |
+| **[features/daemon/](features/daemon/tech.md)** | Socket server, watchdog observer, warm frontmatter index, drives `indexed`, daemon-down fallback; `daemon/`, `index/watch.py` |
+| **[features/search/](features/search/tech.md)** | `indexed` wrapper + result mapping, tag-pull, substring fallback, freshness bridge; `index/indexed_client.py`, `index/tagpull.py`, `index/fallback.py` |
+| **[features/memory/](features/memory/tech.md)** | FastMCP tool mapping + annotations, `recent_activity`/`build_context`, SessionStart hook; `mcp/server.py`, `core/activity.py`, `core/context.py` |
 
 Feature-level files, APIs, and algorithms live in `features/<name>/tech.md` — not here.
 
@@ -107,7 +107,7 @@ Feature-level files, APIs, and algorithms live in `features/<name>/tech.md` — 
 
 | Risk | Mitigation |
 |---|---|
-| `indexed.sh` interface unknown (blocking) | Wrap behind the `indexed` embedder adapter; fall back to BM25-only if it can't produce embeddings |
+| `indexed` search-result contract | `indexed` is first-party — the CLI flags/JSON field names are co-defined, not reverse-engineered; Brain wraps it and falls back to its built-in substring scan if `indexed` is absent |
 | Windows lacks native unix domain sockets | Fall back to loopback TCP (127.0.0.1, token-gated) or a named pipe when a unix socket is unavailable |
 | Concurrent claim race | `O_EXCL` lockfile test-and-set; the same path runs with no daemon, so the guarantee holds in fallback mode |
 | Partial multi-file `finish` on crash | Each step is individually atomic and the whole op is idempotent; re-running `finish` is a no-op |

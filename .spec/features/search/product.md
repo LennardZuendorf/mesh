@@ -8,7 +8,7 @@ updated: 2026-06-10
 
 # Feature: Search — Product
 
-The `search` verb is how knowledge is recalled. It runs hybrid retrieval — semantic embeddings merged with lexical BM25/substring — across notes and tasks at once, returning JSON with a `path` to every hit. It also offers a deterministic, zero-cost tag pull. Search is what turns notes into memory.
+The `search` verb is how knowledge is recalled. It delegates ranked retrieval to **[`indexed`](https://github.com/LennardZuendorf/indexed)** — which owns the hybrid engine (lexical + dense-vector + fusion) over the vault — and wraps it as a Brain verb: brain shapes the query, formats results as JSON with a `path` to every hit, offers a deterministic zero-cost tag pull, and falls back to a built-in substring scan when `indexed`/the daemon is unavailable. Search is what turns notes into memory.
 
 **Parent:** [../../product.md](../../product.md)
 **Architecture:** [tech.md](tech.md)
@@ -20,8 +20,8 @@ The `search` verb is how knowledge is recalled. It runs hybrid retrieval — sem
 
 | | |
 |---|---|
-| **Owns** | The `brain search` command; the BM25 retriever, the pluggable embedder adapter, RRF fusion + threshold + recency boost, the deterministic tag-pull fast path, and the result JSON schema |
-| **Does not own** | The watcher and index storage/freshness (daemon feature); the note/task schemas (notes/tasks features); embedding storage itself (the `indexed.sh` backend) |
+| **Owns** | The `brain search` command; the `indexed` client/wrapper and result-shape mapping; the deterministic tag-pull fast path; the result JSON schema; the `indexed`/daemon-down substring fallback |
+| **Does not own** | The ranking engine itself — lexical + dense-vector retrieval, fusion, and any rerank live in `indexed`; the watcher and index freshness (daemon feature, which drives `indexed index update`); the note/task schemas (notes/tasks features) |
 
 ---
 
@@ -29,7 +29,7 @@ The `search` verb is how knowledge is recalled. It runs hybrid retrieval — sem
 
 ### Requirement: Hybrid retrieval across notes and tasks
 
-The system SHALL search notes and tasks together, merging a semantic retriever and a lexical retriever, and MUST return JSON results that always include `id`, `type`, `title`, `score`, and `path`.
+The system SHALL search notes and tasks together via `indexed`'s hybrid (lexical + dense-vector) ranked retrieval, and MUST return JSON results that always include `id`, `type`, `title`, `score`, and `path`.
 
 #### Scenario: Recall a decision
 
@@ -59,13 +59,13 @@ The system SHALL support `--meta-only` (drop snippet/body) and `--full` (whole b
 
 ### Requirement: Degrade to lexical-only when the daemon is down
 
-The system SHALL return lexical-only (BM25/substring) results when the daemon or embedder is unavailable, MUST keep returning the same JSON result shape, and MUST print a one-line notice to stderr (suppressed under `--quiet`).
+The system SHALL return substring-scan results when `indexed` or the daemon is unavailable, MUST keep returning the same JSON result shape, and MUST print a one-line notice to stderr (suppressed under `--quiet`).
 
-#### Scenario: Search with no daemon
+#### Scenario: Search with no engine
 
-- **Given** the daemon is stopped
+- **Given** the daemon is stopped (or `indexed` is not installed)
 - **When** `brain search "ndc"` runs
-- **Then** lexical-only results are returned in the usual JSON shape and a one-line notice is printed to stderr, suppressed under `--quiet`
+- **Then** built-in substring-scan results are returned in the usual JSON shape and a one-line notice is printed to stderr, suppressed under `--quiet`
 
 Reference requirements as R1, R2, R3, R4 in the feature plan's Requirements Trace.
 
@@ -81,13 +81,12 @@ Results are JSON by default; `--json` is also accepted explicitly and is availab
 
 ## Non-Goals
 
-- Managing or storing vectors — `indexed.sh` owns embeddings and their storage.
-- Re-ranking models beyond RRF + recency unless Phase-1/2 recall metrics prove a need.
+- Managing or storing vectors, or owning the ranking engine — `indexed` owns ingest, embeddings, lexical+vector retrieval, and fusion.
+- A `think`/synthesis layer — brain returns ranked files; the calling agent reads and reasons.
 
 ## Prior Art & Inspiration
 
-**Anchor — [GBrain search](https://github.com/garrytan/gbrain):** hybrid retrieval that fuses vector and BM25 results with Reciprocal Rank Fusion over a Markdown-sourced corpus.
+**Engine — [`indexed`](https://github.com/LennardZuendorf/indexed) (first-party):** Brain's own CLI/MCP indexer (FAISS, Docling + tree-sitter ingest) does the ranked retrieval; the `search` cluster is a thin wrapper. Because `indexed` is first-party, its hybrid (lexical + vector + fusion) leg and the brain↔indexed result contract are **co-designed**, not reverse-engineered.
 
-- **Borrow:** the RRF fusion model itself; always return a `path` to the source file; surface "already exists" / create-safety hints so a fleet of agents stops writing duplicate notes.
-- **Differ:** brain returns ranked *files* only — **no `think` synthesis layer** (the calling agent reads and reasons); no pgvector or DB — embeddings live behind `indexed.sh` and search degrades to BM25 when they're absent.
-- **Cousin — [memweave](https://towardsdatascience.com/memweave-zero-infra-ai-agent-memory-with-markdown-and-sqlite-no-vector-database-required/):** the same zero-infra hybrid (BM25 + vectors) over Markdown, validating "no vector DB required" as a real axis.
+- **Conceptual reference — [GBrain search](https://github.com/garrytan/gbrain):** the same hybrid vector + BM25 + RRF shape, validating the approach `indexed` implements. **Differ:** brain/`indexed` return ranked *files* only — no `think` synthesis, no Postgres/pgvector store.
+- **Cousin — [memweave](https://towardsdatascience.com/memweave-zero-infra-ai-agent-memory-with-markdown-and-sqlite-no-vector-database-required/):** zero-infra hybrid over Markdown, validating "no vector DB to operate" as a real axis.
