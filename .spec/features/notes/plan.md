@@ -51,9 +51,9 @@ Units are `notes/n` — assigned once, never renumbered. Cite IDs in commits and
 
 ---
 
-### notes/1 — Schema, IDs, and atomic storage
+### notes/1 — Project scaffold, schema, IDs, and atomic storage
 
-**Goal:** Pydantic note model, hash-ID generation, and atomic write/sandbox primitives.
+**Goal:** The minimal `uv` project skeleton, then the Pydantic note model, hash-ID generation, and atomic write/sandbox primitives.
 
 **Requirements:** R1
 
@@ -62,6 +62,9 @@ Units are `notes/n` — assigned once, never renumbered. Cite IDs in commits and
 **Files:**
 
 ```
+pyproject.toml               # uv project, deps, ruff/mypy config, entry point: brain = brain.cli:app
+src/brain/__init__.py
+src/brain/cli/__init__.py     # typer app shell so `brain --help` runs
 src/brain/schemas/note.py
 src/brain/core/ids.py
 src/brain/storage/files.py
@@ -70,8 +73,9 @@ src/brain/storage/sandbox.py
 
 **Test scenarios:**
 
-- A `type: note` lands at `notes/<id>.md` (root); `type: decision|log|reference` lands under `notes/decisions/|logs/|references/` per the root `type → folder` map.
-- A created note validates against the schema; hash ID is `n-` + `b32(sha256(created+\0+title))[:4]`; a forced hash collision extends by one char.
+- `uv sync` installs; `uv run brain --help` exits `0`; `uv run ruff check .` and `uv run mypy src/` pass on the skeleton.
+- A `type: note` lands at `notes/<id>.md` (root); `type: decision|log|reference` lands under `notes/decisions/|logs/|references/` per the root `type → folder` map; files are named `<id>.md`.
+- A created note validates against the schema; the ID is `n-` + lowercased Crockford-base32 of `sha256(created_iso + "\0" + title)` truncated to 4 chars (per root tech.md); a forced hash collision extends one char at a time.
 - Atomic write is temp-file + `os.replace`; no partial file is ever observable.
 - Path escapes outside `tolaria_path` (`..`, absolute, symlink) are rejected.
 
