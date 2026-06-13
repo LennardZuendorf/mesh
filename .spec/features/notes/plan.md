@@ -40,8 +40,10 @@ Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
 ## Key Technical Decisions
 
-1. **Shared primitives land first.** Hash IDs, atomic writes, and path sandbox are built as cross-cutting `core`/`storage` modules (see root [tech.md](../../tech.md)) so tasks and search inherit them.
+1. **Shared primitives land first.** Hash IDs, atomic writes, path sandbox, and the `O_EXCL` entity lock are built as cross-cutting `core`/`storage` modules (see root [tech.md](../../tech.md)) so tasks and search inherit them.
 2. **Atomic rewrite for every edit.** Appends and updates rewrite the whole file via temp + `os.replace`; no in-place mutation.
+3. **Locked read-modify-write.** `append`/`update` take the per-note `O_EXCL` lock so concurrent edits to one note serialize and never lose a write.
+4. **Brain surfaces only its own notes.** `get`/`list` ignore files without a brain `id`; foreign (Tolaria/human) notes are left for Tolaria to serve.
 
 ---
 
@@ -69,11 +71,13 @@ src/brain/schemas/note.py
 src/brain/core/ids.py
 src/brain/storage/files.py
 src/brain/storage/sandbox.py
+src/brain/storage/locks.py    # shared O_EXCL entity lock (reused by tasks)
 ```
 
 **Test scenarios:**
 
 - `uv sync` installs; `uv run brain --help` exits `0`; `uv run ruff check .` and `uv run mypy src/` pass on the skeleton.
+- The `O_EXCL` lock primitive grants one holder; a second acquire on a held lock fails/blocks; release frees it.
 - A `type: note` lands at `notes/<id>.md` (root); `type: decision|log|reference` lands under `notes/decisions/|logs/|references/` per the root `type → folder` map; files are named `<id>.md`.
 - A created note validates against the schema; the ID is `n-` + lowercased Crockford-base32 of `sha256(created_iso + "\0" + title)` truncated to 4 chars (per root tech.md); a forced hash collision extends one char at a time.
 - Atomic write is temp-file + `os.replace`; no partial file is ever observable.
@@ -120,12 +124,14 @@ src/brain/cli/note.py
 ```
 src/brain/core/notes.py
 src/brain/cli/note.py
+src/brain/storage/locks.py   # acquire per-note O_EXCL for the read-modify-write (built in notes/1)
 ```
 
 **Test scenarios:**
 
 - Append under a missing heading creates it; `--timestamp` prefixes an ISO line.
 - `--tags +x` adds; `--tags a,b` replaces.
+- Two concurrent appends to one note both land (serialized via the `O_EXCL` lock); neither is lost.
 
 **Verification:** `uv run pytest tests/notes/test_append_update.py`
 
@@ -197,7 +203,7 @@ src/brain/core/notes.py
 
 **Test scenarios:**
 
-- `note delete --force` removes the file; the note disappears from `note list`.
+- `note delete --force` removes the file (and any stale `notes/.locks/<id>.lock`); the note disappears from `note list`.
 - Without `--force`, deletion prompts for confirmation.
 
 **Verification:** `uv run pytest tests/notes/test_delete.py`

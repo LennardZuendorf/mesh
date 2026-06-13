@@ -10,7 +10,7 @@ updated: 2026-06-10
 
 The `note` verb captures and recalls knowledge as plain Markdown files in the Tolaria vault. A note is the unit of memory: writing one is remembering, and (via the search feature) finding one is recalling. Notes are authored and consumed by both the human operator and agents.
 
-Brain **owns writes** (atomic temp+`os.replace`, hash IDs, wikilink resolution) and cheap **direct reads** (`get`/`list` by frontmatter scan), and **coexists** with Tolaria on the same folder: Tolaria owns the vault and its Git history and exposes its own filesystem-direct MCP (`read_note`/`search_notes`/`list_notes`/`get_vault_context`/…) over these very files. Brain writes vault-native files Tolaria can also serve, delegates heavy *recall* to the search feature (`indexed`), and may call Tolaria's read tools — but never depends on Tolaria running, because a note is just a Markdown file Brain can read directly.
+Brain **owns writes** (atomic temp+`os.replace`, hash IDs, wikilink resolution) and cheap **direct reads** (`get`/`list` by frontmatter scan), and **coexists** with Tolaria on the same folder: Tolaria owns the vault and its Git history and exposes its own filesystem-direct MCP (`read_note`/`search_notes`/`list_notes`/`get_vault_context`/…) over these very files. Brain writes vault-native files Tolaria can also serve, delegates heavy *recall* to the search feature (`indexed`), and may call Tolaria's read tools — but never depends on Tolaria running, because a note is just a Markdown file Brain can read directly. Brain's `note` commands surface only notes it authored (those carrying a brain `id`); Tolaria- or hand-authored files without one are left for Tolaria to serve.
 
 **Parent:** [../../product.md](../../product.md)
 **Architecture:** [tech.md](tech.md)
@@ -47,13 +47,19 @@ The system SHALL create a note as a single Markdown file with schema-valid YAML 
 
 ### Requirement: Amend notes without rewriting
 
-The system SHALL append content (optionally under a named heading and/or with a timestamp) and update fields (`title`, `type`, body, and additive `+tag`/`-tag` or replacement tag lists) in place, bumping `updated`.
+The system SHALL append content (optionally under a named heading and/or with a timestamp) and update fields (`title`, `type`, body, and additive `+tag`/`-tag` or replacement tag lists) in place, bumping `updated`. Concurrent appends/updates to the same note MUST be serialized so no edit is lost.
 
 #### Scenario: Append a finding under a heading
 
 - **Given** an existing note `n-a3f2`
 - **When** an agent runs `brain note append n-a3f2 "Confirmed for J/C class" --section "Follow-ups" --timestamp`
 - **Then** the content is appended under a `Follow-ups` heading (created if missing) with an ISO timestamp, and `updated` is bumped
+
+#### Scenario: Two agents append at once
+
+- **Given** two agents append to the same `log` note `n-b8c1` simultaneously
+- **When** both commands run
+- **Then** both appended blocks are present (the writes serialize via an `O_EXCL` lock) and neither is lost
 
 ### Requirement: Retrieve and list notes
 
