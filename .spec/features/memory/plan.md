@@ -3,12 +3,12 @@ type: feature-plan
 feature: memory
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Memory — Implementation Plan
 
-Memory delivers the Phase-2 agent surface: `brain_*` tools over the same daemon, the memory read shapes (`recent_activity`, `build_context`), and the SessionStart warm-start hook. It adds no new store — it is a lens over notes + search + daemon.
+Memory delivers the Phase-2 agent surface: `brain_*` tools over the same daemon, the memory-lens read commands (`recent-activity`, `build-context`, `session-start`), and the SessionStart warm-start hook. It adds no new store — it is a lens over notes + search + daemon.
 
 **Parent:** [../../plan.md](../../plan.md)
 **Requirements:** [product.md](product.md)
@@ -20,7 +20,7 @@ Memory delivers the Phase-2 agent surface: `brain_*` tools over the same daemon,
 
 ## Problem Frame
 
-Agents should drive Brain natively and resume warm. This plan wraps the existing CLI/daemon paths as annotated MCP tools, adds two memory-specific read shapes over the index, then injects a continuity preamble at session start.
+Agents should drive Brain natively and resume warm. This plan wraps the existing CLI/daemon paths as annotated MCP tools, adds two memory-lens read commands over the index, composes the session-start preamble, then ships the hook config.
 
 ---
 
@@ -42,6 +42,7 @@ Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 1. **One client, two transports.** MCP reuses `daemon/client.py`, guaranteeing parity with the CLI.
 2. **Memory is a lens, not a store.** `recent_activity`/`build_context` read the existing index/files; no new persistence.
 3. **Annotated allow-list.** Tools carry behaviour annotations; hard-delete and admin ops are withheld.
+4. **Two-source warm-start.** `session-start` merges recent activity with all open/claimed `--mine` tasks.
 
 ---
 
@@ -70,34 +71,35 @@ Units are `memory/n` — assigned once, never renumbered. Cite IDs in commits an
 
 ---
 
-### memory/2 — `recent_activity`
+### memory/2 — `recent-activity`
 
-**Goal:** A `recent-activity` CLI command + `brain_recent_activity` tool returning time-ordered changed notes/tasks within a window, with `--mine` and a no-daemon directory-scan fallback.
+**Goal:** `recent-activity` CLI command + `brain_recent_activity` tool returning time-ordered changed notes/tasks within a window, with `--mine` and a no-daemon directory-scan fallback.
 
 **Requirements:** R2
 
 **Dependencies:** memory/1
 
-**Files:** `src/brain/core/activity.py`, `src/brain/cli/activity.py`, `src/brain/mcp/server.py`
+**Files:** `src/brain/core/activity.py`, `src/brain/cli/session.py`, `src/brain/mcp/server.py`
 
 **Test scenarios:**
 
 - `recent-activity --since 24h` returns items with `updated` in window, newest-first.
 - `--mine` restricts tasks to the caller's owner/claimed_by.
+- Daemon-down falls back to directory scan.
 
 **Verification:** `uv run pytest tests/memory/test_recent_activity.py`
 
 ---
 
-### memory/3 — `build_context`
+### memory/3 — `build-context`
 
-**Goal:** A `build-context` CLI command + `brain_build_context` tool that follows a seed's `related` wikilinks breadth-first to `--depth`, deduplicated, returning compact JSON.
+**Goal:** `build-context` CLI command + `brain_build_context` tool that follows a seed's `related` wikilinks breadth-first to `--depth`, deduplicated, returning compact JSON.
 
 **Requirements:** R3
 
 **Dependencies:** memory/1
 
-**Files:** `src/brain/core/context.py`, `src/brain/cli/context.py`, `src/brain/mcp/server.py`
+**Files:** `src/brain/core/context.py`, `src/brain/cli/session.py`, `src/brain/mcp/server.py`
 
 **Test scenarios:**
 
@@ -108,24 +110,29 @@ Units are `memory/n` — assigned once, never renumbered. Cite IDs in commits an
 
 ---
 
-### memory/4 — SessionStart warm-start hook
+### memory/4 — `session-start` + SessionStart hook
 
-**Goal:** A Claude Code `SessionStart` hook that injects a token-budgeted continuity preamble from `recent-activity --mine` once at session start.
+**Goal:** `brain session-start` composes recent activity + open/claimed `--mine` tasks; ship `hooks/session_start.json` and setup docs.
 
 **Requirements:** R4
 
 **Dependencies:** memory/2
 
-**Files:** `hooks/session_start.json`, `docs/memory-setup.md`
+**Files:** `src/brain/cli/session.py`, `hooks/session_start.json`, `docs/memory-setup.md`
 
 **Test scenarios:**
 
-- The hook command emits compact `--meta-only --json` output suitable for injection.
-- The hook is a `SessionStart` (not `PreToolUse`) entry and runs once per session.
+- `session-start --meta-only --json` includes recent items and open/claimed tasks (deduplicated).
+- A task claimed 30+ days ago with no recent edits still appears via the task-list leg.
+- Hook config points at `brain session-start --meta-only --json` (SessionStart, not PreToolUse).
 
 **Verification:** `uv run pytest tests/memory/test_session_hook.py`
 
 ---
+
+## DONE
+
+All four units pass; MCP tools mirror CLI behaviour with annotations; `session-start` composes both warm-start feeds; hook config is valid.
 
 ## Progress
 

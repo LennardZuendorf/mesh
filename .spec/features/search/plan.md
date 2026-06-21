@@ -3,7 +3,7 @@ type: feature-plan
 feature: search
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Search — Implementation Plan
@@ -14,13 +14,13 @@ Search delivers recall over notes and tasks by wrapping `indexed` (the engine) a
 **Requirements:** [product.md](product.md)
 **Architecture:** [tech.md](tech.md)
 
-**Feature gate:** Starts when **daemon** is `DONE` (root [plan.md](../../plan.md) Feature Sequence) — the daemon hosts the warm frontmatter index the wrapper resolves paths against and drives `indexed index update`. Does not depend on any other feature's units.
+**Feature gate:** Starts when **daemon** is `DONE` (root [plan.md](../../plan.md) Feature Sequence) — the daemon hosts the warm frontmatter index the wrapper resolves paths against and the `on_vault_change` hook. Does not depend on any other feature's units.
 
 ---
 
 ## Problem Frame
 
-Notes are only memory once they are recallable. Brain does not build a ranking engine — `indexed` owns that. This plan builds the always-available tag-pull + substring fallback first (so recall degrades, never disappears), then the `indexed` wrapper that maps engine results into Brain's JSON, then the freshness bridge that keeps `indexed` current with the vault.
+Notes are only memory once they are recallable. Brain does not build a ranking engine — `indexed` owns that. This plan builds the always-available tag-pull + substring fallback first (so recall degrades, never disappears), then the `indexed` wrapper that maps engine results into Brain's JSON, then `indexed_client` freshness wired into the daemon watcher hook.
 
 ---
 
@@ -28,10 +28,10 @@ Notes are only memory once they are recallable. Brain does not build a ranking e
 
 | ID | Requirement | Units |
 |---|---|---|
-| R1 | [Hybrid retrieval across notes and tasks](product.md#requirement-hybrid-retrieval-across-notes-and-tasks) | search/2, search/3 |
+| R1 | [Hybrid retrieval across the vault](product.md#requirement-hybrid-retrieval-across-the-vault) | search/2, search/3 |
 | R2 | [Deterministic tag pull](product.md#requirement-deterministic-tag-pull) | search/1 |
 | R3 | [Token-budgeted output](product.md#requirement-token-budgeted-output) | search/1, search/2 |
-| R4 | [Degrade to substring-scan when the engine is down](product.md#requirement-degrade-to-lexical-only-when-the-daemon-is-down) | search/1, search/2 |
+| R4 | [Degrade to substring-scan when hybrid is unavailable](product.md#requirement-degrade-to-substring-scan-when-hybrid-is-unavailable) | search/1, search/2 |
 
 Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
@@ -39,9 +39,9 @@ Every unit cites the R-IDs it satisfies. Do not renumber R-IDs.
 
 ## Key Technical Decisions
 
-1. **Delegate ranking to `indexed`.** Brain neither embeds nor fuses; the wrapper maps `indexed`'s ranked hits into a stable Brain JSON shape, resolving frontmatter via the warm index.
-2. **Tag-pull + substring are engine-free.** Recall degrades, never disappears, when `indexed`/the daemon is down.
-3. **Co-designed contract.** Because `indexed` is first-party, the brain↔indexed result contract is defined jointly (see [tech.md](tech.md) Open Question 1).
+1. **Delegate ranking to `indexed`.** Brain neither embeds nor fuses; the wrapper maps hits into a stable Brain JSON shape.
+2. **Tag-pull + substring are engine-free.** Recall degrades, never disappears, per the degradation matrix.
+3. **Freshness via hook registration.** `indexed_client` registers on daemon `on_vault_change`; daemon does not import ranking logic.
 
 ---
 
@@ -53,7 +53,7 @@ Units are `search/n` — assigned once, never renumbered. Cite IDs in commits an
 
 ### search/1 — Tag-pull, substring fallback, output schema
 
-**Goal:** The query-less `--tags` fast path, the always-available substring scan, the JSON result schema (always `id`/`type`/`title`/`score`/`path`) with `--meta-only`/`--full`, and the engine-down stderr notice.
+**Goal:** The query-less `--tags` fast path, the always-available substring scan (with pinned scoring), the JSON result schema (always `id`/`type`/`title`/`score`/`path`) with `--meta-only`/`--full`/`--threshold`, and the engine-down stderr notice.
 
 **Requirements:** R2, R3, R4
 
@@ -64,8 +64,8 @@ Units are `search/n` — assigned once, never renumbered. Cite IDs in commits an
 **Test scenarios:**
 
 - Tag-only pull returns matches by frontmatter with no engine call.
-- Results always carry `id`, `type`, `title`, `score`, `path`; `--meta-only` drops bodies.
-- With `indexed`/daemon down, substring results stay JSON-shaped and a one-line stderr notice prints, suppressed under `--quiet`.
+- Results always carry `id`, `type`, `title`, `score`, `path`; `--meta-only` drops bodies; `--threshold` filters.
+- With daemon down or `indexed` absent, substring results stay JSON-shaped and a one-line stderr notice prints, suppressed under `--quiet`.
 
 **Verification:** `uv run pytest tests/search/test_tagpull_fallback.py`
 
@@ -73,7 +73,7 @@ Units are `search/n` — assigned once, never renumbered. Cite IDs in commits an
 
 ### search/2 — `indexed` wrapper + result mapping
 
-**Goal:** `indexed_client` invokes `indexed index search ... --json` (or its MCP), maps each hit to Brain's schema by resolving the file `path` through the frontmatter index, passes `--limit`/`--threshold`, and applies the recency tiebreak.
+**Goal:** `indexed_client` invokes `indexed index search ... --json` per pinned contract, maps each hit to Brain's schema by resolving `path` through the warm index, passes `--limit`/`--threshold`, and applies the recency tiebreak.
 
 **Requirements:** R1, R3, R4
 
@@ -83,31 +83,36 @@ Units are `search/n` — assigned once, never renumbered. Cite IDs in commits an
 
 **Test scenarios:**
 
-- A query routes to `indexed`, and hits are returned in Brain's JSON shape with resolved `id`/`type`/`title`/`path`.
+- A query routes to `indexed` (mocked), and hits are returned in Brain's JSON shape with resolved `id`/`type`/`title`/`path`.
+- Foreign vault files (no brain `id`) appear with `id: null`.
 - When `indexed` is unavailable, the wrapper transparently falls back to search/1's substring scan.
 
 **Verification:** `uv run pytest tests/search/test_indexed_client.py`
 
 ---
 
-### search/3 — Freshness bridge
+### search/3 — `indexed_client` freshness
 
-**Goal:** Drive `indexed index update` from the daemon's watch events (incremental) and expose `brain reindex` → full `indexed` rebuild, so the vector index tracks the vault despite `indexed`'s pull-based model.
+**Goal:** Implement `incremental_update(path)` and `full_rebuild()`; register `incremental_update` on the daemon watcher's `on_vault_change` hook.
 
 **Requirements:** R1
 
-**Dependencies:** search/2
+**Dependencies:** search/2 (registers on the daemon watcher hook — satisfied because **daemon** is `DONE` before this feature starts)
 
-**Files:** `src/brain/index/indexed_client.py` (update/rebuild calls; wired into the daemon watcher)
+**Files:** `src/brain/index/indexed_client.py`
 
 **Test scenarios:**
 
-- A file create/modify/delete triggers an incremental `indexed index update`.
-- `brain reindex` performs a full rebuild and subsequent searches reflect it.
+- `on_vault_change` triggers `indexed index update` for the affected path (mocked `indexed` CLI).
+- `brain reindex` calls `full_rebuild()` and subsequent hybrid searches reflect new content.
 
 **Verification:** `uv run pytest tests/search/test_freshness.py`
 
 ---
+
+## DONE
+
+All three units pass; `brain search` returns hybrid results when daemon + `indexed` are up, substring-scan results when degraded, and tag-pull works with no engine; `indexed_client` registers on the watcher hook.
 
 ## Progress
 

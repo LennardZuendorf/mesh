@@ -1,20 +1,25 @@
 ---
 type: entrypoint
 scope: technical
-children: []
-updated: 2026-06-10
+children:
+  - features/notes/plan.md
+  - features/tasks/plan.md
+  - features/daemon/plan.md
+  - features/search/plan.md
+  - features/memory/plan.md
+updated: 2026-06-21
 ---
 
 # Brain — Technical Architecture
 
-Brain is a thin coordination layer over one Tolaria Markdown folder. The architecture is daemon-centric but never daemon-dependent: a single local daemon owns the file watcher, the index, and search, while both the `brain` CLI and the MCP server are thin clients that talk to it over a unix domain socket. Write primitives (atomic file ops, locks, path sandboxing) live in the shared `core`/`storage` layer, not the daemon, so every command works with degraded search when the daemon is down. Feature-level implementation detail lives under `.spec/features/<name>/`.
+Brain is a thin coordination layer over one Tolaria Markdown folder. The architecture is daemon-centric but never daemon-dependent: a single local daemon owns the file watcher and warm frontmatter index, while both the `brain` CLI and the MCP server are thin clients that talk to it over a unix domain socket. Write primitives (atomic file ops, locks, path sandboxing) live in the shared `core`/`storage` layer, not the daemon, so every command works with degraded search when the daemon is down. Ranked retrieval is delegated to `indexed`; the search feature owns the wrapper. Feature-level implementation detail lives under `.spec/features/<name>/`.
 
 ---
 
 ## Design Philosophy
 
-1. **Daemon is an accelerator, not a gatekeeper.** The watcher and index make things fast; the CLI degrades to direct file ops + lexical search when the daemon is down. Availability never depends on a running process.
-2. **All writes are atomic and idempotent.** Every write is temp-file + `os.replace`. `task claim` is an atomic test-and-set (`O_EXCL`); `task finish` is atomic and idempotent across files — crash recovery is "just run it again."
+1. **Daemon is an accelerator, not a gatekeeper.** The watcher and index make things fast; the CLI degrades to direct file ops + substring scan when the daemon is down. Availability never depends on a running process.
+2. **All writes are atomic and idempotent.** Every write is temp-file + `os.replace`. `task claim` is an atomic test-and-set (`O_EXCL`); `task finish` is atomic and idempotent on a single file — crash recovery is "just run it again."
 3. **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys untouched; never inject machinery into bodies.
 4. **One folder, one index, one search.** No second pipeline, no storage abstraction beyond "markdown files on disk." Ranked retrieval is delegated to the first-party `indexed` engine; Brain keeps only the thin wrapper, tag-pull, and substring fallback.
 5. **Agent content is data.** Titles, bodies, tags, and outcomes are inert — written to frontmatter/body, never `eval`'d or shell-interpolated.
@@ -29,7 +34,7 @@ brain/
 ├── README.md
 ├── .spec/                    # Design docs (source of truth)
 └── src/brain/
-    ├── cli/                  # typer app: note, task, search, daemon, status (thin)   → features/notes, tasks, search, daemon
+    ├── cli/                  # typer app: note, task, search, daemon, status, session (thin)
     ├── mcp/                  # FastMCP memory server over the same daemon (thin)       → features/memory
     ├── daemon/               # asyncio unix-socket server: watcher + warm index        → features/daemon
     ├── core/                 # domain logic: ids, notes, tasks, wikilinks, activity, context → features/notes, tasks, memory
@@ -38,7 +43,7 @@ brain/
     └── storage/              # atomic writes, O_EXCL locks, path sandbox              → cross-cutting (this doc)
 ```
 
-The daemon holds warm state that is expensive to rebuild per invocation: the parsed frontmatter index and the wikilink/ID resolution graph. Ranking state (lexical + vectors) is owned by `indexed`, not the daemon. A `watchdog` observer watches `tolaria_path` so edits by humans, Tolaria, or other agents are reflected without an explicit reindex, and fires `indexed index update` to keep the search engine current.
+The daemon holds warm state that is expensive to rebuild per invocation: the parsed frontmatter index and the wikilink/ID resolution graph. Ranking state (lexical + vectors) is owned by `indexed`, not the daemon. A `watchdog` observer watches `tolaria_path` so edits by humans, Tolaria, or other agents are reflected without an explicit reindex, and fires `indexed index update` (via the search feature's `indexed_client`) to keep the search engine current.
 
 ---
 
@@ -60,10 +65,47 @@ Cross-cutting contracts that span every feature. Feature folders consume these; 
 | **Hash IDs** | `core/ids.py` | `<prefix>-<hash>`, `hash = crockford_b32(sha256(created_iso + "\0" + title))[:4]`, lowercased — **Crockford base32** (alphabet `0-9a-z` minus `i,l,o,u`), so IDs match `[0-9a-hjkmnp-tv-z]`. `created_iso` is the canonical UTC timestamp to seconds with a `Z` suffix (e.g. `2026-06-13T19:15:15Z`). `n-` for any note type, `t-` for tasks. Never sequential. Collisions extend the hash one char at a time until unique. |
 | **Folder routing** | `storage/files.py` | File location is *derived* from `type`/`status`, never authoritative on its own; frontmatter and folder must agree, reconciled on watch events. Note `type → folder`: `note → notes/` (root), `log → notes/logs/`, `decision → notes/decisions/`, `reference → notes/references/`. Tasks route by `status`: `open`/`claimed → tasks/open/`, `done`/`cancelled → tasks/done/`. |
 | **Atomic write** | `storage/files.py` | Every write is temp-file + `os.replace`. No partial writes are ever observable. |
-| **Atomic entity lock** | `storage/locks.py` | One `O_EXCL` lockfile primitive (`<kind>/.locks/<id>.lock`) serializes read-modify-write per entity. `task claim` uses it to re-read frontmatter, verify `claimed_by == ~`, write, release — two agents cannot both win. `note append`/`note update` use the same primitive so concurrent edits to one note never lose a write. Runs identically in daemon and fallback mode. |
-| **Path sandbox** | `storage/sandbox.py` | Every resolved path must remain within `tolaria_path` after `realpath`; `..` traversal, absolute escapes, and symlink escapes are rejected. IDs/slugs map to files through the index, never raw user paths. |
+| **Atomic entity lock** | `storage/locks.py` | One `O_EXCL` lockfile primitive (`<kind>/.locks/<id>.lock`) serializes read-modify-write per entity. `task claim` uses it to re-read frontmatter, verify `claimed_by == ~`, write, release — two agents cannot both win. `note append`/`note update` and `task update` use the same primitive. Runs identically in daemon and fallback mode. |
+| **Stale lock recovery** | `storage/locks.py` | Lockfiles store `{"pid": <int>, "acquired_at": "<ISO-8601>"}`. On acquire failure, if the lock is older than **300 s** or the PID is not running, the lock is treated as stale, removed, and acquire retried once. `brain status` reports stale lock count. Manual recovery: delete `<kind>/.locks/<id>.lock`. |
+| **Path sandbox** | `storage/sandbox.py` | Every resolved path must remain within `tolaria_path` after `realpath`; `..` traversal, absolute escapes, and symlink escapes are rejected (resolve each component; reject if resolved path escapes the vault root). IDs/slugs map to files through the index, never raw user paths. |
 | **Exit codes** | `cli/` | `0` success · `1` generic error · `2` usage/validation · `3` not found · `4` already claimed · `5` blocked. `4` is emitted only by `task claim` (lost race). `5` is emitted only by the opt-in strict gate `task claim --strict` on a task with unfinished `blocked_by`; the default `claim`/`finish` never emit `5`. |
-| **Configuration** | `~/.brain/config.toml` + `$BRAIN_AGENT` | `[core]` (`tolaria_path`, `agent_name`), `[search]` (`collection` = the `indexed` collection name for this vault · `hybrid` = bool, default `true`; `false` forces the built-in substring fallback · `threshold` = float `0.0–1.0`, default `0.65`), `[tasks]` (`collections` = the known set of valid agent identities, used to validate `--owner`/`claimed_by` and to group `--mine`; **not** a folder split). `$BRAIN_AGENT` overrides `agent_name` per session and drives `--owner`/`--mine`. Embedder API keys come from env/keyring — never the vault or `config.toml`. |
+| **Configuration** | `~/.brain/config.toml` + `$BRAIN_AGENT` | `[core]` (`tolaria_path`, `agent_name`), `[search]` (`collection` = the `indexed` collection name for this vault · `hybrid` = bool, default `true`; `false` forces the built-in substring fallback · `threshold` = float `0.0–1.0`, default `0.65`), `[tasks]` (`collections` = the known set of valid agent identities, used to validate `--owner`/`claimed_by` and to group `--mine`; **not** a folder split). `$BRAIN_AGENT` overrides `agent_name` per session and drives `--owner`/`--mine`. Embedder API keys come from env/keyring — never the vault or `config.toml`. Missing `config.toml` or invalid `tolaria_path` exits `2` with a clear stderr message. |
+| **Daemon socket protocol** | `daemon/server.py`, `daemon/client.py` | Newline-delimited JSON (one object per line). Request: `{"id":"<uuid>","method":"<name>","params":{...}}`. Response: `{"id":"<uuid>","ok":true,"result":...}` or `{"id":"<uuid>","ok":false,"error":{"code":<int>,"message":"<str>"}}`. Error `code` mirrors CLI exit codes where applicable. Full method table in [features/daemon/tech.md](features/daemon/tech.md). |
+
+### Canonical `Note` schema (`schemas/note.py`)
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | yes | `n-` + hash |
+| `type` | enum | yes | `note` \| `log` \| `decision` \| `reference` |
+| `title` | string | yes | Feeds ID hash |
+| `tags` | list[str] | no | Lowercase |
+| `owner` | string | no | Default `$BRAIN_AGENT`; validated against `[tasks].collections` when set |
+| `created` | datetime | yes | ISO-8601 UTC |
+| `updated` | datetime | yes | Bumped on every write |
+| `related` | list[id] | no | Resolved wikilink targets |
+
+### Canonical `Task` schema (`schemas/task.py`)
+
+Inherits all `Note` fields except `type` is always `task`. Additional fields:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `status` | enum | yes | `open` \| `claimed` \| `done` \| `cancelled` |
+| `priority` | enum | no | `low` \| `normal` \| `high` (default `normal`) |
+| `claimed_by` | string\|`~` | no | `~` until claimed |
+| `blocks` | list[id] | no | Recorded in v1; inert until graph phase |
+| `blocked_by` | list[id] | no | Recorded in v1; inert until graph phase |
+
+**Lifecycle append format:** `task finish` appends `## Outcome\n\n<ISO-8601> — <outcome text>` (or `## Outcome\n\n<ISO-8601>` when no `--outcome`). `task cancel` appends `## Cancelled\n\n<ISO-8601> — <reason>` (reason optional). Sections are created at end of body if absent.
+
+---
+
+## Basic Implementation
+
+**Config loading** (`schemas/config.py`, loaded in `notes/1`): reads `~/.brain/config.toml` at startup; tests override via `BRAIN_CONFIG_PATH` env or a pytest fixture pointing at a temp config. **Global CLI shell** (`cli/__init__.py`, `notes/1`): Typer callback registers `--json`, `--quiet`, `--owner`, maps domain exceptions to exit codes, and passes context to subcommands.
+
+**Test fixtures** (`tests/conftest.py`, `notes/1`): temp `tolaria_path` vault with `notes/` and `tasks/` trees; isolated config per test; helper to seed notes/tasks.
 
 ---
 
@@ -84,8 +126,9 @@ Cross-cutting contracts that span every feature. Feature folders consume these; 
 | 1 | Note schema, CRUD, wikilinks, `brain note` | notes |
 | 2 | Task schema, atomic claim/finish, cancel, list (v1; dependency graph deferred), `brain task` | tasks |
 | 3 | Socket server, watcher, warm frontmatter index, fallback shim, admin commands | daemon |
-| 4 | `indexed` wrapper + tag-pull + substring fallback + freshness bridge, `brain search` | search |
+| 4 | `indexed` wrapper + tag-pull + substring fallback + `indexed_client` freshness calls, `brain search` | search |
 | 5 | FastMCP memory server (`brain_*` tools + `recent_activity` + `build_context`) + SessionStart hook | memory |
+| 6 | Task dependency graph (`ready`, `release`, strict gate, unblock-cascade) | tasks (Phase 3) |
 
 Map build order to features. Unit-level detail lives in feature `plan.md` — not here.
 
@@ -97,8 +140,8 @@ Map build order to features. Unit-level detail lives in feature `plan.md` — no
 |---|---|
 | **[features/notes/](features/notes/tech.md)** | Note schema, CRUD/append/sections, direct reads, wikilink resolution; `core/notes.py`, `core/wikilinks.py`, `cli/note.py` |
 | **[features/tasks/](features/tasks/tech.md)** | Task lifecycle, atomic claim/finish, cancel, list (v1); `core/tasks.py`, `storage/locks.py`, `cli/task.py` |
-| **[features/daemon/](features/daemon/tech.md)** | Socket server, watchdog observer, warm frontmatter index, drives `indexed`, daemon-down fallback; `daemon/`, `index/watch.py` |
-| **[features/search/](features/search/tech.md)** | `indexed` wrapper + result mapping, tag-pull, substring fallback, freshness bridge; `index/indexed_client.py`, `index/tagpull.py`, `index/fallback.py` |
+| **[features/daemon/](features/daemon/tech.md)** | Socket server, watchdog observer, warm frontmatter index, watcher hook for `indexed`, daemon-down fallback; `daemon/`, `index/watch.py` |
+| **[features/search/](features/search/tech.md)** | `indexed` wrapper + result mapping, tag-pull, substring fallback, `indexed_client` implementation; `index/indexed_client.py`, `index/tagpull.py`, `index/fallback.py` |
 | **[features/memory/](features/memory/tech.md)** | FastMCP tool mapping + annotations, `recent_activity`/`build_context`, SessionStart hook; `mcp/server.py`, `core/activity.py`, `core/context.py` |
 
 Feature-level files, APIs, and algorithms live in `features/<name>/tech.md` — not here.
@@ -107,8 +150,9 @@ Feature-level files, APIs, and algorithms live in `features/<name>/tech.md` — 
 
 | Risk | Mitigation |
 |---|---|
-| `indexed` search-result contract | `indexed` is first-party — the CLI flags/JSON field names are co-defined, not reverse-engineered; Brain wraps it and falls back to its built-in substring scan if `indexed` is absent |
+| `indexed` search-result contract | Pinned in search tech; co-defined with first-party `indexed` |
 | Windows lacks native unix domain sockets | Fall back to loopback TCP (127.0.0.1, token-gated) or a named pipe when a unix socket is unavailable |
 | Concurrent claim race | `O_EXCL` lockfile test-and-set; the same path runs with no daemon, so the guarantee holds in fallback mode |
-| Partial multi-file `finish` on crash | Each step is individually atomic and the whole op is idempotent; re-running `finish` is a no-op |
+| Crash mid-finish on single file | Each step is individually atomic and idempotent; re-running `finish` is a no-op |
+| Stale `O_EXCL` lock after crash | 300 s TTL + dead-PID detection; `brain status` surfaces count; manual delete documented |
 | Untrusted agent content | Treated as inert data; path access sandboxed to `tolaria_path`; socket is `0600`, per-user runtime dir |

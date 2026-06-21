@@ -3,7 +3,7 @@ type: feature-product
 feature: notes
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Notes — Product
@@ -71,6 +71,18 @@ The system SHALL return a note by `<id|slug>` (frontmatter + a body preview by d
 - **When** `brain note get n-a3f2` runs
 - **Then** its frontmatter and the first 200 characters of the body are returned
 
+#### Scenario: List recent notes
+
+- **Given** several notes with different `updated` timestamps
+- **When** `brain note list --since 7d --tags ndc --json` runs
+- **Then** only brain-authored notes updated within 7 days and tagged `ndc` are returned
+
+#### Scenario: Update note fields
+
+- **Given** a note `n-a3f2`
+- **When** `brain note update n-a3f2 --title "Revised title" --tags +confirmed` runs
+- **Then** the title and tags are updated in place and `updated` is bumped
+
 ### Requirement: Resolve wikilinks
 
 The system SHALL resolve `[[Title]]`, `[[n-id]]`, and `[[t-id]]` references in note bodies to canonical IDs and MUST maintain the `related` array as the resolved, deduplicated set, leaving unresolvable links verbatim. Resolution lives in `core/wikilinks.py` and runs against an on-disk title/ID scan, so it works identically with the daemon down (the daemon only caches the result); a task ID in `related` is the note↔task provenance link.
@@ -80,6 +92,12 @@ The system SHALL resolve `[[Title]]`, `[[n-id]]`, and `[[t-id]]` references in n
 - **Given** a note body contains `[[NDC config for Lufthansa]]` and a note with that title exists as `n-a3f2`
 - **When** the note is saved
 - **Then** `n-a3f2` appears in the note's `related` array and the body text is preserved
+
+#### Scenario: Unresolvable link stays verbatim
+
+- **Given** a note body contains `[[Nonexistent title]]` and no matching note exists
+- **When** the note is saved
+- **Then** the wikilink remains verbatim in the body, `related` is unchanged, and `brain status` reports it as dangling
 
 ### Requirement: Delete notes
 

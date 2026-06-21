@@ -3,7 +3,7 @@ type: feature-product
 feature: tasks
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Tasks — Product
@@ -40,6 +40,24 @@ The system SHALL create a task in `tasks/open/` with lifecycle fields and MUST u
 - **When** the command completes
 - **Then** a task file is created in `tasks/open/` with `status: open`, a `t-` hash ID, and `claimed_by: ~`
 
+#### Scenario: Update a task
+
+- **Given** an open task `t-c7d1`
+- **When** `brain task update t-c7d1 --priority high --tags +ndc` runs
+- **Then** the frontmatter is updated in place and `updated` is bumped
+
+#### Scenario: Record a dependency edge (inert in v1)
+
+- **Given** a task `t-c7d1` and a blocker `t-a1b2` that is still open
+- **When** `brain task new "Follow-up" --blocked-by t-a1b2` runs
+- **Then** `blocked_by` contains `t-a1b2` in frontmatter but readiness and claim gating are not enforced until Phase 3
+
+#### Scenario: Reject unknown owner
+
+- **Given** `[tasks].collections` does not include `unknown-agent`
+- **When** `brain task new "..." --owner unknown-agent` runs
+- **Then** the command exits `2` (validation) without creating a file
+
 ### Requirement: Atomic claim
 
 The system SHALL guarantee that two agents cannot both claim the same task; a claim sets `claimed_by` and `status: claimed`, and MUST fail with a distinct exit code when the task is already claimed by another.
@@ -50,19 +68,43 @@ The system SHALL guarantee that two agents cannot both claim the same task; a cl
 - **When** both run
 - **Then** exactly one succeeds and the other exits `4` (already claimed) without mutating the file
 
+#### Scenario: Same agent re-claims after crash
+
+- **Given** a task already claimed by `flights-agent`
+- **When** `flights-agent` runs `brain task claim t-c7d1` again
+- **Then** the command succeeds idempotently (no mutation, exit `0`)
+
+#### Scenario: No voluntary unclaim in v1
+
+- **Given** a claimed task `t-c7d1`
+- **When** an agent looks for a release/unclaim command
+- **Then** none exists in v1; `task release` arrives with the deferred graph phase
+
 ### Requirement: Idempotent finish
 
 The system SHALL append an optional outcome, set `status: done`, and move the file to `tasks/done/`; re-running finish MUST be a no-op. (Unblocking dependents arrives with the deferred graph phase.)
 
-#### Scenario: Finish a task
+#### Scenario: Finish a claimed task
 
 - **Given** a claimed task `t-c7d1`
 - **When** `brain task finish t-c7d1 --outcome "All J/C fares resolved via CLID fallback."` runs
 - **Then** `t-c7d1` moves to `done/` with `status: done` and the outcome recorded, and a second `finish t-c7d1` changes nothing
 
-### Requirement: List tasks by status and ownership
+#### Scenario: Finish an open task without claim
 
-The system SHALL list tasks filtered by `--status` (`open`/`claimed`/`done`/`cancelled`), `--owner`, `--mine`, and tags — so the operator can see in-progress work and an agent can recover the tasks it has claimed but not finished.
+- **Given** an open (unclaimed) task `t-c7d1`
+- **When** `brain task finish t-c7d1` runs
+- **Then** the task moves to `done/` with `status: done` (allowed in v1)
+
+### Requirement: List and retrieve tasks by status and ownership
+
+The system SHALL return a task by `<id>` and list tasks filtered by `--status` (`open`/`claimed`/`done`/`cancelled`), `--owner`, `--mine`, and tags — so the operator can see in-progress work and an agent can recover the tasks it has claimed but not finished.
+
+#### Scenario: Get a task
+
+- **Given** a task `t-c7d1` exists
+- **When** `brain task get t-c7d1 --json` runs
+- **Then** its frontmatter and a body preview are returned
 
 #### Scenario: See what I am mid-way through
 
@@ -74,11 +116,17 @@ The system SHALL list tasks filtered by `--status` (`open`/`claimed`/`done`/`can
 
 The system SHALL cancel a task — appending an optional `--reason`, setting `status: cancelled`, and moving it to `tasks/done/` (idempotent) — and SHALL delete a task as a hard, `--force`-guarded removal of the file.
 
-#### Scenario: Cancel a task
+#### Scenario: Cancel an open task
 
 - **Given** an open task `t-c7d1`
 - **When** `brain task cancel t-c7d1 --reason "no longer relevant"` runs
 - **Then** its `status` becomes `cancelled`, the reason is recorded, and the file moves to `tasks/done/`
+
+#### Scenario: Cancel a claimed task
+
+- **Given** a claimed task `t-c7d1`
+- **When** `brain task cancel t-c7d1 --reason "superseded"` runs
+- **Then** its `status` becomes `cancelled` and the file moves to `tasks/done/`
 
 #### Scenario: Guarded delete
 

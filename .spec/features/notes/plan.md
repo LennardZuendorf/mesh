@@ -3,7 +3,7 @@ type: feature-plan
 feature: notes
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Notes — Implementation Plan
@@ -53,9 +53,9 @@ Units are `notes/n` — assigned once, never renumbered. Cite IDs in commits and
 
 ---
 
-### notes/1 — Project scaffold, schema, IDs, and atomic storage
+### notes/1 — Project scaffold, config, global CLI, schema, IDs, and atomic storage
 
-**Goal:** The minimal `uv` project skeleton, then the Pydantic note model, hash-ID generation, and atomic write/sandbox primitives.
+**Goal:** The minimal `uv` project skeleton, config loading, global CLI flags/exit codes, then the Pydantic note model, hash-ID generation, and atomic write/sandbox/lock primitives.
 
 **Requirements:** R1
 
@@ -66,18 +66,25 @@ Units are `notes/n` — assigned once, never renumbered. Cite IDs in commits and
 ```
 pyproject.toml               # uv project, deps, ruff/mypy config, entry point: brain = brain.cli:app
 src/brain/__init__.py
-src/brain/cli/__init__.py     # typer app shell so `brain --help` runs
+src/brain/cli/__init__.py     # typer app: global --json/--quiet/--owner, exit-code mapping
+src/brain/schemas/config.py   # load ~/.brain/config.toml; BRAIN_CONFIG_PATH override for tests
 src/brain/schemas/note.py
 src/brain/core/ids.py
 src/brain/storage/files.py
 src/brain/storage/sandbox.py
-src/brain/storage/locks.py    # shared O_EXCL entity lock (reused by tasks)
+src/brain/storage/locks.py    # shared O_EXCL entity lock + stale-lock recovery
+tests/conftest.py             # temp tolaria_path vault fixture, config override
 ```
 
 **Test scenarios:**
 
 - `uv sync` installs; `uv run brain --help` exits `0`; `uv run ruff check .` and `uv run mypy src/` pass on the skeleton.
-- The `O_EXCL` lock primitive grants one holder; a second acquire on a held lock fails/blocks; release frees it.
+- Config loads `tolaria_path`; missing config exits `2` with a clear message; `BRAIN_CONFIG_PATH` override works in tests.
+- Global `--json`/`--quiet`/`--owner` are accepted on the root app.
+- The `O_EXCL` lock primitive grants one holder; stale lock (dead PID or >300s) is removed and acquire retried.
+- Hash IDs are deterministic and collision-extended per root tech.md.
+- Atomic write via temp + `os.replace` is not observable mid-flight.
+- Path sandbox rejects traversal and symlink escapes.
 - A `type: note` lands at `notes/<id>.md` (root); `type: decision|log|reference` lands under `notes/decisions/|logs/|references/` per the root `type → folder` map; files are named `<id>.md`.
 - A created note validates against the schema; the ID is `n-` + lowercased Crockford-base32 of `sha256(created_iso + "\0" + title)` truncated to 4 chars (per root tech.md); a forced hash collision extends one char at a time.
 - Atomic write is temp-file + `os.replace`; no partial file is ever observable.

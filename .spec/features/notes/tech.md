@@ -3,7 +3,7 @@ type: feature-tech
 feature: notes
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Notes — Architecture
@@ -64,7 +64,7 @@ Command surface:
 - **Reads and coexistence.** `note get`/`note list` are cheap **direct reads** (single-file read / `notes/` directory scan + frontmatter filter) — always available, no engine or daemon required. They surface **only notes carrying a brain `id`**; files lacking brain frontmatter (e.g. Tolaria- or hand-authored without an `id`) are invisible to `brain note` commands — Brain coexists by writing vault-native files Tolaria's MCP reads, and leaves foreign files for Tolaria to serve. Heavy *recall* (semantic/hybrid) is delegated to the search feature (`indexed`), never reimplemented here.
 - **Section-aware append.** `--section "<heading>"` finds the matching `##` heading and appends beneath it, creating the heading at the end if absent. `--timestamp` prefixes the appended block with an ISO-8601 line. The whole note is rewritten atomically (temp + `os.replace`).
 - **Field updates.** `--tags +x,-y` mutates the set additively; a bare `--tags a,b` replaces it. `--type` changes drive a folder move (atomic rename) to keep folder routing consistent with frontmatter.
-- **Slug resolution.** `<id|slug>` accepts either a hash ID or a slug. An argument matching `^[nt]-[a-z0-9]{4,}$` is treated as an ID; anything else is a slug. A slug is the title lowercased, non-alphanumerics collapsed to single hyphens, leading/trailing hyphens trimmed. Slugs resolve to an ID through the index by exact normalized-title match; a slug matching two or more notes errors with exit `2` and lists the candidate IDs.
+- **Slug resolution.** `<id|slug>` accepts either a hash ID or a slug. An argument matching `^[nt]-[a-z0-9]{4,}$` is treated as an ID; anything else is a slug. A slug is the title lowercased, non-alphanumerics collapsed to single hyphens, leading/trailing hyphens trimmed. With the daemon up, slugs resolve through the warm index; with the daemon down, slugs resolve via an on-disk title/ID scan (same algorithm as wikilinks). A slug matching two or more notes errors with exit `2` and lists the candidate IDs.
 
 <!-- merge -->
 Wikilink resolution is shared with tasks and the daemon's index: `core/wikilinks.py` resolves `[[Title]]` (normalized-title match → ID), `[[n-id]]`, and `[[t-id]]` (ID passthrough), maintaining a deduplicated `related` set. It runs against an on-disk title/ID scan and is **daemon-independent** — the daemon only caches the resolution, so wikilinks resolve identically when the daemon is down (and in feature 1, before a daemon exists). Unresolvable links stay verbatim in the body and surface via `brain status` as dangling. This belongs to the project-wide resolution contract.

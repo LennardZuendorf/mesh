@@ -3,7 +3,7 @@ type: feature-plan
 feature: tasks
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Tasks — Implementation Plan
@@ -58,7 +58,7 @@ Units are `tasks/n` — assigned once, never renumbered. Cite IDs in commits and
 
 **Requirements:** R1
 
-**Dependencies:** —
+**Dependencies:** — (requires **notes** feature `DONE` per feature gate; reuses note schema and storage primitives)
 
 **Files:** `src/brain/schemas/task.py`, `src/brain/core/tasks.py`
 
@@ -166,7 +166,11 @@ Units are `tasks/n` — assigned once, never renumbered. Cite IDs in commits and
 
 ## Deferred (later phase)
 
-The dependency graph — `task ready` readiness, `task release`, the `claim --strict` gate (exit `5`), and the finish/cancel unblock-cascade — is out of v1 scope and gets fresh `tasks/n` units when scheduled.
+The dependency graph — `task ready` readiness, `task release`, the `claim --strict` gate (exit `5`), and the finish/cancel unblock-cascade — is Phase 3 scope and gets fresh `tasks/n` units when scheduled (root [plan.md](../../plan.md) feature 6).
+
+## DONE
+
+All six units pass; `brain task` round-trips create → claim → finish and cancel over the vault with no daemon; concurrent claim tests pass.
 
 ## Progress
 

@@ -3,12 +3,12 @@ type: feature-product
 feature: search
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
 # Feature: Search — Product
 
-The `search` verb is how knowledge is recalled. It delegates ranked retrieval to **[`indexed`](https://github.com/LennardZuendorf/indexed)** — which owns the hybrid engine (lexical + dense-vector + fusion) over the vault — and wraps it as a Brain verb: brain shapes the query, formats results as JSON with a `path` to every hit, offers a deterministic zero-cost tag pull, and falls back to a built-in substring scan when `indexed`/the daemon is unavailable. Search is what turns notes into memory.
+The `search` verb is how knowledge is recalled. It delegates ranked retrieval to **[`indexed`](https://github.com/LennardZuendorf/indexed)** — which owns the hybrid engine (lexical + dense-vector + fusion) over the vault — and wraps it as a Brain verb: brain shapes the query, formats results as JSON with a `path` to every hit, offers a deterministic zero-cost tag pull, and falls back to a built-in substring scan when hybrid search is unavailable. Search is what turns notes into memory.
 
 **Parent:** [../../product.md](../../product.md)
 **Architecture:** [tech.md](tech.md)
@@ -20,20 +20,20 @@ The `search` verb is how knowledge is recalled. It delegates ranked retrieval to
 
 | | |
 |---|---|
-| **Owns** | The `brain search` command; the `indexed` client/wrapper and result-shape mapping; the deterministic tag-pull fast path; the result JSON schema; the `indexed`/daemon-down substring fallback |
-| **Does not own** | The ranking engine itself — lexical + dense-vector retrieval, fusion, and any rerank live in `indexed`; the watcher and index freshness (daemon feature, which drives `indexed index update`); the note/task schemas (notes/tasks features) |
+| **Owns** | The `brain search` command; the `indexed` client/wrapper and result-shape mapping; the deterministic tag-pull fast path; the result JSON schema; the substring-scan fallback; `indexed_client` (`incremental_update` / `full_rebuild`) |
+| **Does not own** | The ranking engine itself — lexical + dense-vector retrieval, fusion, and any rerank live in `indexed`; the watcher and warm index (daemon feature, which hosts the hook); the note/task schemas (notes/tasks features) |
 
 ---
 
 ## Requirements
 
-### Requirement: Hybrid retrieval across notes and tasks
+### Requirement: Hybrid retrieval across the vault
 
-The system SHALL search notes and tasks together via `indexed`'s hybrid (lexical + dense-vector) ranked retrieval, and MUST return JSON results that always include `id`, `type`, `title`, `score`, and `path`.
+The system SHALL search **all** Markdown under `notes/` and `tasks/` in `tolaria_path` together via `indexed`'s hybrid ranked retrieval (including Tolaria- or hand-authored files without a brain `id`), and MUST return JSON results that always include `id`, `type`, `title`, `score`, and `path`. Files without brain frontmatter appear with `id: null` and `type` inferred from path.
 
 #### Scenario: Recall a decision
 
-- **Given** notes and tasks exist in the vault
+- **Given** notes and tasks exist in the vault (including hand-authored Tolaria notes)
 - **When** an agent runs `brain search "how did we handle the CLID fallback decision"`
 - **Then** relevant notes and tasks are returned as ranked JSON, each with a `path`
 
@@ -57,24 +57,36 @@ The system SHALL support `--meta-only` (drop snippet/body) and `--full` (whole b
 - **When** `--meta-only` is set
 - **Then** results omit snippets/bodies to minimise tokens
 
-### Requirement: Degrade to lexical-only when the daemon is down
+#### Scenario: Threshold filters weak hits
 
-The system SHALL return substring-scan results when `indexed` or the daemon is unavailable, MUST keep returning the same JSON result shape, and MUST print a one-line notice to stderr (suppressed under `--quiet`).
+- **Given** a query returning mixed-confidence hits
+- **When** `--threshold 0.8` is set
+- **Then** only hits at or above `0.8` are returned
 
-#### Scenario: Search with no engine
+### Requirement: Degrade to substring-scan when hybrid is unavailable
 
-- **Given** the daemon is stopped (or `indexed` is not installed)
+The system SHALL return substring-scan results when hybrid search is unavailable per the degradation matrix in [tech.md](tech.md), MUST keep returning the same JSON result shape, and MUST print a one-line notice to stderr (suppressed under `--quiet`).
+
+#### Scenario: Search with daemon stopped
+
+- **Given** the daemon is stopped
 - **When** `brain search "ndc"` runs
-- **Then** built-in substring-scan results are returned in the usual JSON shape and a one-line notice is printed to stderr, suppressed under `--quiet`
+- **Then** substring-scan results are returned in the usual JSON shape and a one-line notice is printed to stderr
+
+#### Scenario: Search without indexed
+
+- **Given** `indexed` is not installed
+- **When** `brain search "ndc"` runs
+- **Then** substring-scan results are returned regardless of daemon state
 
 Reference requirements as R1, R2, R3, R4 in the feature plan's Requirements Trace.
 
 ## User Experience
 
 ```
-$ brain search "CLID fallback decision"                       # hybrid, JSON by default
+$ brain search "CLID fallback decision"                       # hybrid when available, JSON by default
 $ brain search --tags ndc,flights --type note --meta-only     # deterministic, zero-cost
-$ brain search "ndc"                                          # daemon down: lexical-only + stderr notice
+$ brain search "ndc"                                          # degraded: substring-scan + stderr notice
 ```
 
 Results are JSON by default; `--json` is also accepted explicitly and is available on every command.
