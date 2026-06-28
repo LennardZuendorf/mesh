@@ -3,51 +3,40 @@ type: feature-tech
 feature: daemon
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
-# Feature: Daemon — Architecture
+# Daemon — Tech
 
-The daemon is an `asyncio` unix-socket server that owns warm state and a `watchdog` observer. CLI and MCP are thin clients; on startup each tries to connect to the socket and, on failure, transparently falls back to direct file operations plus the search feature's substring scan. The daemon accelerates and coordinates but never gates: write primitives live in `core`/`storage`, so the fallback path is the same code.
+`asyncio` unix socket (`$XDG_RUNTIME_DIR/brain.sock`, mode `0600`). Writes bypass socket — always `core`/`storage`.
 
-**Parent:** [../../tech.md](../../tech.md)
-**Requirements:** [product.md](product.md)
-**Plan:** [plan.md](plan.md)
-
----
+**Links:** [product](product.md) · [plan](plan.md)
 
 ## Files
 
-```
-src/brain/daemon/server.py   # asyncio unix-socket server, request dispatch, lifecycle
-src/brain/daemon/client.py   # socket client + daemon-down fallback shim
-src/brain/index/watch.py     # watchdog observer -> incremental reindex
-src/brain/cli/admin.py       # daemon start|stop|status, reindex, status
-```
+`daemon/server.py` · `daemon/client.py` · `index/watch.py` · `cli/admin.py`
 
----
+## NDJSON RPC
 
-## Contract / API
+Request: `{"id":"<uuid>","method":"<name>","params":{...}}`  
+OK: `{"id":"…","ok":true,"result":{...}}` · Err: `{"ok":false,"error":{"code":N,"message":"…"}}`
 
-- **Transport.** Unix domain socket in a per-user runtime dir, created `0600`, owned by the running user, so other local users cannot drive it. Requests/responses are JSON framed over the socket. (Windows: loopback TCP or named pipe fallback — see open questions.)
-- **Warm state held:** parsed frontmatter index (powers `list`/`get`/tag-pull/`recent_activity`) and the wikilink/ID resolution graph (powers `related`/`build_context`). Ranking state (lexical + vectors) lives in `indexed`, not the daemon.
-- **Admin commands:** `daemon start|stop|status` (daemon process lifecycle — `daemon status` reports whether the daemon is up and the socket path); `reindex` (full rebuild from the folder); and the distinct top-level `brain status` (vault/index health: counts of notes and tasks-by-status, index freshness — last watch event and pending `indexed` updates — and dangling links). `brain status` ≠ `brain daemon status`: the former describes the data, the latter the process. `brain status` is intentionally a health report, not a team work-dashboard — in-progress and per-owner work is surfaced by `task list --status/--owner/--mine`.
+| Method | Fallback (daemon down) |
+|---|---|
+| `ping` | — |
+| `note.get` / `note.list` | file read / `notes/` scan |
+| `task.get` / `task.list` | file read / `tasks/` scan |
+| `search.query` / `search.tag_pull` | fallback.py / scan |
+| `activity.recent` | dir scan |
+| `vault.status` | on-demand scan |
+| `index.reindex` | no-op + notice |
 
-## Implementation Detail
+Watcher: reparse index, reconcile folders (no `updated` bump), call `on_vault_change(path)` — search registers `indexed_client` here.
 
-- **Fallback shim.** `daemon/client.py` attempts the socket connect; on failure (down / stale socket) it routes calls to the same `core`/`storage` functions the daemon would, with the search feature's built-in substring scan. `indexed`-backed ranking is unavailable in this mode, so `search` returns substring results and prints a one-line stderr notice unless `--quiet`.
-- **Watcher.** A `watchdog` observer on `tolaria_path` triggers, on create/modify/delete: re-parse frontmatter into the warm index, refresh the wikilink graph, reconcile folder location against `type`/`status`, and fire an incremental `indexed index update` so the search engine tracks the vault (bridging `indexed`'s pull-based model).
-- **Freshness.** `brain status` reports the last watch event and any pending `indexed index update` work.
+Hybrid unavailable daemon-down → [search tech](../search/tech.md) degradation matrix.
+
+**Perf:** <50ms scan paths; <200ms hybrid (warm + `indexed`). Windows: loopback TCP token in `~/.brain/run/token`.
 
 <!-- merge -->
-Graceful degradation is a project-wide invariant, not a daemon feature detail: availability never depends on the daemon. The connect-then-fallback contract and the rule that all write primitives live outside the daemon belong in root tech.md.
+Connect-then-fallback; writes never gated by daemon.
 <!-- /merge -->
-
-## Performance Budget
-
-- Search latency: **< 50 ms** lexical-only, **< 200 ms** hybrid against a warm daemon for a few-thousand-doc vault.
-- CLI startup must feel instant — heavy state lives in the daemon, not at process start. `note get`/`task get` are single-file reads.
-
-## Open Questions
-
-1. **Windows transport.** Unix domain sockets aren't native on older Windows. *Default:* loopback TCP (127.0.0.1, token-gated) or named pipe when a unix socket is unavailable.

@@ -3,73 +3,32 @@ type: feature-tech
 feature: notes
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-06-10
+updated: 2026-06-21
 ---
 
-# Feature: Notes — Architecture
+# Notes — Tech
 
-Notes are Markdown files with YAML frontmatter, manipulated through `core/notes.py` and the `brain note` Typer subcommands. The note schema, hash-ID scheme, atomic-write, and path-sandbox contracts are cross-cutting and defined in root [tech.md](../../tech.md); this feature consumes them and adds note-specific CRUD, section-aware appends, and wikilink resolution.
+Markdown + frontmatter via `core/notes.py`, `cli/note.py`. Schemas/IDs/storage: root [tech.md](../../tech.md).
 
-**Parent:** [../../tech.md](../../tech.md)
-**Requirements:** [product.md](product.md)
-**Plan:** [plan.md](plan.md)
-
----
+**Links:** [product](product.md) · [plan](plan.md)
 
 ## Files
 
-```
-src/brain/cli/note.py        # brain note new|append|update|delete|get|list
-src/brain/core/notes.py      # note CRUD, section-aware append, field updates
-src/brain/core/wikilinks.py  # [[link]] -> ID resolution, related graph
-src/brain/storage/locks.py   # O_EXCL entity lock — serializes note append/update RMW (cross-cutting, see root tech.md)
-src/brain/core/ids.py        # shared hash-ID generation (cross-cutting, see root tech.md)
-src/brain/schemas/note.py    # pydantic Note model (cross-cutting, see root tech.md)
-src/brain/storage/files.py   # atomic write + folder routing (cross-cutting, see root tech.md)
-src/brain/storage/sandbox.py # path sandbox (cross-cutting, see root tech.md)
-```
+`cli/note.py` · `core/notes.py` · `core/wikilinks.py` · (+ shared `schemas`, `storage`, `ids`)
 
----
+## Commands
 
-## Contract / API
+| Cmd | Summary |
+|---|---|
+| `new` | `--body` → `--file` → `$EDITOR` (TTY only) |
+| `append` | `<id\|slug>` + optional `--section` (`##`), `--timestamp` |
+| `update` | fields; `--tags +x,-y` or replace list; `--type` moves folder |
+| `get` | default preview; `--full` / `--meta-only` / `--related` |
+| `list` | filters; `--limit 20`; `--sort updated\|created\|title` |
+| `delete` | `--force` skips prompt |
 
-Note frontmatter (see root tech.md for the canonical schema invariant):
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `id` | string | yes | `n-` + hash; assigned on create, never changes |
-| `type` | enum | yes | `note` \| `log` \| `decision` \| `reference`; drives folder (`note → notes/` root; others → `notes/<type-plural>/`), per root tech.md routing |
-| `title` | string | yes | Human title; also feeds the ID hash |
-| `tags` | list[str] | no | Lowercase; AND/OR filtering and tag-pull |
-| `owner` | string | no | Defaults to `$BRAIN_AGENT` / `agent_name` |
-| `created` | datetime | yes | ISO-8601 UTC, set on create |
-| `updated` | datetime | yes | ISO-8601 UTC, bumped on every write |
-| `related` | list[id] | no | Wikilink refs resolved to IDs by `core/wikilinks.py` (daemon-independent; the daemon only caches the result) |
-
-Command surface:
-
-| Command | Args | Description |
-|---|---|---|
-| `note new` | `"<title>" [--type] [--tags] [--owner] [--body "<str>"] [--file <path>]` | Create a note. Body source: `--body`, else `--file` (read as UTF-8 — an external input path, not vault-sandboxed; the written destination is), else `$EDITOR` **only on an interactive TTY**; on a machine path (`--json`/MCP/no TTY) with no `--body`/`--file`, exit `2` rather than block on an editor |
-| `note append` | `<id\|slug> "<content>" [--section "<heading>"] [--timestamp]` | Append content, optionally under a heading / with a timestamp |
-| `note update` | `<id\|slug> [--title] [--tags (+tag/-tag)] [--type] [--body]` | Update fields; `+tag`/`-tag` add/remove, bare list replaces |
-| `note delete` | `<id\|slug> [--force]` | Hard delete; prompts unless `--force` |
-| `note get` | `<id\|slug> [--full \| --meta-only \| --related]` | Default: frontmatter + first 200 chars; `--full` returns the whole body, `--meta-only` frontmatter only, `--related` inlines related notes' frontmatter (resolved on-disk, daemon-independent) |
-| `note list` | `[--tags] [--any-tag] [--owner] [--type] [--since <ISO\|duration>] [--limit 20] [--sort updated\|created\|title]` | List notes; `--tags` is AND, `--any-tag` switches to OR; `--since` accepts an ISO timestamp or a duration (e.g. `24h`, `7d`) for "what changed recently" |
-
-## Implementation Detail
-
-- **Write path & filenames.** Files are named by ID — `<id>.md` — under the type-derived folder, so a `--title` change never renames the file (only a `--type` change moves it between folders). Every body-changing write (`new`, `append`, `update --body`) is the place `core/notes.py` invokes `core/wikilinks.py` to refresh `related` before the atomic rewrite; field-only updates that don't touch the body skip resolution.
-- **Concurrent writes.** `note append` and `note update` are read-modify-write: they acquire the `storage/locks.py` `O_EXCL` lock on `notes/.locks/<id>.lock`, re-read the file under the lock, apply the change, atomically rewrite (temp + `os.replace`), and release. Two agents editing one note (e.g. a shared `log`) serialize — no append is lost. `note new` needs no lock (the ID is fresh); `note delete` removes the lockfile alongside the note.
-- **Reads and coexistence.** `note get`/`note list` are cheap **direct reads** (single-file read / `notes/` directory scan + frontmatter filter) — always available, no engine or daemon required. They surface **only notes carrying a brain `id`**; files lacking brain frontmatter (e.g. Tolaria- or hand-authored without an `id`) are invisible to `brain note` commands — Brain coexists by writing vault-native files Tolaria's MCP reads, and leaves foreign files for Tolaria to serve. Heavy *recall* (semantic/hybrid) is delegated to the search feature (`indexed`), never reimplemented here.
-- **Section-aware append.** `--section "<heading>"` finds the matching `##` heading and appends beneath it, creating the heading at the end if absent. `--timestamp` prefixes the appended block with an ISO-8601 line. The whole note is rewritten atomically (temp + `os.replace`).
-- **Field updates.** `--tags +x,-y` mutates the set additively; a bare `--tags a,b` replaces it. `--type` changes drive a folder move (atomic rename) to keep folder routing consistent with frontmatter.
-- **Slug resolution.** `<id|slug>` accepts either a hash ID or a slug. An argument matching `^[nt]-[a-z0-9]{4,}$` is treated as an ID; anything else is a slug. A slug is the title lowercased, non-alphanumerics collapsed to single hyphens, leading/trailing hyphens trimmed. Slugs resolve to an ID through the index by exact normalized-title match; a slug matching two or more notes errors with exit `2` and lists the candidate IDs.
+Files named `<id>.md`. Body writes refresh `related` via `wikilinks.py` (on-disk scan, daemon-independent). Append/update use `notes/.locks/<id>.lock`. Slug = normalized title; ambiguous slug → exit `2`.
 
 <!-- merge -->
-Wikilink resolution is shared with tasks and the daemon's index: `core/wikilinks.py` resolves `[[Title]]` (normalized-title match → ID), `[[n-id]]`, and `[[t-id]]` (ID passthrough), maintaining a deduplicated `related` set. It runs against an on-disk title/ID scan and is **daemon-independent** — the daemon only caches the resolution, so wikilinks resolve identically when the daemon is down (and in feature 1, before a daemon exists). Unresolvable links stay verbatim in the body and surface via `brain status` as dangling. This belongs to the project-wide resolution contract.
+Wikilinks: `[[Title]]` → id by title match; `[[n-id]]`/`[[t-id]]` passthrough; dedupe `related`; unresolvable → dangling in `brain status`.
 <!-- /merge -->
-
-## Open Questions
-
-None — slug normalization, headless-create behaviour, folder routing, and daemon-independent wikilink resolution are now specified above.
