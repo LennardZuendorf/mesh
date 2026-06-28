@@ -49,19 +49,19 @@ coverage, and an instant-feeling CLI (heavy work lives in the warm daemon, not a
 knowledge and coordinating work over a single Tolaria Markdown folder — without a database, a
 memory subsystem, or an external task tracker.
 
-- **Notes + search = memory.** No separate memory store.
-- **Tasks = coordination = handoff.** `owner` / `claimed_by` / `claim` / `finish` / `blocks` / `blocked_by`.
-- **Markdown is the source of truth.** Brain owns the *interface*, not the data.
+- **Notes + search = memory.** No separate memory store; recall delegates to `indexed`.
+- **Tasks = coordination = handoff.** v1: `owner` / `claimed_by` / `claim` / `finish` / `cancel` / `list`. The dependency graph (`blocks` / `blocked_by` readiness, `release`, strict gate) is a deferred later phase.
+- **Markdown is the source of truth.** Brain owns the *interface* (and writes), not the data.
 
 **Connections (what brain talks to):**
 
 | System | Role | Boundary |
 |---|---|---|
-| **Tolaria vault** | The one Markdown folder (`notes/`, `tasks/`) — source of truth | Brain reads/writes files; Git/sync is Tolaria's job |
-| **indexed.sh** | Hybrid-search embeddings backend (`indexed` embedder) | Brain wraps it behind the embedder adapter; falls back to BM25 if absent |
-| **Cowork agents** | Consumers (flights-agent, tolaria-agent, …) | Call brain via CLI (`--json`) and, later, MCP tools |
+| **Tolaria vault + MCP** | The one Markdown folder (`notes/`, `tasks/`) — source of truth — plus Tolaria's filesystem-direct MCP read tools | Brain **owns writes** and cheap direct reads; **coexists** with Tolaria on the same folder; Git/sync and the vault are Tolaria's job |
+| **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Brain's `search` is a thin wrapper; the brain↔indexed contract is co-designed; falls back to a built-in substring scan if absent |
+| **Cowork agents** | Consumers (flights-agent, tolaria-agent, …) | Call brain via CLI (`--json`) and the `memory` MCP tools |
 | **`$BRAIN_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine` |
-| **The daemon** | Watcher + indexer + search, shared by CLI and MCP | An accelerator, never a hard dependency — CLI degrades gracefully when it's down |
+| **The daemon** | Watcher + warm frontmatter index; drives `indexed index update`; shared by CLI and MCP | An accelerator, never a hard dependency — CLI degrades gracefully when it's down |
 
 ---
 
@@ -70,8 +70,9 @@ memory subsystem, or an external task tracker.
 **Language & runtime:** Python 3.11+, `uv`.
 
 **Core libraries:** `typer` (CLI), `python-frontmatter` (YAML frontmatter), `pydantic` v2
-(schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search: in-process
-BM25 + a pluggable embedder (`indexed` | `openai` | `local`), RRF merge.
+(schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search is delegated to
+the first-party `indexed` engine (hybrid lexical + vector); Brain keeps only a deterministic
+tag-pull and a substring fallback in-process.
 
 **Dev tools:** `ruff` (lint/format), `mypy` (strict), `pytest` + `pytest-cov`, `pre-commit`.
 
@@ -103,8 +104,8 @@ Allowed types: `feat`, `fix`, `refactor`, `perf`, `style`, `test`, `docs`, `buil
 
 ```
 feat(task): add atomic claim via O_EXCL lockfile
-fix(search): fall back to BM25 when daemon is down
-docs(spec): clarify finish unblock semantics
+fix(search): fall back to substring scan when indexed is down
+docs(spec): wrap indexed for ranked retrieval
 ```
 
 ### Branching & pushing
@@ -126,13 +127,13 @@ brain/
 │   ├── product.md       # root: mini PRD            ├── tech.md     # root: architecture
 │   ├── design.md        # root: CLI design language  ├── plan.md     # root: feature sequence
 │   ├── lessons.md       # root: accumulated lessons
-│   └── features/        # notes, tasks, daemon, search, mcp (product + tech + plan each)
+│   └── features/        # notes, tasks, daemon, search, memory (product + tech + plan each)
 └── src/brain/
     ├── cli/             # typer app: note, task, search, daemon, status (thin)
-    ├── mcp/             # FastMCP server over the same daemon (thin)
-    ├── daemon/          # asyncio unix-socket server: watcher + indexer + search
-    ├── core/            # domain logic: ids, notes, tasks, wikilinks
-    ├── index/           # bm25, embedder adapter, RRF fusion, watch
+    ├── mcp/             # FastMCP memory server over the same daemon (thin)
+    ├── daemon/          # asyncio unix-socket server: watcher + warm frontmatter index (drives indexed)
+    ├── core/            # domain logic: ids, notes, tasks, wikilinks, activity, context
+    ├── index/           # indexed client, tag-pull, substring fallback, watch
     ├── schemas/         # pydantic models (note, task, config)
     └── storage/         # atomic writes, O_EXCL locks, path sandbox
 ```
@@ -144,7 +145,8 @@ brain/
 - **Daemon is an accelerator, not a gatekeeper.** Every command works (with degraded search) when
   the daemon is down. Write primitives live in `core`/`storage`, not the daemon.
 - **All writes are atomic** (temp-file + `os.replace`) and **idempotent**. `task claim` is an
-  atomic test-and-set (`O_EXCL`); `task finish` is atomic and idempotent across files.
+  atomic test-and-set (`O_EXCL`); `task finish` is atomic and idempotent (the multi-file
+  unblock-cascade arrives with the deferred dependency-graph phase).
 - **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys; never inject machinery into bodies.
 - **Path sandboxing.** All file access stays inside `tolaria_path`; reject traversal/symlink escapes.
 - **Agent content is data**, never instructions or shell input.
