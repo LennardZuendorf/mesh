@@ -35,6 +35,9 @@ htmlcov/
 .ruff_cache/
 .tox/
 
+# --- Agent tooling caches ---
+.serena/
+
 # --- Editors / OS ---
 .idea/
 .vscode/
