@@ -161,6 +161,22 @@ def test_append_roundtrips_unknown_frontmatter_keys(cfg: Config, vault: Path) ->
     assert meta["custom_ref"] == "PROJ-1"
 
 
+def test_append_recomputes_related_dropping_stale_ids(cfg: Config, vault: Path) -> None:
+    # ``related`` is a pure function of the *full* body, recomputed on every
+    # append. Seed a note whose body already links ``[[n-keep]]`` but whose
+    # stored ``related`` also carries a stale id (``n-ghost``) no longer backed by
+    # any wikilink. After appending a block with a new link, ``related`` reflects
+    # only the ids present in the body — the stale one is dropped, the new one
+    # added, in first-seen order.
+    path = _seed_note(
+        vault,
+        body="Intro links [[n-keep]].",
+        extra={"related": ["n-keep", "n-ghost"]},
+    )
+    append_note(cfg, "n-seed", "now also see [[n-new]]")
+    assert _reload(path).metadata["related"] == ["n-keep", "n-new"]
+
+
 def test_append_uses_atomic_write(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -17,6 +17,7 @@ import typer
 
 from brain import __version__
 from brain.cli.note import note_app
+from brain.cli.task import task_app
 
 
 @dataclass
@@ -34,10 +35,6 @@ app = typer.Typer(
     help="Three verbs, one daemon, one folder — notes + search = memory, tasks = handoff.",
     no_args_is_help=True,
     add_completion=False,
-)
-
-task_app = typer.Typer(
-    name="task", help="Coordinate work as claimable task files.", no_args_is_help=True
 )
 
 app.add_typer(note_app, name="note")

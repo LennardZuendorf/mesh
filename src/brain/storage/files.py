@@ -22,6 +22,15 @@ _NOTE_SUBDIRS: dict[str, tuple[str, ...]] = {
     "reference": ("notes", "references"),
 }
 
+# task status -> path relative to the vault root. Live work (open/claimed) sits
+# in ``tasks/open/``; terminal work (done/cancelled) moves to ``tasks/done/``.
+_TASK_SUBDIRS: dict[str, tuple[str, ...]] = {
+    "open": ("tasks", "open"),
+    "claimed": ("tasks", "open"),
+    "done": ("tasks", "done"),
+    "cancelled": ("tasks", "done"),
+}
+
 
 def atomic_write(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically (temp file + ``os.replace``)."""
@@ -50,4 +59,17 @@ def note_folder(note_type: str, tolaria_path: Path) -> Path:
         parts = _NOTE_SUBDIRS[note_type]
     except KeyError:
         raise ValueError(f"unknown note type: {note_type!r}") from None
+    return tolaria_path.joinpath(*parts)
+
+
+def task_folder(status: str, tolaria_path: Path) -> Path:
+    """Return the vault folder for a task ``status`` (raises ``ValueError`` if unknown).
+
+    ``open``/``claimed`` route to ``tasks/open/``; ``done``/``cancelled`` route to
+    ``tasks/done/``.
+    """
+    try:
+        parts = _TASK_SUBDIRS[status]
+    except KeyError:
+        raise ValueError(f"unknown task status: {status!r}") from None
     return tolaria_path.joinpath(*parts)
