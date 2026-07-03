@@ -324,6 +324,37 @@ def test_ambiguous_slug_raises(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Finding #4 — amend verbs refuse foreign (non-brain) files                     #
+# --------------------------------------------------------------------------- #
+
+
+def _seed_foreign(vault: Path, name: str, title: str) -> Path:
+    """Write a coexisting Tolaria file with no brain ``n-`` id (non-``n-`` stem)."""
+    path = vault / "notes" / f"{name}.md"
+    post = frontmatter.Post("Foreign body.", title=title, tags=["x"])
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    return path
+
+
+def test_append_refuses_foreign_file(cfg: Config, vault: Path) -> None:
+    foreign = _seed_foreign(vault, "tolaria-foo", "Tolaria Foo")
+    before = foreign.read_text(encoding="utf-8")
+    with pytest.raises(NoteNotFoundError):
+        append_note(cfg, "tolaria-foo", "x")  # by stem
+    with pytest.raises(NoteNotFoundError):
+        append_note(cfg, "tolaria-foo", "x")  # by slug of title
+    assert foreign.read_text(encoding="utf-8") == before  # untouched
+
+
+def test_update_refuses_foreign_file(cfg: Config, vault: Path) -> None:
+    foreign = _seed_foreign(vault, "tolaria-bar", "Tolaria Bar")
+    before = foreign.read_text(encoding="utf-8")
+    with pytest.raises(NoteNotFoundError):
+        update_note(cfg, "tolaria-bar", tags="+x")
+    assert foreign.read_text(encoding="utf-8") == before  # untouched
+
+
+# --------------------------------------------------------------------------- #
 # CLI — brain note append / update                                             #
 # --------------------------------------------------------------------------- #
 

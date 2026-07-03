@@ -29,6 +29,7 @@ from typing import get_args
 import frontmatter
 from pydantic import ValidationError
 
+from brain.core.ids import generate_note_id
 from brain.core.wikilinks import resolve_wikilinks
 from brain.schemas.config import Config
 from brain.schemas.note import Note, NoteType
@@ -105,20 +106,24 @@ def _iter_note_files(config: Config) -> Iterator[Path]:
 
 
 def _resolve_path(config: Config, id_or_slug: str) -> Path:
-    """Resolve ``<id|slug>`` to a note path, sandbox-checked.
+    """Resolve ``<id|slug>`` to a *brain* note path, sandbox-checked.
 
-    Id match (filename stem) wins; otherwise a normalized-title slug match. A
-    slug hitting multiple notes raises :class:`AmbiguousSlugError`; no match
-    raises :class:`NoteNotFoundError`.
+    Only files whose stem carries a brain id (``n-`` prefix) are candidates, so a
+    coexisting Tolaria/foreign ``.md`` is never resolved (and thus never read,
+    amended, or deleted) — mirroring the id gate ``list_notes`` applies. Id match
+    (filename stem) wins; otherwise a normalized-title slug match. A slug hitting
+    multiple notes raises :class:`AmbiguousSlugError`; no match raises
+    :class:`NoteNotFoundError`.
     """
     vault = config.core.tolaria_path
-    by_id = [p for p in _iter_note_files(config) if p.stem == id_or_slug]
+    brain_files = [p for p in _iter_note_files(config) if p.stem.startswith(_ID_PREFIX)]
+    by_id = [p for p in brain_files if p.stem == id_or_slug]
     if by_id:
         return safe_resolve(vault, by_id[0])
 
     target = _slugify(id_or_slug)
     by_slug: list[Path] = []
-    for path in _iter_note_files(config):
+    for path in brain_files:
         title = frontmatter.loads(path.read_text(encoding="utf-8")).metadata.get("title")
         if isinstance(title, str) and _slugify(title) == target:
             by_slug.append(path)
@@ -187,6 +192,58 @@ def _format_block(text: str, timestamp: bool) -> str:
     if timestamp:
         return f"{_now().strftime('%Y-%m-%dT%H:%M:%SZ')}\n{text}"
     return text
+
+
+def _id_taken(config: Config, candidate: str) -> bool:
+    """Whether a note file with stem ``candidate`` already exists (id collision)."""
+    return any(path.stem == candidate for path in _iter_note_files(config))
+
+
+def create_note(
+    config: Config,
+    title: str,
+    *,
+    note_type: str = "note",
+    tags: list[str] | None = None,
+    owner: str | None = None,
+    body: str = "",
+) -> Note:
+    """Create a new note and return its validated frontmatter (R1).
+
+    Generates a deterministic hash ``n-`` id (extended on collision), routes the
+    file into the folder matching ``note_type`` (``notes/`` for ``note``;
+    ``notes/{logs,decisions,references}/`` for the typed variants), derives
+    ``related`` from the body's wikilinks, and writes ``<id>.md`` atomically.
+    ``created`` and ``updated`` are set to the same instant (birth). ``owner``
+    defaults to the resolved config agent (``$BRAIN_AGENT`` override applied at
+    load) when not given. Raises ``ValueError`` for an unknown ``note_type``.
+    """
+    if note_type not in _NOTE_TYPES:
+        raise ValueError(f"invalid note type: {note_type!r}")
+
+    vault = config.core.tolaria_path
+    now = _now()
+    note_id = generate_note_id(
+        now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
+    )
+    _, related = resolve_wikilinks(body, vault)
+    meta: dict[str, object] = {
+        "id": note_id,
+        "type": note_type,
+        "title": title,
+        "tags": list(tags or []),
+        "owner": owner if owner is not None else config.agent,
+        "created": now,
+        "updated": now,
+        "related": related,
+    }
+    note = Note.model_validate(meta)
+
+    path = safe_resolve(vault, note_folder(note_type, vault) / f"{note_id}.md")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    atomic_write(path, frontmatter.dumps(post))
+    return note
 
 
 def append_note(
@@ -293,19 +350,22 @@ def update_note(
 
 
 def delete_note(config: Config, id_or_slug: str) -> str:
-    """Hard-delete a note and clear any lock residue; return the deleted id.
+    """Hard-delete a note under the entity lock; return the deleted id.
 
     Resolves ``<id|slug>`` to a sandbox-checked path (raising
     :class:`NoteNotFoundError` / :class:`AmbiguousSlugError` before touching the
-    filesystem), removes the file permanently — no archive, no trash — and then
-    unlinks ``notes/.locks/<id>.lock`` if present. Cleanup is unconditional: the
-    lock is *removed*, never acquired, so a residue lock (including the empty
-    create-before-write window) cannot block the delete.
+    filesystem), then removes the file permanently — no archive, no trash —
+    *inside* the per-entity ``O_EXCL`` lock. Holding the lock serializes the
+    delete against a concurrent ``append``/``update`` so a racing writer can never
+    resurrect the note or have its in-flight lock stolen. :func:`_hold_lock`
+    clears only *stale* locks (dead PID or aged out) on acquire and releases the
+    lock on exit, so residue is cleaned without unconditionally destroying a live
+    lock.
     """
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
-    path.unlink()
-    _lock_path(config, note_id).unlink(missing_ok=True)
+    with _hold_lock(_lock_path(config, note_id)):
+        path.unlink()
     return note_id
 
 

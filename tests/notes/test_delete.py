@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,6 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 import brain.cli.note as note_cli
+import brain.core.notes as notes_core
 from brain.cli.__main__ import app
 from brain.core.notes import (
     AmbiguousSlugError,
@@ -33,6 +36,16 @@ from brain.core.notes import (
 )
 from brain.schemas.config import Config, load_config
 from brain.storage.files import note_folder
+from brain.storage.locks import acquire
+
+_STALE_AGE = 400.0  # seconds; > LOCK_TTL_SECONDS (300) so a lock ages out
+
+
+def _age_out(lock: Path) -> None:
+    """Backdate a lock's mtime past the TTL so it is treated as stale residue."""
+    old = time.time() - _STALE_AGE
+    os.utime(lock, (old, old))
+
 
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -111,12 +124,18 @@ def test_delete_note_ambiguous_slug_raises(cfg: Config, vault: Path) -> None:
     assert b.exists()
 
 
-def test_delete_note_removes_live_lock_residue(cfg: Config, vault: Path) -> None:
-    """A non-stale lock (live PID) must be cleaned up unconditionally."""
+def test_delete_note_clears_stale_lock_residue(cfg: Config, vault: Path) -> None:
+    """A *stale* lock (aged past the TTL) is cleared as delete acquires the lock.
+
+    (Previously this seeded a live-PID lock and asserted unconditional removal;
+    finding #2 corrected the contract — a *live* lock is now respected, only stale
+    residue is cleared.)
+    """
     _seed_note(vault, note_id="n-lock")
     lock = _lock_path(vault, "n-lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")  # a fresh, live lock
+    lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    _age_out(lock)  # aged out -> stale, so _hold_lock clears and re-acquires it
     assert lock.exists()
 
     delete_note(cfg, "n-lock")
@@ -141,6 +160,86 @@ def test_delete_note_is_hard_no_archive_or_trash(cfg: Config, vault: Path) -> No
     assert not (vault / "notes" / ".trash").exists()
     assert not (vault / "notes" / ".archive").exists()
     assert not _lock_path(vault, "n-hard").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Finding #1 — foreign (non-brain) files are never resolved / deleted          #
+# --------------------------------------------------------------------------- #
+
+
+def _seed_foreign(vault: Path, name: str, title: str) -> Path:
+    """Write a coexisting Tolaria file with no brain ``n-`` id (non-``n-`` stem)."""
+    path = vault / "notes" / f"{name}.md"
+    post = frontmatter.Post("Foreign content.", title=title, tags=["x"])
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    return path
+
+
+def test_delete_note_refuses_foreign_by_stem(cfg: Config, vault: Path) -> None:
+    """A foreign file addressed by its filename stem is not-found, not deleted."""
+    foreign = _seed_foreign(vault, "tolaria-foo", "Tolaria Foo")
+    with pytest.raises(NoteNotFoundError):
+        delete_note(cfg, "tolaria-foo")
+    assert foreign.exists()  # data loss averted
+
+
+def test_delete_note_refuses_foreign_by_slug(cfg: Config, vault: Path) -> None:
+    """A foreign file addressed by its title slug is not-found, not deleted."""
+    foreign = _seed_foreign(vault, "tolaria-bar", "Tolaria Bar")
+    with pytest.raises(NoteNotFoundError):
+        delete_note(cfg, "tolaria-bar")  # == _slugify("Tolaria Bar")
+    assert foreign.exists()
+
+
+def test_cli_delete_foreign_exits_3_keeps_file(cfg: Config, vault: Path) -> None:
+    foreign = _seed_foreign(vault, "tolaria-cli", "Tolaria Cli")
+    result = _invoke(["note", "delete", "tolaria-cli", "--force"])
+    assert result.exit_code == 3, result.output
+    assert foreign.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Finding #2 — delete acquires the entity lock (no race with a concurrent edit) #
+# --------------------------------------------------------------------------- #
+
+
+def test_delete_note_acquires_entity_lock(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """delete_note must take the per-entity lock, not blindly unlink it."""
+    seen: list[Path] = []
+    real = notes_core.acquire
+
+    def spy(lock_path: Path):  # type: ignore[no-untyped-def]
+        seen.append(lock_path)
+        return real(lock_path)
+
+    _seed_note(vault, note_id="n-lockacq")
+    monkeypatch.setattr(notes_core, "acquire", spy)
+    delete_note(cfg, "n-lockacq")
+    assert seen == [_lock_path(vault, "n-lockacq")]
+
+
+def test_delete_serializes_behind_a_held_lock(cfg: Config, vault: Path) -> None:
+    """A live lock blocks the delete until released — the note survives meanwhile."""
+    path = _seed_note(vault, note_id="n-ser")
+    lock = _lock_path(vault, "n-ser")
+    done = threading.Event()
+
+    def _delete() -> None:
+        delete_note(cfg, "n-ser")
+        done.set()
+
+    with acquire(lock):  # hold the entity lock live (simulates a concurrent edit)
+        worker = threading.Thread(target=_delete)
+        worker.start()
+        time.sleep(0.1)
+        assert path.exists()  # delete is blocked; note not yet removed
+        assert not done.is_set()
+    worker.join(timeout=20)
+    assert not worker.is_alive()
+    assert done.is_set()
+    assert not path.exists()  # delete completed once the lock was released
 
 
 # --------------------------------------------------------------------------- #
@@ -185,11 +284,12 @@ def test_cli_force_json_emits_object(cfg: Config, vault: Path) -> None:
     assert obj["id"] == "n-json"
 
 
-def test_cli_force_removes_lock_residue(cfg: Config, vault: Path) -> None:
+def test_cli_force_clears_stale_lock_residue(cfg: Config, vault: Path) -> None:
     _seed_note(vault, note_id="n-flock")
     lock = _lock_path(vault, "n-flock")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    _age_out(lock)  # stale residue -> cleared on acquire
     result = _invoke(["note", "delete", "n-flock", "--force"])
     assert result.exit_code == 0, result.output
     assert not lock.exists()

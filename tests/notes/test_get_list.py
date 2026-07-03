@@ -149,6 +149,16 @@ def test_get_note_not_found_raises(cfg: Config, vault: Path) -> None:
         get_note(cfg, "n-missing")
 
 
+def test_get_note_refuses_foreign_file(cfg: Config, vault: Path) -> None:
+    """Finding #1: a coexisting Tolaria file is never resolved by get."""
+    foreign = _seed_tolaria(vault, "tolaria-foo", {"title": "Tolaria Foo"})
+    with pytest.raises(NoteNotFoundError):
+        get_note(cfg, "tolaria-foo")  # by stem
+    with pytest.raises(NoteNotFoundError):
+        get_note(cfg, "tolaria-foo")  # by slug of the title
+    assert foreign.exists()  # untouched
+
+
 # --------------------------------------------------------------------------- #
 # list_notes (core) — brain-id gate + filters + sort/limit                     #
 # --------------------------------------------------------------------------- #
@@ -322,6 +332,24 @@ def test_cli_get_not_found_exits_3(brain_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-seed")
     result = _invoke(["note", "get", "n-missing"])
     assert result.exit_code == 3
+
+
+def test_cli_get_foreign_file_exits_3(brain_config: Path, vault: Path) -> None:
+    """Finding #1: a foreign file addressed by stem is not-found (exit 3), no crash."""
+    _seed_tolaria(vault, "tolaria-cli", {"title": "Tolaria Cli"})
+    result = _invoke(["note", "get", "tolaria-cli"])
+    assert result.exit_code == 3, result.output
+
+
+def test_cli_get_broken_brain_file_exits_3(brain_config: Path, vault: Path) -> None:
+    """Finding #3: a brain-id file with malformed frontmatter maps to exit 3, not a traceback."""
+    # Valid n- stem (so it resolves) but frontmatter is missing required fields.
+    path = vault / "notes" / "n-broken.md"
+    post = frontmatter.Post("body", id="n-broken", type="note")  # no title/created/updated
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    result = _invoke(["note", "get", "n-broken"])
+    assert result.exit_code == 3, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.output
 
 
 def test_cli_get_ambiguous_slug_exits_2_lists_ids(brain_config: Path, vault: Path) -> None:

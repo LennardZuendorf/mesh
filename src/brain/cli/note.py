@@ -14,22 +14,28 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+from typing import get_args
 
 import typer
+from pydantic import ValidationError
 
 from brain.core.notes import (
     AmbiguousSlugError,
     NoteNotFoundError,
     NoteView,
     append_note,
+    create_note,
     delete_note,
     get_note,
     list_notes,
     resolve_slug,
     update_note,
 )
-from brain.schemas.config import load_config
-from brain.schemas.note import Note
+from brain.schemas.config import Config, load_config
+from brain.schemas.note import Note, NoteType
+
+_NOTE_TYPES: tuple[str, ...] = get_args(NoteType)
 
 note_app = typer.Typer(
     name="note",
@@ -52,6 +58,82 @@ def _emit(ctx: typer.Context, note: Note, verb: str) -> None:
         )
         return
     typer.echo(f"{verb} {note.id}")
+
+
+def _owner_allowed(config: Config, owner: str) -> bool:
+    """Whether ``owner`` is a valid identity per ``[tasks].collections``.
+
+    An empty ``collections`` list disables the check (any owner allowed); a
+    non-empty list is authoritative and rejects unknown identities.
+    """
+    collections = config.tasks.collections
+    return not collections or owner in collections
+
+
+def _edit_body() -> str:  # pragma: no cover - interactive-only ($EDITOR) path
+    """Open ``$EDITOR`` for the body and return the entered text (TTY only)."""
+    import click
+
+    return click.edit() or ""
+
+
+def _resolve_body(ctx: typer.Context, body: str | None, body_file: str | None) -> str:
+    """Resolve the note body per precedence: ``--body`` → ``--file`` → ``$EDITOR``.
+
+    On a headless path (``--json``/``--quiet`` or a non-interactive stdin) with
+    neither source given, refuses (exit 2) rather than launching ``$EDITOR``.
+    """
+    if body is not None:
+        return body
+    if body_file is not None:
+        try:
+            return Path(body_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            typer.echo(f"cannot read --file {body_file}: {exc}", err=True)
+            raise typer.Exit(2) from None
+
+    opts = ctx.obj
+    machine = getattr(opts, "json", False) or getattr(opts, "quiet", False)
+    if machine or not _is_tty():
+        typer.echo(
+            "no body: pass --body or --file on a non-interactive path",
+            err=True,
+        )
+        raise typer.Exit(2)
+    return _edit_body()
+
+
+@note_app.command("new")
+def new_command(
+    ctx: typer.Context,
+    title: str = typer.Argument(..., help="Note title."),
+    note_type: str = typer.Option("note", "--type", help="note | log | decision | reference."),
+    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags."),
+    owner: str | None = typer.Option(
+        None, "--owner", help="Owner identity (must be in [tasks].collections)."
+    ),
+    body: str | None = typer.Option(None, "--body", help="Note body text."),
+    body_file: str | None = typer.Option(None, "--file", help="Read the body from this file."),
+) -> None:
+    """Create a note (routed by type); body from --body, --file, or $EDITOR (TTY)."""
+    config = load_config()
+    if note_type not in _NOTE_TYPES:
+        typer.echo(f"invalid note type: {note_type}", err=True)
+        raise typer.Exit(2)
+    if owner is not None and not _owner_allowed(config, owner):
+        typer.echo(f"unknown owner: {owner}", err=True)
+        raise typer.Exit(2)
+
+    body_text = _resolve_body(ctx, body, body_file)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    try:
+        note = create_note(
+            config, title, note_type=note_type, tags=tag_list, owner=owner, body=body_text
+        )
+    except ValidationError:
+        typer.echo("invalid note", err=True)
+        raise typer.Exit(2) from None
+    _emit(ctx, note, "created")
 
 
 @note_app.command("append")
@@ -142,6 +224,11 @@ def get_command(
     except AmbiguousSlugError as exc:
         typer.echo(f"ambiguous slug: {target}: {', '.join(exc.ids)}", err=True)
         raise typer.Exit(2) from None
+    except ValidationError:
+        # A brain-id file with malformed/incomplete frontmatter is unreadable as a
+        # note; treat it as not-found rather than crashing with a traceback.
+        typer.echo(f"note not found: {target}", err=True)
+        raise typer.Exit(3) from None
 
     opts = ctx.obj
     if getattr(opts, "quiet", False):
