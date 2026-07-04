@@ -317,7 +317,7 @@ def _status_lines(report: dict[str, Any]) -> list[str]:
 def _indexed_delegate() -> Any | None:
     """The search feature's ``indexed`` reindex delegate, or ``None`` if unbuilt."""
     try:
-        from brain.index import indexed_client  # type: ignore[attr-defined]
+        from brain.index import indexed_client
     except ImportError:
         return None
     return indexed_client
@@ -330,4 +330,4 @@ def reindex_command(ctx: typer.Context) -> None:
     if delegate is None:
         _notice(ctx, "search index unavailable (indexed not configured)")
         return
-    delegate.reindex(config)  # pragma: no cover - search feature not yet built
+    delegate.reindex(config)

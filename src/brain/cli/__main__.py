@@ -18,6 +18,7 @@ import typer
 from brain import __version__
 from brain.cli.admin import daemon_app, reindex_command, status_command
 from brain.cli.note import note_app
+from brain.cli.search import search_app
 from brain.cli.task import task_app
 
 
@@ -40,6 +41,7 @@ app = typer.Typer(
 
 app.add_typer(note_app, name="note")
 app.add_typer(task_app, name="task")
+app.add_typer(search_app, name="search")
 app.add_typer(daemon_app, name="daemon")
 app.command(name="status", help="Report vault health (counts, freshness, links, locks).")(
     status_command

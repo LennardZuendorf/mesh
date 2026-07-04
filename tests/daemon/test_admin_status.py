@@ -13,8 +13,9 @@ Three surfaces, matching the unit's acceptance criteria (spec R4):
   count, tasks-by-status, freshness (newest mtime + age), dangling wikilinks, and
   stale ``O_EXCL`` locks (PID dead **or** age > 300 s). Read-only: it never bumps
   ``updated`` nor rewrites a file.
-* **``reindex``** — degrades gracefully while ``indexed`` is unbuilt: one stderr
-  notice, exit 0, suppressed under ``--quiet``.
+* **``reindex``** — delegates to the search feature's ``indexed`` client
+  (``indexed_client.reindex``); now that the client is built, the delegate is
+  invoked (the subprocess seam is mocked here so no real ``indexed`` runs).
 
 PID-path resolution reads ``$XDG_RUNTIME_DIR``; every test that touches it pins the
 runtime dir into ``tmp_path`` so no real ``~/.brain/run`` file is ever written.
@@ -352,20 +353,33 @@ def test_status_reports_stale_locks(cfg: Config, vault: Path, runtime_dir: Path)
 
 
 # --------------------------------------------------------------------------- #
-# reindex — graceful degradation while indexed is unbuilt                     #
+# reindex — delegates to the indexed client                                   #
 # --------------------------------------------------------------------------- #
 
 
-def test_reindex_degrades_with_notice(cfg: Config, runtime_dir: Path) -> None:
+def test_reindex_delegates_to_indexed(
+    cfg: Config, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain.index import indexed_client
+
+    calls: list[Config] = []
+    monkeypatch.setattr(indexed_client, "reindex", calls.append)
     result = _invoke(["reindex"])
     assert result.exit_code == 0, result.output
-    assert "search index unavailable" in result.output
+    assert len(calls) == 1
+    assert isinstance(calls[0], Config)  # the delegate ran with the loaded config
 
 
-def test_reindex_quiet_suppresses_notice(cfg: Config, runtime_dir: Path) -> None:
+def test_reindex_quiet_still_delegates(
+    cfg: Config, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain.index import indexed_client
+
+    calls: list[Config] = []
+    monkeypatch.setattr(indexed_client, "reindex", calls.append)
     result = _invoke(["--quiet", "reindex"])
     assert result.exit_code == 0, result.output
-    assert "search index unavailable" not in result.output
+    assert len(calls) == 1
 
 
 # --------------------------------------------------------------------------- #

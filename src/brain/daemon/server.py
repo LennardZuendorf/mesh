@@ -22,8 +22,11 @@ fallback, whereas a ``404`` (truly unknown) propagates. When the
 server is constructed **with a vault ``config``**, daemon/2 warms a
 :class:`~brain.index.watch.VaultIndex` (via a :class:`~brain.index.watch.Watcher`)
 *before* the socket accepts connections and swaps the ``activity.recent`` stub for
-a real handler served from that warm index. A config-less server (used by the
-transport tests) keeps the ``503`` stub, so the watcher is never a hard dependency.
+a real handler served from that warm index. That same config-ful startup also
+registers the search feature's :func:`~brain.index.indexed_client.incremental_update`
+on the watcher change-hook, so every vault edit re-indexes that file in ``indexed``.
+A config-less server (used by the transport tests) keeps the ``503`` stub and
+registers no hook, so the watcher is never a hard dependency.
 """
 
 from __future__ import annotations
@@ -37,7 +40,13 @@ from pathlib import Path
 from typing import Any
 
 from brain.daemon.client import default_socket_path
-from brain.index.watch import DEFAULT_RECENT_LIMIT, VaultIndex, Watcher
+from brain.index.indexed_client import incremental_update
+from brain.index.watch import (
+    DEFAULT_RECENT_LIMIT,
+    VaultIndex,
+    Watcher,
+    register_change_hook,
+)
 from brain.schemas.config import Config, load_config
 
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -116,9 +125,14 @@ class DaemonServer:
         # between bind and chmod, the enclosing dir already blocks other users.
         self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=_RUN_DIR_MODE)
         if self._config is not None and self._watcher is None:
+            config = self._config  # local binding: mypy narrows it to Config for the closure
             self._index = VaultIndex()
-            self._watcher = Watcher(self._config, self._index)
+            self._watcher = Watcher(config, self._index)
             self._watcher.start()  # warm scan + observer, before we bind the socket
+            # Freshness: every watcher-driven vault change re-indexes that one path in
+            # ``indexed``. ``incremental_update`` swallows its own failures, so a dead
+            # ``indexed`` never crashes the observer thread this hook runs on.
+            register_change_hook(lambda p: incremental_update(config, p))
             self._handlers = {**self._handlers, "activity.recent": self._activity_handler()}
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()  # clear a stale socket from a prior run
