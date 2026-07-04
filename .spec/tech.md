@@ -2,12 +2,8 @@
 type: entrypoint
 scope: technical
 children:
-  - features/notes/plan.md
-  - features/tasks/plan.md
-  - features/daemon/plan.md
-  - features/search/plan.md
-  - features/memory/plan.md
-updated: 2026-06-21
+  - plan.md
+updated: 2026-07-04
 ---
 
 # Brain — Technical Architecture
@@ -69,7 +65,7 @@ src/brain/
 | Sandbox | `storage/sandbox.py` | `realpath` must stay in `tolaria_path` |
 | Exit codes | `cli/` | 0 ok · 1 error · 2 validation · 3 not found · 4 claimed · 5 blocked (`--strict` only, Phase 3) |
 | Config | `~/.brain/config.toml` | `[core]` path+agent · `[search]` collection, hybrid, threshold · `[tasks]` collections. `$BRAIN_AGENT` overrides agent. Missing config → exit 2. Test override: `BRAIN_CONFIG_PATH`. |
-| Socket | `daemon/*.py` | NDJSON RPC; envelope in [daemon/tech.md](features/daemon/tech.md) |
+| Socket | `daemon/server.py`, `client.py` | NDJSON RPC over a `0600` unix socket; envelope + method table under [Implemented surfaces](#implemented-surfaces) |
 
 ### Note fields
 
@@ -85,9 +81,21 @@ src/brain/
 
 ## Build order
 
-`notes → tasks → daemon → search → memory → tasks-graph (Phase 3)`
+`notes → tasks → daemon → search → memory` — **all implemented (Phase 1–2).** `tasks-graph` deferred to Phase 3.
 
-Feature detail: `features/<name>/tech.md`.
+Implementation is the source of truth: `src/brain/` + `tests/` (578 tests, mypy strict, ruff clean).
+
+---
+
+## Implemented surfaces
+
+Contracts compounded from the (now-deleted) feature specs. Full detail lives in the code + tests cited.
+
+- **Wikilinks** — `core/wikilinks.py`. `[[Title]]` → id by title match; `[[n-id]]`/`[[t-id]]` passthrough; `related` deduped; unresolvable → dangling, counted by `brain status`.
+- **RPC** — `daemon/server.py`, `client.py`. NDJSON, one JSON object per line. Request `{id,method,params}` · ok `{id,ok:true,result}` · err `{ok:false,error:{code,message}}`. Connect-then-fallback: every read has a daemon-down fallback, writes bypass the socket entirely. A `503` (reserved-but-unwired method) makes the client run its file-op fallback; a `404` (unknown) propagates. Methods: `ping`, `note.get/list`, `task.get/list`, `activity.recent`, `search.*`, `vault.status`, `index.reindex`.
+- **Search** — `index/indexed_client.py`, `fallback.py`, `tagpull.py`. Result `{id,type,title,score,tags?,owner?,updated?,snippet?,path}`; foreign files surface with `id:null`. Hybrid via `indexed` when daemon-up **and** `[search].hybrid`, else the substring fallback scored title-exact 1.0 · title-substring 0.8 · tag 0.6 · body 0.4, sorted score desc then `updated` desc (recency tiebreak within 0.02). `indexed_client.incremental_update` runs on the watcher hook; `brain reindex` → `full_rebuild`.
+- **MCP** — `mcp/server.py`, launched via `brain-mcp` (or `python -m brain.mcp.server`). Typed `brain_*` tools mirroring the *safe* verbs, each carrying an annotation: read-only / idempotent / write / destructive (`task_cancel`). Withheld from agents: both delete verbs, `daemon`, `reindex`, `status`, and the Phase-3 `task_release`.
+- **Session lenses** — `core/activity.py`, `core/context.py`, `cli/session.py`, `hooks/session_start.json`. `recent-activity` (warm index, or an equivalent folder scan when down); `build-context` (daemon-free BFS over `related` to `--depth`, cycle/diamond-deduped, seed first); `session-start` (merge `recent_activity(7d, mine)` with my open/claimed tasks, dedupe by id, tasks first then newest-first) wired to a `SessionStart` hook.
 
 ---
 

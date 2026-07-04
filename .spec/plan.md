@@ -2,33 +2,27 @@
 type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
-children:
-  - features/notes/plan.md
-  - features/tasks/plan.md
-  - features/daemon/plan.md
-  - features/search/plan.md
-  - features/memory/plan.md
-updated: 2026-06-21
+updated: 2026-07-04
 ---
 
 # Brain — Plan
 
-**Status:** spec-only — `src/brain/` does not exist. Build bottom-up; binary gates between features.
+**Status:** Phase 1–2 **delivered** — all five features implemented and tested (578 tests, mypy strict, ruff clean) on branch `feat/phase-1-mvp`. Built bottom-up behind binary whole-feature gates.
 
-**Focus:** human sign-off on [notes/plan.md](features/notes/plan.md), then `notes/1`.
+**Focus:** Phase 3 (tasks-graph) — `ready` / `release`, strict `--strict` gate, unblock-cascade. **Deferred, not started.**
 
 ---
 
 ## Sequence
 
-| # | Feature | Gate | Tests |
-|---:|---|---|---|
-| 1 | notes | — | `tests/notes/` |
-| 2 | tasks | notes DONE | `tests/tasks/` |
-| 3 | daemon | tasks DONE | `tests/daemon/` |
-| 4 | search | daemon DONE | `tests/search/` |
-| 5 | memory | search DONE | `tests/memory/` |
-| 6 | tasks-graph | memory DONE | `tests/tasks/` |
+| # | Feature | Status | Tests | Commit |
+|---:|---|---|---|---|
+| 1 | notes | ✅ DONE | `tests/notes/` | `feat(notes)` |
+| 2 | tasks | ✅ DONE | `tests/tasks/` | `feat(tasks)` |
+| 3 | daemon | ✅ DONE | `tests/daemon/` | `feat(daemon)` |
+| 4 | search | ✅ DONE | `tests/search/` | `feat(search)` |
+| 5 | memory | ✅ DONE | `tests/memory/` | `feat(memory)` |
+| 6 | tasks-graph | ⏳ deferred (Phase 3) | `tests/tasks/` | — |
 
 ---
 
@@ -44,4 +38,4 @@ updated: 2026-06-21
 
 **Freshness:** daemon watcher fires hook → search `indexed_client.incremental_update`. `brain reindex` → `full_rebuild()`.
 
-Cross-cutting contracts: [tech.md](tech.md). Unit detail: `features/<name>/plan.md`.
+Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature unit plans were compounded here and removed — unit-level truth is now `tests/` + `src/brain/`.
