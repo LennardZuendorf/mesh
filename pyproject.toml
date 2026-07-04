@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 brain = "brain.cli.__main__:app"
+brain-mcp = "brain.mcp.server:main"
 
 [dependency-groups]
 dev = [

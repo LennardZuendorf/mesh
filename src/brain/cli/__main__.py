@@ -19,6 +19,11 @@ from brain import __version__
 from brain.cli.admin import daemon_app, reindex_command, status_command
 from brain.cli.note import note_app
 from brain.cli.search import search_app
+from brain.cli.session import (
+    build_context_command,
+    recent_activity_command,
+    session_start_command,
+)
 from brain.cli.task import task_app
 
 
@@ -49,6 +54,16 @@ app.command(name="status", help="Report vault health (counts, freshness, links, 
 app.command(name="reindex", help="Rebuild the search index (delegates to indexed).")(
     reindex_command
 )
+app.command(
+    name="recent-activity", help="List recent vault changes (newest first; --since, --mine)."
+)(recent_activity_command)
+app.command(
+    name="build-context", help="Expand the related graph around a seed id (BFS to --depth)."
+)(build_context_command)
+app.command(
+    name="session-start",
+    help="Warm-start payload: my recent activity (7d) + my open/claimed tasks.",
+)(session_start_command)
 
 
 @app.callback(invoke_without_command=True)
