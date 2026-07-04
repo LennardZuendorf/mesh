@@ -37,7 +37,7 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from brain.daemon.client import DaemonClient, default_socket_path
+from brain.daemon.client import DaemonClient, DaemonError, default_socket_path
 from brain.daemon.server import DaemonServer
 from brain.schemas.config import Config, load_config
 from brain.storage.files import note_folder, task_folder
@@ -376,3 +376,157 @@ def test_client_exposes_no_write_methods() -> None:
     assert forbidden.isdisjoint(attrs)
     public = {a for a in attrs if not a.startswith("_")}
     assert not any("create" in a or "write" in a for a in public)
+
+
+# --------------------------------------------------------------------------- #
+# FIX 1 — call() swallows every transport failure, not just connection refused #
+# --------------------------------------------------------------------------- #
+
+
+def test_call_falls_back_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hung daemon raises TimeoutError (an OSError) — must fall back, not escape."""
+    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+
+    def boom(method: str, params: dict[str, object]) -> object:
+        raise TimeoutError
+
+    monkeypatch.setattr(client, "_request", boom)
+    assert client.call("note.get", {}, lambda: "TIMED-OUT") == "TIMED-OUT"
+
+
+def test_call_falls_back_on_broken_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mid-response crash (BrokenPipeError, an OSError) must fall back."""
+    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+
+    def boom(method: str, params: dict[str, object]) -> object:
+        raise BrokenPipeError
+
+    monkeypatch.setattr(client, "_request", boom)
+    assert client.call("note.get", {}, lambda: "BROKEN") == "BROKEN"
+
+
+def test_call_falls_back_on_truncated_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated/garbled reply raises json.JSONDecodeError — must fall back."""
+    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+
+    def boom(method: str, params: dict[str, object]) -> object:
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    monkeypatch.setattr(client, "_request", boom)
+    assert client.call("note.get", {}, lambda: "TRUNCATED") == "TRUNCATED"
+
+
+# --------------------------------------------------------------------------- #
+# FIX 3 — _dispatch wraps any non-RpcError handler failure in a 500 envelope   #
+# --------------------------------------------------------------------------- #
+
+
+def test_dispatch_wraps_handler_exception_in_500(socket_path: Path) -> None:
+    """A handler raising a plain exception yields a structured 500, not a drop."""
+
+    def _explode(_params: dict[str, object]) -> dict[str, object]:
+        raise ValueError("kaboom")
+
+    server = DaemonServer(socket_path, handlers={"boom": _explode})
+    line = (json.dumps({"id": "x", "method": "boom", "params": {}}) + "\n").encode("utf-8")
+    reply = server._dispatch(line)
+    assert reply == {"ok": False, "error": {"code": 500, "message": "internal error"}}
+    assert "id" not in reply  # error envelopes never echo the id
+
+
+# --------------------------------------------------------------------------- #
+# FIX 4 — reserved read verbs are 503 stubs; the client falls back on 503      #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("method", ["note.get", "note.list", "task.get", "task.list"])
+def test_read_methods_are_503_stubs(socket_path: Path, method: str) -> None:
+    """note/task reads are reserved-but-unwired → 503 (fallback-eligible), not 404."""
+    with running_daemon(socket_path):
+        resp = _roundtrip(socket_path, {"id": "r", "method": method, "params": {}})
+    assert resp == {"ok": False, "error": {"code": 503, "message": "not yet available"}}
+
+
+def test_note_get_falls_back_to_file_when_daemon_returns_503(
+    cfg: Config, vault: Path, socket_path: Path
+) -> None:
+    """A live (config-less) daemon answers note.get with 503 → client reads the file."""
+    _seed_note(vault, note_id="n-503", title="From Disk", body="disk body")
+    with running_daemon(socket_path):
+        client = DaemonClient(socket_path=socket_path)
+        result = client.note_get(cfg, "n-503")
+    assert result["id"] == "n-503"
+    assert result["title"] == "From Disk"
+    assert result["body"] == "disk body"
+
+
+def test_task_get_falls_back_to_file_when_daemon_returns_503(
+    cfg: Config, vault: Path, socket_path: Path
+) -> None:
+    _seed_task(vault, task_id="t-503", title="Disk Task", body="disk task body")
+    with running_daemon(socket_path):
+        client = DaemonClient(socket_path=socket_path)
+        result = client.task_get(cfg, "t-503")
+    assert result["id"] == "t-503"
+    assert result["status"] == "open"
+    assert result["body"] == "disk task body"
+
+
+def test_call_falls_back_on_503_daemon_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 503 DaemonError from a live daemon is fallback-eligible by default."""
+    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+
+    def boom(method: str, params: dict[str, object]) -> object:
+        raise DaemonError(503, "not yet available")
+
+    monkeypatch.setattr(client, "_request", boom)
+    assert client.call("note.get", {}, lambda: "FELL-BACK") == "FELL-BACK"
+
+
+def test_call_propagates_non_fallback_domain_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A domain error (e.g. 3 not-found) must propagate — never be swallowed."""
+    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    ran: list[bool] = []
+
+    def boom(method: str, params: dict[str, object]) -> object:
+        raise DaemonError(3, "not found")
+
+    def _fallback() -> object:
+        ran.append(True)  # pragma: no cover - must never run
+        return "SHOULD-NOT-RUN"
+
+    monkeypatch.setattr(client, "_request", boom)
+    with pytest.raises(DaemonError) as excinfo:
+        client.call("note.get", {}, _fallback)
+    assert excinfo.value.code == 3
+    assert ran == []  # the fallback was not invoked for a domain error
+
+
+# --------------------------------------------------------------------------- #
+# FIX 5 — no TOCTOU on socket bind: umask makes the node 0600 at creation time  #
+# --------------------------------------------------------------------------- #
+
+
+def test_socket_umask_guard_yields_0600_without_chmod(
+    socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With chmod neutralized, the socket is *still* 0600 — proving the umask guard.
+
+    A permissive ambient umask is forced first, so absent the guard the bind would
+    create a world-accessible node and this assertion would fail.
+    """
+
+    def _no_chmod(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr("brain.daemon.server.os.chmod", _no_chmod)
+    old_umask = os.umask(0o000)  # most permissive → bind would yield 0777 without the guard
+    server = DaemonServer(socket_path)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(server.start())
+        assert stat.S_IMODE(os.stat(socket_path).st_mode) == 0o600
+    finally:
+        os.umask(old_umask)
+        loop.run_until_complete(server.stop())
+        loop.close()

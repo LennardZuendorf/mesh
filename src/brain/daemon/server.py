@@ -15,8 +15,10 @@ machinery lives in one place — later units claim a dispatch slot by registerin
 handler, never by touching :meth:`DaemonServer._dispatch`.
 
 The base table serves ``ping`` and reserves the methods that depend on subsystems
-not yet present (``search.*``, ``activity.recent``, ``vault.status``,
-``index.reindex``) as ``503`` stubs; unknown methods answer ``404``. When the
+not yet present (``note.*`` / ``task.*`` reads, ``search.*``, ``activity.recent``,
+``vault.status``, ``index.reindex``) as ``503`` stubs; unknown methods answer
+``404``. A ``503`` (reserved-but-unwired) lets the client degrade to its file-op
+fallback, whereas a ``404`` (truly unknown) propagates. When the
 server is constructed **with a vault ``config``**, daemon/2 warms a
 :class:`~brain.index.watch.VaultIndex` (via a :class:`~brain.index.watch.Watcher`)
 *before* the socket accepts connections and swaps the ``activity.recent`` stub for
@@ -43,6 +45,10 @@ Handler = Callable[[dict[str, Any]], dict[str, Any]]
 _SOCKET_MODE = 0o600
 _RUN_DIR_MODE = 0o700
 _STUB_METHODS: tuple[str, ...] = (
+    "note.get",
+    "note.list",
+    "task.get",
+    "task.list",
     "search.query",
     "search.tag_pull",
     "activity.recent",
@@ -116,9 +122,16 @@ class DaemonServer:
             self._handlers = {**self._handlers, "activity.recent": self._activity_handler()}
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()  # clear a stale socket from a prior run
-        self._server = await asyncio.start_unix_server(
-            self._handle_client, path=str(self.socket_path)
-        )
+        # Bind under a restrictive umask so the socket node is created 0600 *at
+        # bind time* — closing the TOCTOU window between bind and chmod. The chmod
+        # below stays as defense-in-depth (and normalizes any inherited bits).
+        old_umask = os.umask(0o177)
+        try:
+            self._server = await asyncio.start_unix_server(
+                self._handle_client, path=str(self.socket_path)
+            )
+        finally:
+            os.umask(old_umask)
         os.chmod(self.socket_path, _SOCKET_MODE)
 
     def _activity_handler(self) -> Handler:
@@ -202,6 +215,10 @@ class DaemonServer:
             result = handler(params)
         except RpcError as exc:
             return _error_envelope(exc.code, exc.message)
+        except Exception:
+            # A handler that fails for any other reason must still answer with a
+            # structured envelope — never drop the connection unanswered.
+            return _error_envelope(500, "internal error")
         return {"id": request.get("id"), "ok": True, "result": result}
 
 

@@ -242,8 +242,15 @@ def reconcile_path(config: Config, path: Path) -> Path:
         return p
     if src == dest:
         return src
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(src, dest)  # atomic rename; content (and `updated`) preserved verbatim
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dest)  # atomic rename; content (and `updated`) preserved verbatim
+    except OSError:
+        # The source raced away (concurrent delete/move) between the checks above
+        # and the rename. Swallow it and leave the file where it is — a later event
+        # will reconcile. Letting it escape would kill the watchdog observer thread
+        # and freeze freshness for the daemon's whole lifetime.
+        return src
     return dest
 
 

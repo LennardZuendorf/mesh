@@ -60,6 +60,7 @@ from brain.index.watch import (
     scan_recent,
 )
 from brain.schemas.config import Config, load_config
+from brain.storage.sandbox import safe_resolve
 
 # --------------------------------------------------------------------------- #
 # Fixtures & helpers                                                          #
@@ -335,6 +336,27 @@ def test_reconcile_ignores_foreign_file(cfg: Config, vault: Path) -> None:
     final = reconcile_path(cfg, foreign)
     assert final == foreign.resolve()
     assert foreign.exists()  # no brain id → never moved
+
+
+def test_reconcile_returns_unmoved_when_source_races_away(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX 2: a source that vanishes at rename time must not raise out of reconcile.
+
+    An unguarded ``os.replace`` would let ``FileNotFoundError`` escape the watchdog
+    event-handler thread and silently kill the observer for the daemon's lifetime.
+    """
+    path = _write_task(vault, task_id="t-race", status="done", folder="tasks/open")
+
+    def _vanish(_src: object, _dst: object) -> None:
+        raise FileNotFoundError
+
+    monkeypatch.setattr("brain.index.watch.os.replace", _vanish)
+    result = reconcile_path(cfg, path)  # must not raise
+    # Left in place (move failed); the resolved original path is returned so a
+    # later event can reconcile it.
+    assert result == safe_resolve(cfg.core.tolaria_path, path)
+    assert path.exists()
 
 
 # --------------------------------------------------------------------------- #

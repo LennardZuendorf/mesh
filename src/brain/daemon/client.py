@@ -7,12 +7,15 @@ synchronous and ``asyncio``-free — a CLI invocation must feel instant, and the
 warm work lives in the daemon, not at client startup.
 
 :meth:`DaemonClient.call` connects to the unix socket, sends one NDJSON request
-(``{"id","method","params"}``), and returns the ``result`` of the reply. When the
-socket is unreachable — ``FileNotFoundError`` (no socket file) or
-``ConnectionRefusedError`` (stale socket, no listener) — it invokes the caller's
-fallback callable instead and returns its value; the connection failure is never
-re-raised. :meth:`ping` is the one exception: it is a liveness probe with no
-fallback, so a down daemon propagates.
+(``{"id","method","params"}``), and returns the ``result`` of the reply. Any
+transport failure — a missing socket, a refused/stale socket, a hung daemon
+(timeout), a mid-response crash, or a truncated/garbled reply — is swallowed and
+the caller's fallback is run instead; the failure is never re-raised. A *live*
+daemon that answers ``ok: false`` surfaces as :class:`DaemonError`, except for the
+fallback-eligible codes (``503`` "reserved but not yet wired"), which also run the
+fallback so a not-yet-implemented method degrades to its file-op path. :meth:`ping`
+is the one exception: it is a liveness probe with no fallback, so a down daemon
+propagates.
 
 The convenience read verbs (:meth:`note_get`, :meth:`note_list`, :meth:`task_get`,
 :meth:`task_list`) bind the right fallback — a single-file ``python-frontmatter``
@@ -41,6 +44,10 @@ from brain.schemas.note import Note
 _SOCKET_NAME = "brain.sock"
 _DEFAULT_TIMEOUT = 5.0
 _RECV_CHUNK = 4096
+# RPC error codes eligible for the daemon-down fallback even on a *live* daemon:
+# ``503`` marks a method that is reserved but not yet wired to the daemon, so the
+# CLI degrades to the file-op fallback. Domain errors (2/3/4) are never in here.
+_FALLBACK_CODES: frozenset[int] = frozenset({503})
 
 Fallback = Callable[[], Any]
 
@@ -96,9 +103,10 @@ class DaemonClient:
     def _request(self, method: str, params: dict[str, Any]) -> Any:
         """Send one NDJSON request and return the reply's ``result``.
 
-        Raises ``ConnectionRefusedError`` / ``FileNotFoundError`` when the socket
-        is unreachable (caught by :meth:`call`), and :class:`DaemonError` when the
-        daemon answers with an ``ok: false`` envelope.
+        Raises an ``OSError`` (missing/refused socket, timeout, broken pipe) when
+        the exchange fails and ``json.JSONDecodeError`` on a truncated reply — both
+        caught by :meth:`call` — and :class:`DaemonError` when the daemon answers
+        with an ``ok: false`` envelope.
         """
         request = {"id": str(uuid.uuid4()), "method": method, "params": params}
         payload = (json.dumps(request) + "\n").encode("utf-8")
@@ -119,18 +127,33 @@ class DaemonClient:
             raise DaemonError(int(error.get("code", 1)), str(error.get("message", "error")))
         return response.get("result")
 
-    def call(self, method: str, params: dict[str, Any], fallback: Fallback) -> Any:
+    def call(
+        self,
+        method: str,
+        params: dict[str, Any],
+        fallback: Fallback,
+        *,
+        fallback_codes: frozenset[int] = _FALLBACK_CODES,
+    ) -> Any:
         """Call ``method`` over the socket; run ``fallback`` if the daemon is down.
 
-        A connection failure (``ConnectionRefusedError`` / ``FileNotFoundError``)
-        is swallowed and the fallback's result returned — it is never re-raised.
-        Any ``ok: false`` reply from a *live* daemon surfaces as
-        :class:`DaemonError`.
+        Any transport failure — a missing/refused socket (``OSError``), a hung
+        daemon (``TimeoutError``), a mid-response crash
+        (``BrokenPipeError`` / ``ConnectionResetError``), or a truncated reply
+        (``json.JSONDecodeError``) — is swallowed and the fallback's result
+        returned; it is never re-raised. A *live* daemon's ``ok: false`` reply
+        surfaces as :class:`DaemonError`, except for ``fallback_codes`` (default
+        ``{503}`` — reserved-but-unimplemented methods), which also run the
+        fallback. Every other code (domain errors 2/3/4) propagates.
         """
         try:
             return self._request(method, params)
-        except (ConnectionRefusedError, FileNotFoundError):
+        except (OSError, json.JSONDecodeError):
             return fallback()
+        except DaemonError as exc:
+            if exc.code in fallback_codes:
+                return fallback()
+            raise
 
     # -- verbs ------------------------------------------------------------- #
 
@@ -173,11 +196,17 @@ class DaemonClient:
         unreachable the fallback runs :func:`brain.index.watch.scan_recent`, an
         mtime-sorted scan of ``notes/`` and ``tasks/``. Both return the same
         ``{"entries": [...]}`` shape.
+
+        ``fallback_codes`` is empty here: a config-less daemon answers
+        ``activity.recent`` with a ``503`` stub that must *propagate* (it is a
+        server-state signal, not a reserved read verb), so only a genuine
+        socket-down error triggers the scan fallback.
         """
         return self.call(
             "activity.recent",
             {"limit": limit},
             lambda: {"entries": scan_recent(config, limit)},
+            fallback_codes=frozenset(),
         )
 
 
