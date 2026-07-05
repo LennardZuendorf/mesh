@@ -314,20 +314,14 @@ def _status_lines(report: dict[str, Any]) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _indexed_delegate() -> Any | None:
-    """The search feature's ``indexed`` reindex delegate, or ``None`` if unbuilt."""
-    try:
-        from brain.index import indexed_client
-    except ImportError:
-        return None
-    return indexed_client
-
-
 def reindex_command(ctx: typer.Context) -> None:
-    """Rebuild the search index (delegates to ``indexed``; degrades if unbuilt)."""
+    """Rebuild the search index (delegates to ``indexed``; degrades if it's absent)."""
     config = load_config()
-    delegate = _indexed_delegate()
-    if delegate is None:
-        _notice(ctx, "search index unavailable (indexed not configured)")
-        return
-    delegate.reindex(config)
+    from brain.index import indexed_client
+
+    try:
+        indexed_client.reindex(config)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # ``indexed`` binary is missing or exited non-zero: the search accelerator is
+        # optional, so degrade with a notice rather than crashing the CLI.
+        _notice(ctx, "search index unavailable (indexed binary missing or failed)")

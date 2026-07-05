@@ -161,6 +161,19 @@ class DaemonClient:
         """Liveness probe — no fallback; a down daemon propagates the error."""
         return self._request("ping", {})
 
+    def is_up(self) -> bool:
+        """Whether the daemon answers a liveness ping (never raises).
+
+        A down/absent daemon (missing or refused socket, timeout, garbled reply)
+        yields ``False`` — the single liveness check both the ``search`` hybrid gate
+        and the ``recent-activity`` degradation notice share.
+        """
+        try:
+            self.ping()
+        except (OSError, json.JSONDecodeError):
+            return False
+        return True
+
     def note_get(self, config: Config, id_or_slug: str) -> Any:
         return self.call(
             "note.get",

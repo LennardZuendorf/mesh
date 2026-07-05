@@ -45,6 +45,7 @@ from brain.index.watch import (
     DEFAULT_RECENT_LIMIT,
     VaultIndex,
     Watcher,
+    clear_change_hooks,
     register_change_hook,
 )
 from brain.schemas.config import Config, load_config
@@ -132,6 +133,9 @@ class DaemonServer:
             # Freshness: every watcher-driven vault change re-indexes that one path in
             # ``indexed``. ``incremental_update`` swallows its own failures, so a dead
             # ``indexed`` never crashes the observer thread this hook runs on.
+            # Clear first so a restart (stop→start) in one process never stacks a
+            # second hook that would double-index every edit.
+            clear_change_hooks()
             register_change_hook(lambda p: incremental_update(config, p))
             self._handlers = {**self._handlers, "activity.recent": self._activity_handler()}
         with contextlib.suppress(FileNotFoundError):
@@ -186,6 +190,8 @@ class DaemonServer:
         if self._watcher is not None:
             self._watcher.stop()  # stop+join the observer thread, then clear the index
             self._watcher = None
+            # Drop our change-hook so it can't outlive the index it re-indexed into.
+            clear_change_hooks()
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()
 

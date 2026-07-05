@@ -603,3 +603,50 @@ def test_real_observer_picks_up_new_file(cfg: Config, vault: Path, _run: int) ->
         assert watcher.index.get("n-live") is not None
     finally:
         watcher.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Review regressions — hook stacking, is_up seam, lazy observer import         #
+# --------------------------------------------------------------------------- #
+
+
+def test_daemon_start_clears_leftover_change_hooks(
+    cfg: Config, vault: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hook left over from a crashed prior run must not stack: ``start`` clears the
+    registry before registering its own, so each vault change re-indexes exactly once
+    — and ``stop`` drops the hook so it can't outlive the index it fed."""
+    calls: list[Path] = []
+    # The daemon's own hook is ``lambda p: incremental_update(config, p)``; patch the
+    # target it resolves so a fired hook is observable.
+    monkeypatch.setattr(
+        "brain.daemon.server.incremental_update", lambda config, path: calls.append(path)
+    )
+    # Simulate a leftover hook a clean stop never removed (e.g. a crashed run).
+    register_change_hook(lambda p: calls.append(p))
+
+    with running_daemon(socket_path, config=cfg):
+        on_vault_change(Path("x.md"))
+        assert len(calls) == 1  # leftover cleared → only the daemon's hook fired
+
+    calls.clear()
+    on_vault_change(Path("y.md"))
+    assert calls == []  # stop() cleared the hook — nothing fires after shutdown
+
+
+def test_daemon_client_is_up_reflects_liveness(
+    cfg: Config, socket_path: Path, missing_socket: Path
+) -> None:
+    """``is_up`` is the shared liveness seam: False with no socket, True when served."""
+    assert DaemonClient(socket_path=missing_socket).is_up() is False
+    with running_daemon(socket_path, config=cfg):
+        assert DaemonClient(socket_path=socket_path).is_up() is True
+
+
+def test_watch_module_does_not_eagerly_bind_observer_backend() -> None:
+    """The heavy platform observer backend is imported lazily inside ``Watcher.start``,
+    so a daemon-less CLI importing ``watch`` (for ``scan_recent``) never binds it."""
+    import brain.index.watch as watch_mod
+
+    assert not hasattr(watch_mod, "Observer")
+    assert not hasattr(watch_mod, "BaseObserver")

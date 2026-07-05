@@ -382,6 +382,21 @@ def test_reindex_quiet_still_delegates(
     assert len(calls) == 1
 
 
+def test_reindex_degrades_when_indexed_binary_missing(
+    cfg: Config, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing/failed ``indexed`` binary degrades with a notice — never a crash."""
+    from brain.index import indexed_client
+
+    def _missing(config: Config) -> None:
+        raise FileNotFoundError("indexed")
+
+    monkeypatch.setattr(indexed_client, "reindex", _missing)
+    result = _invoke(["reindex"])
+    assert result.exit_code == 0, result.output  # caught, not propagated
+    assert result.exception is None
+
+
 # --------------------------------------------------------------------------- #
 # daemon status (CLI)                                                         #
 # --------------------------------------------------------------------------- #

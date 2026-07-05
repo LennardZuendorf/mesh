@@ -37,7 +37,7 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import frontmatter
 import yaml
@@ -48,12 +48,17 @@ from watchdog.events import (
     FileSystemEventHandler,
     FileSystemMovedEvent,
 )
-from watchdog.observers import Observer
-from watchdog.observers.api import BaseObserver
 
 from brain.schemas.config import Config
-from brain.storage.files import note_folder, task_folder
+from brain.storage.files import note_folder, read_post, task_folder
 from brain.storage.sandbox import safe_resolve
+
+if TYPE_CHECKING:
+    # The platform observer backend (fsevents/inotify/kqueue) is a heavy import;
+    # defer it to ``Watcher.start`` so a daemon-less CLI that only needs
+    # ``scan_recent`` never pays for it. ``watchdog.events`` (above) is light and
+    # is needed at class-definition time, so it stays a top-level import.
+    from watchdog.observers.api import BaseObserver
 
 DEFAULT_RECENT_LIMIT = 20
 _ID_PREFIXES = ("n-", "t-")
@@ -333,6 +338,8 @@ class Watcher:
 
     def start(self) -> None:
         """Warm the index, then start watching ``notes/`` and ``tasks/`` recursively."""
+        from watchdog.observers import Observer  # lazy: heavy platform backend
+
         self.warm()
         vault = self._config.core.tolaria_path
         observer = Observer()
@@ -404,14 +411,10 @@ def scan_recent(config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> list[dict[
     """
     rows: list[tuple[float, str, dict[str, Any], Path]] = []
     for path in _iter_vault_md(config.core.tolaria_path):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
+        post = read_post(path)
+        if post is None:
             continue
-        try:
-            meta = dict(frontmatter.loads(text).metadata)
-        except yaml.YAMLError:
-            continue
+        meta = dict(post.metadata)
         entry_id = meta.get("id")
         if not _is_brain_id(entry_id):
             continue
