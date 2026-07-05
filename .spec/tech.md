@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-07-04
+updated: 2026-07-05
 ---
 
 # Brain — Technical Architecture
@@ -50,6 +50,22 @@ src/brain/
 3. Clean Markdown; unknown frontmatter keys round-trip.
 4. One folder, one search path; rank in `indexed`.
 5. Agent content is inert data.
+6. Instant CLI: daemon-only deps (`watchdog`) import lazily inside the daemon path, never at CLI import time.
+7. Read-lenses serve from the warm index when the daemon is up; a disk re-parse happens only on the daemon-down fallback.
+
+---
+
+## Shared primitives (DRY)
+
+A task is a note with `type: task`, so every cross-cutting mechanic has **one** implementation the two verbs share — never per-verb copies (copies drift; the spec's whole thesis is a small, single-surface core):
+
+- **Lock-hold** — the bounded wait-retry over the `O_EXCL` lock lives in `storage/locks.py`; `core/notes.py` and `core/tasks.py` import it.
+- **Safe read** — read-text + `frontmatter.loads` guarding **both** `OSError` and `yaml.YAMLError` (foreign/corrupt files skip silently) is one reader (`storage/files.read_post`); every scanner (`tagpull`, `activity`, `wikilinks`, `scan_recent`) routes through it.
+- **Vault walk** — one iterator over `notes/**` + `tasks/{open,done}/`; all scanners consume it.
+- **CLI output** — one `cli/_output.py` surface (`emit_mutation`, `preview`, `is_json`/`is_quiet`/`is_machine`, delete-guard); `note` and `task` render through it. The interactive-tty check stays a per-module seam so the delete tests can fake it.
+- **Frontmatter is serialized from the pydantic model** (`model_dump`), never a parallel hand-built dict — the schema is the single on-disk contract.
+- **Terminalize** — `finish`/`cancel` are thin wrappers over one `_terminate_task(*, heading, status, text)`.
+- **Exit codes** are a fixed convention — `2` validation/ambiguous, `3` not-found, `4` claim-conflict — that each CLI handler maps its domain exceptions to at the boundary.
 
 ---
 
@@ -60,11 +76,11 @@ src/brain/
 | Schemas | `schemas/note.py`, `task.py` | Task = note + `type: task`. See field tables below. `updated` bumps on writes; watcher reconcile does not. |
 | IDs | `core/ids.py` | `n-`/`t-` + Crockford b32 hash of `created_iso\0title` (4+ chars, extend on collision). Never sequential. |
 | Folders | `storage/files.py` | `type`/`status` drives path; watcher reconciles mismatch. Notes: `note→notes/`, `log/decision/reference→notes/{logs,decisions,references}/`. Tasks: `open\|claimed→tasks/open/`, `done\|cancelled→tasks/done/`. |
-| Atomic write | `storage/files.py` | temp + `os.replace` |
-| Locks | `storage/locks.py` | `O_EXCL` per entity; stale if PID dead or >300s; `brain status` reports count |
+| Atomic write | `storage/files.py` | temp + `os.replace`. `finish`/`cancel` order write-then-move so a crash mid-op never strands the file in an unrecoverable state (a terminal status must not sit in `tasks/open/` where the idempotent no-op refuses to move it). |
+| Locks | `storage/locks.py` | `O_EXCL` per entity; stale if PID dead or >300s; `brain status` reports count. Stale reclaim must be race-safe — re-`O_EXCL` rather than unlink-then-create, so a reclaimer never unlinks a fresh lock a peer just took. |
 | Sandbox | `storage/sandbox.py` | `realpath` must stay in `tolaria_path` |
-| Exit codes | `cli/` | 0 ok · 1 error · 2 validation · 3 not found · 4 claimed · 5 blocked (`--strict` only, Phase 3) |
-| Config | `~/.brain/config.toml` | `[core]` path+agent · `[search]` collection, hybrid, threshold · `[tasks]` collections. `$BRAIN_AGENT` overrides agent. Missing config → exit 2. Test override: `BRAIN_CONFIG_PATH`. |
+| Exit codes | `cli/` | 0 ok · 1 error · 2 validation · 3 not found · 4 claimed · 5 blocked (`--strict` only, Phase 3). Codes live on the domain exception classes; the CLI boundary maps them once. |
+| Config | `~/.brain/config.toml` | `[core]` path+agent · `[search]` collection, hybrid, threshold · `[tasks]` collections. Every path value is `expanduser()`'d (`~` resolves). `$BRAIN_AGENT` overrides agent. Missing config → exit 2. Test override: `BRAIN_CONFIG_PATH`. |
 | Socket | `daemon/server.py`, `client.py` | NDJSON RPC over a `0600` unix socket; envelope + method table under [Implemented surfaces](#implemented-surfaces) |
 
 ### Note fields
