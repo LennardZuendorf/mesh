@@ -20,6 +20,7 @@ from typing import get_args
 import typer
 from pydantic import ValidationError
 
+from brain.cli import _output
 from brain.core.notes import (
     AmbiguousSlugError,
     NoteNotFoundError,
@@ -32,7 +33,7 @@ from brain.core.notes import (
     resolve_slug,
     update_note,
 )
-from brain.schemas.config import Config, load_config
+from brain.schemas.config import load_config
 from brain.schemas.note import Note, NoteType
 
 _NOTE_TYPES: tuple[str, ...] = get_args(NoteType)
@@ -42,32 +43,6 @@ note_app = typer.Typer(
     help="Capture knowledge as Markdown.",
     no_args_is_help=True,
 )
-
-_PREVIEW_CHARS = 200
-
-
-def _emit(ctx: typer.Context, note: Note, verb: str) -> None:
-    """Report a mutated note per the active global output flags."""
-    opts = ctx.obj
-    if getattr(opts, "quiet", False):
-        typer.echo(note.id)
-        return
-    if getattr(opts, "json", False):
-        typer.echo(
-            json.dumps({"id": note.id, "type": note.type, "updated": note.updated.isoformat()})
-        )
-        return
-    typer.echo(f"{verb} {note.id}")
-
-
-def _owner_allowed(config: Config, owner: str) -> bool:
-    """Whether ``owner`` is a valid identity per ``[tasks].collections``.
-
-    An empty ``collections`` list disables the check (any owner allowed); a
-    non-empty list is authoritative and rejects unknown identities.
-    """
-    collections = config.tasks.collections
-    return not collections or owner in collections
 
 
 def _edit_body() -> str:  # pragma: no cover - interactive-only ($EDITOR) path
@@ -92,9 +67,7 @@ def _resolve_body(ctx: typer.Context, body: str | None, body_file: str | None) -
             typer.echo(f"cannot read --file {body_file}: {exc}", err=True)
             raise typer.Exit(2) from None
 
-    opts = ctx.obj
-    machine = getattr(opts, "json", False) or getattr(opts, "quiet", False)
-    if machine or not _is_tty():
+    if _output.is_machine(ctx) or not _is_tty():
         typer.echo(
             "no body: pass --body or --file on a non-interactive path",
             err=True,
@@ -120,9 +93,6 @@ def new_command(
     if note_type not in _NOTE_TYPES:
         typer.echo(f"invalid note type: {note_type}", err=True)
         raise typer.Exit(2)
-    if owner is not None and not _owner_allowed(config, owner):
-        typer.echo(f"unknown owner: {owner}", err=True)
-        raise typer.Exit(2)
 
     body_text = _resolve_body(ctx, body, body_file)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -133,7 +103,11 @@ def new_command(
     except ValidationError:
         typer.echo("invalid note", err=True)
         raise typer.Exit(2) from None
-    _emit(ctx, note, "created")
+    except ValueError as exc:
+        # Owner outside [tasks].collections (enforced once in core, before any write).
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from None
+    _output.emit_mutation(ctx, obj_id=note.id, updated=note.updated, verb="created", fields={"type": note.type})
 
 
 @note_app.command("append")
@@ -158,7 +132,7 @@ def append_command(
     except AmbiguousSlugError:
         typer.echo(f"ambiguous slug: {target}", err=True)
         raise typer.Exit(2) from None
-    _emit(ctx, note, "appended")
+    _output.emit_mutation(ctx, obj_id=note.id, updated=note.updated, verb="appended", fields={"type": note.type})
 
 
 @note_app.command("update")
@@ -185,7 +159,7 @@ def update_command(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from None
-    _emit(ctx, note, "updated")
+    _output.emit_mutation(ctx, obj_id=note.id, updated=note.updated, verb="updated", fields={"type": note.type})
 
 
 def _meta_lines(note: Note) -> list[str]:
@@ -200,10 +174,6 @@ def _meta_lines(note: Note) -> list[str]:
         f"updated: {note.updated.isoformat()}",
         f"related: {', '.join(note.related)}",
     ]
-
-
-def _preview(body: str, full: bool) -> str:
-    return body if full else body[:_PREVIEW_CHARS]
 
 
 @note_app.command("get")
@@ -230,12 +200,11 @@ def get_command(
         typer.echo(f"note not found: {target}", err=True)
         raise typer.Exit(3) from None
 
-    opts = ctx.obj
-    if getattr(opts, "quiet", False):
+    if _output.is_quiet(ctx):
         typer.echo(view.note.id)
         return
 
-    as_json = getattr(opts, "json", False)
+    as_json = _output.is_json(ctx)
     if related:
         typer.echo(
             json.dumps({"related": view.note.related}) if as_json else "\n".join(view.note.related)
@@ -245,13 +214,13 @@ def get_command(
     if as_json:
         obj = view.note.model_dump(mode="json")
         if not meta_only:
-            obj["body"] = _preview(view.body, full)
+            obj["body"] = _output.preview(view.body, full)
         typer.echo(json.dumps(obj))
         return
 
     lines = _meta_lines(view.note)
     if not meta_only:
-        lines += ["", _preview(view.body, full)]
+        lines += ["", _output.preview(view.body, full)]
     typer.echo("\n".join(lines))
 
 
@@ -284,12 +253,11 @@ def list_command(
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from None
 
-    opts = ctx.obj
-    if getattr(opts, "quiet", False):
+    if _output.is_quiet(ctx):
         for view in views:
             typer.echo(view.note.id)
         return
-    if getattr(opts, "json", False):
+    if _output.is_json(ctx):
         typer.echo(json.dumps([_list_obj(view) for view in views]))
         return
     for view in views:
@@ -315,7 +283,6 @@ def delete_command(
 ) -> None:
     """Hard-delete a note. Prompts on a TTY; refuses on a machine path without --force."""
     config = load_config()
-    opts = ctx.obj
     try:
         note_id = resolve_slug(config, target)
     except NoteNotFoundError:
@@ -326,21 +293,15 @@ def delete_command(
         raise typer.Exit(2) from None
 
     if not force:
-        machine = getattr(opts, "json", False) or getattr(opts, "quiet", False)
-        if machine or not _is_tty():
-            typer.echo(
-                "refusing to delete on a non-interactive path; pass --force to confirm",
-                err=True,
-            )
-            raise typer.Exit(2)
+        _output.refuse_delete_if_non_interactive(ctx, tty=_is_tty())
         # click renders "Delete <id>? [y/N]: "; declining aborts (exit 1).
         typer.confirm(f"Delete {note_id}?", abort=True)
 
     delete_note(config, note_id)
 
-    if getattr(opts, "quiet", False):
+    if _output.is_quiet(ctx):
         typer.echo(note_id)
-    elif getattr(opts, "json", False):
+    elif _output.is_json(ctx):
         typer.echo(json.dumps({"id": note_id, "deleted": True}))
     else:
         typer.echo(f"deleted {note_id}")

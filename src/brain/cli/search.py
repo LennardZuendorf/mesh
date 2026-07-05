@@ -56,16 +56,12 @@ _TAGS_OPTION = typer.Option(None, "--tags", help="Require all these tags (AND); 
 def _daemon_up() -> bool:
     """Whether the warm daemon answers a ping (gates hybrid per the degradation matrix).
 
-    A down/absent daemon (missing or refused socket, timeout, garbled reply) yields
-    ``False`` so the query takes the substring fallback — the same behaviour a
-    daemon-less run has always had, and what keeps recall correct when ``indexed``'s
-    index may be stale.
+    A down/absent daemon yields ``False`` so the query takes the substring fallback —
+    the same behaviour a daemon-less run has always had, and what keeps recall correct
+    when ``indexed``'s index may be stale. Kept as a module-level seam so tests can
+    fake daemon liveness without a live socket.
     """
-    try:
-        DaemonClient().ping()
-    except (OSError, json.JSONDecodeError):
-        return False
-    return True
+    return DaemonClient().is_up()
 
 
 def _query_search(

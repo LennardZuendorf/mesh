@@ -27,7 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 import brain.cli.note as note_cli
-import brain.core.notes as notes_core
+import brain.storage.locks as locks_mod
 from brain.cli.__main__ import app
 from brain.core.notes import (
     AmbiguousSlugError,
@@ -208,14 +208,14 @@ def test_delete_note_acquires_entity_lock(
 ) -> None:
     """delete_note must take the per-entity lock, not blindly unlink it."""
     seen: list[Path] = []
-    real = notes_core.acquire
+    real = locks_mod.acquire
 
     def spy(lock_path: Path):  # type: ignore[no-untyped-def]
         seen.append(lock_path)
         return real(lock_path)
 
     _seed_note(vault, note_id="n-lockacq")
-    monkeypatch.setattr(notes_core, "acquire", spy)
+    monkeypatch.setattr(locks_mod, "acquire", spy)
     delete_note(cfg, "n-lockacq")
     assert seen == [_lock_path(vault, "n-lockacq")]
 

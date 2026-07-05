@@ -33,7 +33,7 @@ import pytest
 from typer.testing import CliRunner
 
 import brain.cli.task as task_cli
-import brain.core.tasks as tasks_core
+import brain.storage.locks as locks_mod
 from brain.cli.__main__ import app
 from brain.core.tasks import (
     TaskNotFoundError,
@@ -172,14 +172,14 @@ def test_delete_task_acquires_entity_lock(
 ) -> None:
     """delete_task must take the per-entity lock, not blindly unlink the file."""
     seen: list[Path] = []
-    real = tasks_core.acquire
+    real = locks_mod.acquire
 
     def spy(lock_path: Path):  # type: ignore[no-untyped-def]
         seen.append(lock_path)
         return real(lock_path)
 
     _seed_task(vault, task_id="t-lockacq", status="open")
-    monkeypatch.setattr(tasks_core, "acquire", spy)
+    monkeypatch.setattr(locks_mod, "acquire", spy)
     delete_task(cfg, "t-lockacq")
     assert seen == [_lock_path(vault, "t-lockacq")]
 

@@ -19,6 +19,7 @@ import sys
 import typer
 from pydantic import ValidationError
 
+from brain.cli import _output
 from brain.core.tasks import (
     ClaimConflictError,
     TaskNotFoundError,
@@ -35,27 +36,11 @@ from brain.core.tasks import (
 from brain.schemas.config import load_config
 from brain.schemas.task import Task
 
-_PREVIEW_CHARS = 200
-
 task_app = typer.Typer(
     name="task",
     help="Coordinate work as claimable task files.",
     no_args_is_help=True,
 )
-
-
-def _emit(ctx: typer.Context, task: Task, verb: str) -> None:
-    """Report a mutated task per the active global output flags."""
-    opts = ctx.obj
-    if getattr(opts, "quiet", False):
-        typer.echo(task.id)
-        return
-    if getattr(opts, "json", False):
-        typer.echo(
-            json.dumps({"id": task.id, "status": task.status, "updated": task.updated.isoformat()})
-        )
-        return
-    typer.echo(f"{verb} {task.id}")
 
 
 def _csv(value: str | None) -> list[str] | None:
@@ -102,7 +87,9 @@ def new_command(
     except ValidationError:
         typer.echo("invalid task", err=True)
         raise typer.Exit(2) from None
-    _emit(ctx, task, "created")
+    _output.emit_mutation(
+        ctx, obj_id=task.id, updated=task.updated, verb="created", fields={"status": task.status}
+    )
 
 
 @task_app.command("update")
@@ -139,7 +126,9 @@ def update_command(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from None
-    _emit(ctx, task, "updated")
+    _output.emit_mutation(
+        ctx, obj_id=task.id, updated=task.updated, verb="updated", fields={"status": task.status}
+    )
 
 
 @task_app.command("claim")
@@ -162,7 +151,9 @@ def claim_command(
     except ClaimConflictError as exc:
         typer.echo(f"task already claimed by {exc.existing_owner}", err=True)
         raise typer.Exit(4) from None
-    _emit(ctx, task, "claimed")
+    _output.emit_mutation(
+        ctx, obj_id=task.id, updated=task.updated, verb="claimed", fields={"status": task.status}
+    )
 
 
 @task_app.command("finish")
@@ -180,7 +171,9 @@ def finish_command(
     except TaskNotFoundError:
         typer.echo(f"task not found: {task_id}", err=True)
         raise typer.Exit(3) from None
-    _emit(ctx, task, "finished")
+    _output.emit_mutation(
+        ctx, obj_id=task.id, updated=task.updated, verb="finished", fields={"status": task.status}
+    )
 
 
 @task_app.command("cancel")
@@ -198,7 +191,9 @@ def cancel_command(
     except TaskNotFoundError:
         typer.echo(f"task not found: {task_id}", err=True)
         raise typer.Exit(3) from None
-    _emit(ctx, task, "cancelled")
+    _output.emit_mutation(
+        ctx, obj_id=task.id, updated=task.updated, verb="cancelled", fields={"status": task.status}
+    )
 
 
 def _task_meta_lines(task: Task) -> list[str]:
@@ -218,10 +213,6 @@ def _task_meta_lines(task: Task) -> list[str]:
         f"updated: {task.updated.isoformat()}",
         f"related: {', '.join(task.related)}",
     ]
-
-
-def _preview(body: str, full: bool) -> str:
-    return body if full else body[:_PREVIEW_CHARS]
 
 
 @task_app.command("get")
@@ -244,21 +235,20 @@ def get_command(
         typer.echo(f"task not found: {task_id}", err=True)
         raise typer.Exit(3) from None
 
-    opts = ctx.obj
-    if getattr(opts, "quiet", False):
+    if _output.is_quiet(ctx):
         typer.echo(view.task.id)
         return
 
-    if getattr(opts, "json", False):
+    if _output.is_json(ctx):
         obj = view.task.model_dump(mode="json")
         if not meta_only:
-            obj["body"] = _preview(view.body, full)
+            obj["body"] = _output.preview(view.body, full)
         typer.echo(json.dumps(obj))
         return
 
     lines = _task_meta_lines(view.task)
     if not meta_only:
-        lines += ["", _preview(view.body, full)]
+        lines += ["", _output.preview(view.body, full)]
     typer.echo("\n".join(lines))
 
 
@@ -295,12 +285,11 @@ def list_command(
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from None
 
-    opts = ctx.obj
-    if getattr(opts, "quiet", False):
+    if _output.is_quiet(ctx):
         for view in views:
             typer.echo(view.task.id)
         return
-    if getattr(opts, "json", False):
+    if _output.is_json(ctx):
         typer.echo(json.dumps([_list_obj(view) for view in views]))
         return
     for view in views:
@@ -326,15 +315,8 @@ def delete_command(
 ) -> None:
     """Hard-delete a task. Prompts on a TTY; refuses on a machine path without --force."""
     config = load_config()
-    opts = ctx.obj
     if not force:
-        machine = getattr(opts, "json", False) or getattr(opts, "quiet", False)
-        if machine or not _is_tty():
-            typer.echo(
-                "refusing to delete on a non-interactive path; pass --force to confirm",
-                err=True,
-            )
-            raise typer.Exit(2)
+        _output.refuse_delete_if_non_interactive(ctx, tty=_is_tty())
         # click renders "Delete <id>? [y/N]: "; declining aborts (exit 1).
         typer.confirm(f"Delete {task_id}?", abort=True)
 
@@ -344,9 +326,9 @@ def delete_command(
         typer.echo(f"task not found: {task_id}", err=True)
         raise typer.Exit(3) from None
 
-    if getattr(opts, "quiet", False):
+    if _output.is_quiet(ctx):
         typer.echo(deleted)
-    elif getattr(opts, "json", False):
+    elif _output.is_json(ctx):
         typer.echo(json.dumps({"id": deleted, "deleted": True}))
     else:
         typer.echo(f"deleted {deleted}")

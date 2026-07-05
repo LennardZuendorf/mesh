@@ -53,12 +53,11 @@ _SESSION_SINCE = "7d"
 
 
 def _daemon_up() -> bool:
-    """Whether the warm daemon answers a ping (drives the informational notice)."""
-    try:
-        DaemonClient().ping()
-    except (OSError, json.JSONDecodeError):
-        return False
-    return True
+    """Whether the warm daemon answers a ping (drives the informational notice).
+
+    Kept as a module-level seam so tests can fake daemon liveness without a socket.
+    """
+    return DaemonClient().is_up()
 
 
 def recent_activity_command(
