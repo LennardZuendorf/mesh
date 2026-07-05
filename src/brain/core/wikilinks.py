@@ -31,7 +31,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-import frontmatter
+from brain.storage.files import read_post
 
 # A ``[[…]]`` link: capture the inner text, excluding brackets and newlines.
 _WIKILINK = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
@@ -67,10 +67,10 @@ def _title_index(vault_path: Path) -> dict[str, str]:
     """
     index: dict[str, str] = {}
     for path in _iter_note_files(vault_path):
-        try:
-            meta = frontmatter.loads(path.read_text(encoding="utf-8")).metadata
-        except OSError:
+        post = read_post(path)
+        if post is None:
             continue
+        meta = post.metadata
         note_id = meta.get("id")
         title = meta.get("title")
         if (
@@ -121,9 +121,8 @@ def find_dangling(vault_path: Path) -> list[str]:
     index = _title_index(vault_path)
     dangling: list[str] = []
     for path in _iter_note_files(vault_path):
-        try:
-            post = frontmatter.loads(path.read_text(encoding="utf-8"))
-        except OSError:
+        post = read_post(path)
+        if post is None:
             continue
         note_id = post.metadata.get("id")
         if not (isinstance(note_id, str) and note_id.startswith(_BRAIN_ID_PREFIX)):

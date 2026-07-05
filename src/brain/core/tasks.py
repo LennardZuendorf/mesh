@@ -17,9 +17,7 @@ agents hand off, and slug matching would make handoff ambiguous.
 
 from __future__ import annotations
 
-import contextlib
 import os
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,20 +28,18 @@ import yaml
 from pydantic import ValidationError
 
 from brain.core.ids import generate_task_id
-from brain.core.notes import _matches_tags, _parse_since, apply_tag_spec
+from brain.core.notes import _matches_tags, _parse_since, _validate_owner, apply_tag_spec
 from brain.core.wikilinks import resolve_wikilinks
 from brain.schemas.config import Config
 from brain.schemas.task import Task
 from brain.storage.files import atomic_write, task_folder
-from brain.storage.locks import LockError, acquire
+from brain.storage.locks import hold
 from brain.storage.sandbox import safe_resolve
 
 _ID_PREFIX = "t-"
 _TASK_SUBDIRS: tuple[str, ...] = ("open", "done")
 _SORT_FIELDS: tuple[str, ...] = ("updated", "created", "title")
 _DEFAULT_LIMIT = 20
-_LOCK_WAIT_SECONDS = 15.0
-_LOCK_POLL_SECONDS = 0.01
 # Terminal statuses: a re-run of finish/cancel on one of these is a no-op — the
 # file already lives in ``tasks/done/`` and the outcome/cancel section is fixed.
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "cancelled"})
@@ -138,32 +134,6 @@ def _lock_path(config: Config, task_id: str) -> Path:
     return _tasks_root(config) / ".locks" / f"{task_id}.lock"
 
 
-@contextlib.contextmanager
-def _hold_lock(lock_path: Path) -> Iterator[Path]:
-    """Hold the entity ``O_EXCL`` lock, waiting out a live holder.
-
-    ``storage.locks.acquire`` is a non-blocking test-and-set: it raises
-    :class:`LockError` when a live, fresh lock is held. This wrapper adds the
-    bounded wait-and-retry policy so concurrent edits serialize instead of
-    failing. Acquisition is retried; the protected body is not.
-    """
-    deadline = time.monotonic() + _LOCK_WAIT_SECONDS
-    while True:
-        cm = acquire(lock_path)
-        try:
-            cm.__enter__()
-        except LockError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(_LOCK_POLL_SECONDS)
-            continue
-        try:
-            yield lock_path
-        finally:
-            cm.__exit__(None, None, None)
-        return
-
-
 def create_task(
     config: Config,
     title: str,
@@ -186,9 +156,7 @@ def create_task(
     verbatim but carry no readiness logic in v1. ``related`` is derived from the
     body's wikilinks, exactly as notes. The write is atomic.
     """
-    collections = config.tasks.collections
-    if owner is not None and collections and owner not in collections:
-        raise ValueError(f"unknown owner: {owner!r}")
+    _validate_owner(config, owner)
 
     vault = config.core.tolaria_path
     now = _now()
@@ -196,26 +164,28 @@ def create_task(
         now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
     )
     _, related = resolve_wikilinks(body, vault)
-    meta: dict[str, object] = {
-        "id": task_id,
-        "type": "task",
-        "title": title,
-        "tags": list(tags or []),
-        "owner": owner if owner is not None else config.agent,
-        "created": now,
-        "updated": now,
-        "related": related,
-        "status": "open",
-        "priority": priority,
-        "claimed_by": None,
-        "blocks": list(blocks or []),
-        "blocked_by": list(blocked_by or []),
-    }
-    task = Task.model_validate(meta)
+    task = Task.model_validate(
+        {
+            "id": task_id,
+            "type": "task",
+            "title": title,
+            "tags": list(tags or []),
+            "owner": owner if owner is not None else config.agent,
+            "created": now,
+            "updated": now,
+            "related": related,
+            "status": "open",
+            "priority": priority,
+            "claimed_by": None,
+            "blocks": list(blocks or []),
+            "blocked_by": list(blocked_by or []),
+        }
+    )
 
     path = safe_resolve(vault, task_folder("open", vault) / f"{task_id}.md")
     post = frontmatter.Post(body)
-    post.metadata = meta
+    # Serialize the frontmatter from the validated model — one on-disk contract.
+    post.metadata = task.model_dump(mode="python")
     atomic_write(path, frontmatter.dumps(post))
     return task
 
@@ -244,7 +214,7 @@ def update_task(
     the window where a racing finish renames the file open→done before this write.
     Raises :class:`TaskNotFoundError` when the id resolves to no file.
     """
-    with _hold_lock(_lock_path(config, task_id)):
+    with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         post = frontmatter.loads(path.read_text(encoding="utf-8"))
         if priority is not None:
@@ -298,7 +268,7 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
     closing the window where a racing finish renames the file open→done before
     this read. Raises :class:`TaskNotFoundError` when the id resolves to no file.
     """
-    with _hold_lock(_lock_path(config, task_id)):
+    with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         post = frontmatter.loads(path.read_text(encoding="utf-8"))
         if post.metadata.get("status") in _TERMINAL_STATUSES:
@@ -316,113 +286,97 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
     return task
 
 
-def finish_task(config: Config, task_id: str, outcome: str | None = None) -> Task:
-    """Finish a task: append an outcome section and move it to ``tasks/done/`` (R3).
+def _move_if_needed(src: Path, dest: Path) -> None:
+    """Atomically rename ``src`` → ``dest`` when they differ (open → done)."""
+    if dest != src:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dest)
 
-    Under the per-entity ``O_EXCL`` lock, this appends a ``## Outcome`` section
-    carrying an ISO-8601 UTC timestamp line and the (optional) ``outcome`` text to
-    the body, sets ``status=done``, bumps ``updated`` (``created`` is untouched),
-    then moves the file from ``tasks/open/`` to ``tasks/done/``:
 
-    * the updated content is written atomically **in place** at the resolved open
-      path, then :func:`os.replace` atomically renames it into ``tasks/done/`` —
-      so exactly one ``<id>.md`` exists at every instant (no duplicate/ghost);
-    * accepted from any *non-terminal* status (``open`` or ``claimed`` — R3);
-    * **idempotent** on a terminal status (``done``/``cancelled``): returns the
-      current task without writing, appending, or moving, so a re-finish never
-      adds a second ``## Outcome`` section and the file stays in ``tasks/done/``.
+def _terminate_task(
+    config: Config,
+    task_id: str,
+    *,
+    heading: str,
+    status: str,
+    text: str | None,
+) -> Task:
+    """Shared machinery behind :func:`finish_task` and :func:`cancel_task`.
 
-    ``outcome`` is optional — when omitted the heading and timestamp line are
-    still appended. ``related`` is recomputed from the amended body (a pure
-    function of the body, matching :func:`brain.core.notes.append_note`). The body
-    is inert data — never interpreted. The whole path uses ``storage`` primitives
-    directly, so it behaves identically with the daemon down. Raises
+    Under the per-entity ``O_EXCL`` lock: append ``heading`` + an ISO-8601 UTC
+    timestamp line (and optional ``text``) to the body, set ``status``, bump
+    ``updated`` (``created`` untouched), recompute ``related`` from the amended
+    body, write atomically in place, then move the file into ``tasks/done/``.
+
+    The id is resolved *inside* the lock because a concurrent terminator renames
+    the file open→done; the lock id derives from ``task_id`` (not the file
+    location) so it stays stable across the move. **Idempotent** on a terminal
+    status — no second section is appended.
+
+    The write and the move are two atomic steps, so a crash between them could
+    strand a terminal-status file in ``tasks/open/``. The terminal branch
+    therefore *reconciles* rather than short-circuiting: it completes any pending
+    open→done move, so no crash point leaves an unrecoverable state. Raises
     :class:`TaskNotFoundError` when the id resolves to no file.
     """
     vault = config.core.tolaria_path
-    # Resolve *inside* the lock: finish renames the file (open→done), so a
-    # concurrent finisher must re-resolve after the winner's move — otherwise it
-    # would read a path that no longer exists. The lock id is derived from
-    # ``task_id`` (not the file location), so it is stable across the move.
-    with _hold_lock(_lock_path(config, task_id)):
+    done_path = safe_resolve(vault, task_folder("done", vault) / f"{task_id}.md")
+    with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         post = frontmatter.loads(path.read_text(encoding="utf-8"))
         if post.metadata.get("status") in _TERMINAL_STATUSES:
-            return Task.model_validate(post.metadata)  # idempotent terminal no-op
+            _move_if_needed(path, done_path)  # heal a crash-stranded terminal file
+            return Task.model_validate(post.metadata)
 
         now = _now()
         stamp = _iso_utc(now)
-        block = f"{stamp}\n{outcome}" if outcome else stamp
-        section = f"{_OUTCOME_HEADING}\n\n{block}"
+        block = f"{stamp}\n{text}" if text else stamp
+        section = f"{heading}\n\n{block}"
         base = post.content.rstrip("\n")
         post.content = f"{base}\n\n{section}" if base else section
 
         _, related = resolve_wikilinks(post.content, vault)
         post.metadata["related"] = related
-        post.metadata["status"] = "done"
+        post.metadata["status"] = status
         post.metadata["updated"] = now
         task = Task.model_validate(post.metadata)
 
         atomic_write(path, frontmatter.dumps(post))
-        done_path = safe_resolve(vault, task_folder("done", vault) / f"{task_id}.md")
-        if done_path != path:
-            done_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(path, done_path)
+        _move_if_needed(path, done_path)
     return task
+
+
+def finish_task(config: Config, task_id: str, outcome: str | None = None) -> Task:
+    """Finish a task: append a ``## Outcome`` section and move it to ``tasks/done/`` (R3).
+
+    Appends a ``## Outcome`` section (ISO-8601 UTC timestamp + optional ``outcome``
+    text), sets ``status=done``, and moves the file open→done. Accepted from any
+    non-terminal status (``open``/``claimed``); **idempotent** on a terminal status
+    (a re-finish never adds a second ``## Outcome`` and the file stays in
+    ``tasks/done/``). ``related`` is recomputed from the amended body; the body is
+    inert data. Behaves identically with the daemon down. Raises
+    :class:`TaskNotFoundError` when the id resolves to no file. See
+    :func:`_terminate_task` for the shared lock/write/move mechanics.
+    """
+    return _terminate_task(
+        config, task_id, heading=_OUTCOME_HEADING, status="done", text=outcome
+    )
 
 
 def cancel_task(config: Config, task_id: str, reason: str | None = None) -> Task:
     """Cancel a task: append a ``## Cancelled`` section and move it to ``done/`` (R5).
 
-    The mirror image of :func:`finish_task`. Under the per-entity ``O_EXCL`` lock,
-    this appends a ``## Cancelled`` section carrying an ISO-8601 UTC timestamp line
-    and the (optional) ``reason`` text to the body, sets ``status=cancelled``,
-    bumps ``updated`` (``created`` is untouched), then moves the file from
-    ``tasks/open/`` to ``tasks/done/``:
-
-    * the updated content is written atomically **in place** at the resolved open
-      path, then :func:`os.replace` atomically renames it into ``tasks/done/`` — so
-      exactly one ``<id>.md`` exists at every instant (no duplicate/ghost);
-    * accepted from any *non-terminal* status (``open`` or ``claimed``);
-    * **idempotent** on a terminal status (``done``/``cancelled``): returns the
-      current task without writing, appending, or moving, so a re-cancel never adds
-      a second ``## Cancelled`` section and the file stays in ``tasks/done/``.
-
-    ``reason`` is optional — when omitted the heading and timestamp line are still
-    appended. ``related`` is recomputed from the amended body. The body is inert
-    data — never interpreted. The id is resolved *inside* the lock (cancel renames
-    the file, so a concurrent canceller must re-resolve after the winner's move);
-    the lock id is derived from ``task_id`` and stays stable across the move. The
-    whole path uses ``storage`` primitives directly, so it behaves identically with
-    the daemon down. Raises :class:`TaskNotFoundError` when the id resolves to no
-    file.
+    The mirror image of :func:`finish_task`: appends a ``## Cancelled`` section
+    (ISO-8601 UTC timestamp + optional ``reason`` text), sets ``status=cancelled``,
+    and moves the file open→done. Accepted from any non-terminal status;
+    **idempotent** on a terminal status (a re-cancel never adds a second section
+    and the file stays in ``tasks/done/``). Behaves identically with the daemon
+    down. Raises :class:`TaskNotFoundError` when the id resolves to no file. See
+    :func:`_terminate_task` for the shared mechanics.
     """
-    vault = config.core.tolaria_path
-    with _hold_lock(_lock_path(config, task_id)):
-        path = _resolve_task_path(config, task_id)
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
-        if post.metadata.get("status") in _TERMINAL_STATUSES:
-            return Task.model_validate(post.metadata)  # idempotent terminal no-op
-
-        now = _now()
-        stamp = _iso_utc(now)
-        block = f"{stamp}\n{reason}" if reason else stamp
-        section = f"{_CANCELLED_HEADING}\n\n{block}"
-        base = post.content.rstrip("\n")
-        post.content = f"{base}\n\n{section}" if base else section
-
-        _, related = resolve_wikilinks(post.content, vault)
-        post.metadata["related"] = related
-        post.metadata["status"] = "cancelled"
-        post.metadata["updated"] = now
-        task = Task.model_validate(post.metadata)
-
-        atomic_write(path, frontmatter.dumps(post))
-        done_path = safe_resolve(vault, task_folder("done", vault) / f"{task_id}.md")
-        if done_path != path:
-            done_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(path, done_path)
-    return task
+    return _terminate_task(
+        config, task_id, heading=_CANCELLED_HEADING, status="cancelled", text=reason
+    )
 
 
 def delete_task(config: Config, task_id: str) -> str:
@@ -435,13 +389,13 @@ def delete_task(config: Config, task_id: str) -> str:
     at ``tasks/.locks/<id>.lock`` (the lock id is derived from ``task_id``, not the
     file location, so it stays stable across a concurrent finish/cancel move); this
     serializes the delete against a mid-flight edit so it never unlinks a path that
-    a racing finisher just moved open→done. :func:`_hold_lock` clears only *stale*
+    a racing finisher just moved open→done. :func:`brain.storage.locks.hold` clears only *stale*
     lock residue on acquire and releases the lock on exit, so residue is cleaned
     without destroying a live lock. The whole path uses ``storage`` primitives
     directly, so it behaves identically with the daemon down. Raises
     :class:`TaskNotFoundError` when the id resolves to no file.
     """
-    with _hold_lock(_lock_path(config, task_id)):
+    with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         path.unlink()
     return task_id

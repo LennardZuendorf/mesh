@@ -32,6 +32,7 @@ from typer.testing import CliRunner
 
 import brain.cli.task as task_cli
 import brain.core.tasks as tasks_core
+import brain.storage.locks as locks_mod
 from brain.cli.__main__ import app
 from brain.core.tasks import (
     ClaimConflictError,
@@ -286,7 +287,7 @@ def test_claim_resolves_inside_lock(
     """
     _seed_task(vault, task_id="t-order", status="open", claimed_by=None)
     events: list[str] = []
-    real_acquire = tasks_core.acquire
+    real_acquire = locks_mod.acquire
     real_resolve = tasks_core._resolve_task_path
 
     def spy_acquire(lock_path: Path):  # type: ignore[no-untyped-def]
@@ -297,7 +298,7 @@ def test_claim_resolves_inside_lock(
         events.append("resolve")
         return real_resolve(config, task_id)
 
-    monkeypatch.setattr(tasks_core, "acquire", spy_acquire)
+    monkeypatch.setattr(locks_mod, "acquire", spy_acquire)
     monkeypatch.setattr(tasks_core, "_resolve_task_path", spy_resolve)
     claim_task(cfg, "t-order", "test-agent")
     assert events.index("acquire") < events.index("resolve")
@@ -313,14 +314,14 @@ def test_claim_acquires_stable_entity_lock(
 ) -> None:
     """The lock lives at tasks/.locks/<id>.lock regardless of open/done subfolder."""
     seen: list[Path] = []
-    real = tasks_core.acquire
+    real = locks_mod.acquire
 
     def spy(lock_path: Path):  # type: ignore[no-untyped-def]
         seen.append(lock_path)
         return real(lock_path)
 
     _seed_task(vault, task_id="t-lock", status="open", claimed_by=None)
-    monkeypatch.setattr(tasks_core, "acquire", spy)
+    monkeypatch.setattr(locks_mod, "acquire", spy)
     claim_task(cfg, "t-lock", "test-agent")
     assert seen == [_lock_path(vault, "t-lock")]
 

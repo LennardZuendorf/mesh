@@ -16,10 +16,8 @@ append/update.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -33,14 +31,12 @@ from brain.core.ids import generate_note_id
 from brain.core.wikilinks import resolve_wikilinks
 from brain.schemas.config import Config
 from brain.schemas.note import Note, NoteType
-from brain.storage.files import atomic_write, note_folder
-from brain.storage.locks import LockError, acquire
+from brain.storage.files import atomic_write, note_folder, read_post
+from brain.storage.locks import hold
 from brain.storage.sandbox import safe_resolve
 
 _NOTE_TYPES: tuple[str, ...] = get_args(NoteType)
 _SORT_FIELDS: tuple[str, ...] = ("updated", "created", "title")
-_LOCK_WAIT_SECONDS = 15.0
-_LOCK_POLL_SECONDS = 0.01
 _ID_PREFIX = "n-"
 _DEFAULT_LIMIT = 20
 _SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -124,7 +120,10 @@ def _resolve_path(config: Config, id_or_slug: str) -> Path:
     target = _slugify(id_or_slug)
     by_slug: list[Path] = []
     for path in brain_files:
-        title = frontmatter.loads(path.read_text(encoding="utf-8")).metadata.get("title")
+        post = read_post(path)
+        if post is None:
+            continue
+        title = post.metadata.get("title")
         if isinstance(title, str) and _slugify(title) == target:
             by_slug.append(path)
     if len(by_slug) == 1:
@@ -136,32 +135,6 @@ def _resolve_path(config: Config, id_or_slug: str) -> Path:
 
 def _lock_path(config: Config, note_id: str) -> Path:
     return _notes_root(config) / ".locks" / f"{note_id}.lock"
-
-
-@contextlib.contextmanager
-def _hold_lock(lock_path: Path) -> Iterator[Path]:
-    """Hold the entity ``O_EXCL`` lock, waiting out a live holder.
-
-    ``storage.locks.acquire`` is a non-blocking test-and-set: it raises
-    :class:`LockError` when a live, fresh lock is held. This wrapper adds the
-    bounded wait-and-retry policy so concurrent edits serialize instead of
-    failing. Acquisition is retried; the protected body is not.
-    """
-    deadline = time.monotonic() + _LOCK_WAIT_SECONDS
-    while True:
-        cm = acquire(lock_path)
-        try:
-            cm.__enter__()
-        except LockError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(_LOCK_POLL_SECONDS)
-            continue
-        try:
-            yield lock_path
-        finally:
-            cm.__exit__(None, None, None)
-        return
 
 
 def _append_to_end(body: str, block: str) -> str:
@@ -199,6 +172,20 @@ def _id_taken(config: Config, candidate: str) -> bool:
     return any(path.stem == candidate for path in _iter_note_files(config))
 
 
+def _validate_owner(config: Config, owner: str | None) -> None:
+    """Reject an explicit ``owner`` outside a non-empty ``[tasks].collections``.
+
+    Enforced here at the core write boundary so every caller — CLI, MCP, a future
+    daemon write path — gets the identical rule (notes and tasks alike). A
+    ``None`` owner (which defaults to the config agent) is exempt: ``collections``
+    validates the supplied ``--owner`` argument, not the running identity. Raises
+    ``ValueError`` (CLI exit 2), checked before any file is written.
+    """
+    collections = config.tasks.collections
+    if owner is not None and collections and owner not in collections:
+        raise ValueError(f"unknown owner: {owner!r}")
+
+
 def create_note(
     config: Config,
     title: str,
@@ -220,6 +207,7 @@ def create_note(
     """
     if note_type not in _NOTE_TYPES:
         raise ValueError(f"invalid note type: {note_type!r}")
+    _validate_owner(config, owner)
 
     vault = config.core.tolaria_path
     now = _now()
@@ -227,21 +215,24 @@ def create_note(
         now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
     )
     _, related = resolve_wikilinks(body, vault)
-    meta: dict[str, object] = {
-        "id": note_id,
-        "type": note_type,
-        "title": title,
-        "tags": list(tags or []),
-        "owner": owner if owner is not None else config.agent,
-        "created": now,
-        "updated": now,
-        "related": related,
-    }
-    note = Note.model_validate(meta)
+    note = Note.model_validate(
+        {
+            "id": note_id,
+            "type": note_type,
+            "title": title,
+            "tags": list(tags or []),
+            "owner": owner if owner is not None else config.agent,
+            "created": now,
+            "updated": now,
+            "related": related,
+        }
+    )
 
     path = safe_resolve(vault, note_folder(note_type, vault) / f"{note_id}.md")
     post = frontmatter.Post(body)
-    post.metadata = meta
+    # Serialize the frontmatter from the validated model — the schema is the one
+    # on-disk contract, never a parallel hand-built dict that can drift from it.
+    post.metadata = note.model_dump(mode="python")
     atomic_write(path, frontmatter.dumps(post))
     return note
 
@@ -264,7 +255,7 @@ def append_note(
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
     block = _format_block(text, timestamp)
-    with _hold_lock(_lock_path(config, note_id)):
+    with hold(_lock_path(config, note_id)):
         post = frontmatter.loads(path.read_text(encoding="utf-8"))
         post.content = (
             _append_under_section(post.content, block, section)
@@ -327,7 +318,7 @@ def update_note(
     vault = config.core.tolaria_path
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
-    with _hold_lock(_lock_path(config, note_id)):
+    with hold(_lock_path(config, note_id)):
         post = frontmatter.loads(path.read_text(encoding="utf-8"))
         if tags is not None:
             current = post.metadata.get("tags") or []
@@ -357,14 +348,14 @@ def delete_note(config: Config, id_or_slug: str) -> str:
     filesystem), then removes the file permanently — no archive, no trash —
     *inside* the per-entity ``O_EXCL`` lock. Holding the lock serializes the
     delete against a concurrent ``append``/``update`` so a racing writer can never
-    resurrect the note or have its in-flight lock stolen. :func:`_hold_lock`
+    resurrect the note or have its in-flight lock stolen. :func:`brain.storage.locks.hold`
     clears only *stale* locks (dead PID or aged out) on acquire and releases the
     lock on exit, so residue is cleaned without unconditionally destroying a live
     lock.
     """
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
-    with _hold_lock(_lock_path(config, note_id)):
+    with hold(_lock_path(config, note_id)):
         path.unlink()
     return note_id
 
@@ -393,7 +384,9 @@ def get_note(config: Config, id_or_slug: str) -> NoteView:
     previews). Not-found / ambiguous surface as the shared exceptions.
     """
     path = _resolve_path(config, id_or_slug)
-    post = frontmatter.loads(path.read_text(encoding="utf-8"))
+    post = read_post(path)
+    if post is None:
+        raise NoteNotFoundError(id_or_slug)
     note = Note.model_validate(post.metadata)
     return NoteView(note=note, body=post.content, path=path)
 
@@ -447,12 +440,14 @@ def list_notes(
 
     views: list[NoteView] = []
     for path in _iter_note_files(config):
-        meta = frontmatter.loads(path.read_text(encoding="utf-8"))
-        note_id = meta.metadata.get("id")
+        post = read_post(path)
+        if post is None:
+            continue
+        note_id = post.metadata.get("id")
         if not isinstance(note_id, str) or not note_id.startswith(_ID_PREFIX):
             continue
         try:
-            note = Note.model_validate(meta.metadata)
+            note = Note.model_validate(post.metadata)
         except ValidationError:
             continue
         if note_type is not None and note.type != note_type:
@@ -463,7 +458,7 @@ def list_notes(
             continue
         if cutoff is not None and note.updated < cutoff:
             continue
-        views.append(NoteView(note=note, body=meta.content, path=path))
+        views.append(NoteView(note=note, body=post.content, path=path))
 
     if sort == "title":
         views.sort(key=lambda v: v.note.title.lower())

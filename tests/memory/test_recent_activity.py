@@ -36,7 +36,7 @@ from typer.testing import CliRunner
 import brain.daemon.client as daemon_client
 from brain.cli.__main__ import app
 from brain.core.activity import recent_activity
-from brain.daemon.client import DaemonClient
+from brain.daemon.client import DaemonClient, DaemonError
 from brain.index.watch import DEFAULT_RECENT_LIMIT
 from brain.schemas.config import Config, load_config
 from brain.storage.files import note_folder, task_folder
@@ -201,6 +201,26 @@ def test_recent_activity_fallback_is_scan_recent(
 
     assert out == sentinel
     assert seen["limit"] == 7
+
+
+def test_recent_activity_falls_back_on_daemon_error(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A *live* daemon that answers activity.recent with a ``DaemonError`` (the
+    config-less 503 stub, or a 500 from its warm-index handler) must not crash the
+    lens: the accelerator is never a gate, so it scans the folder for the same rows.
+    """
+    _seed_note(vault, note_id="n-a", title="Alpha")
+    _seed_task(vault, task_id="t-b", title="Bravo")
+
+    def _boom(self: DaemonClient, config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> object:
+        raise DaemonError(503, "not yet available")
+
+    monkeypatch.setattr(DaemonClient, "activity_recent", _boom)
+
+    out = recent_activity(cfg, since=None, owner=None, mine=False, limit=20)
+
+    assert {e["id"] for e in out} == {"n-a", "t-b"}  # scanned, never raised
 
 
 # --------------------------------------------------------------------------- #

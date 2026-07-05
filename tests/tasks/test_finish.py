@@ -205,6 +205,31 @@ def test_finish_cancelled_is_noop(cfg: Config, vault: Path) -> None:
     assert "## Outcome" not in post.content
 
 
+def test_finish_reconciles_crash_stranded_file(cfg: Config, vault: Path) -> None:
+    """A terminal file stranded in open/ by a crash mid-move is healed, not stuck.
+
+    Simulates a crash between the atomic write (status=done) and the open→done
+    rename: the file sits in tasks/open/ with a terminal status. A re-finish must
+    reconcile it into done/ rather than short-circuit and leave it unrecoverable.
+    """
+    meta: dict[str, object] = {
+        "id": "t-crash", "type": "task", "title": "Crash", "tags": [],
+        "owner": "seed-agent", "created": _OLD, "updated": _OLD, "related": [],
+        "status": "done", "priority": None, "claimed_by": None,
+        "blocks": [], "blocked_by": [],
+    }
+    stranded = task_folder("open", vault) / "t-crash.md"
+    stranded.write_text(
+        frontmatter.dumps(frontmatter.Post("Body.\n\n## Outcome\n\nx", **meta)),
+        encoding="utf-8",
+    )
+    task = finish_task(cfg, "t-crash", "ignored")
+    assert task.status == "done"
+    assert _done_path(vault, "t-crash").exists()
+    assert not _open_path(vault, "t-crash").exists()
+    assert _reload(_done_path(vault, "t-crash")).content.count("## Outcome") == 1
+
+
 # --------------------------------------------------------------------------- #
 # finish_task (core) — resolution                                              #
 # --------------------------------------------------------------------------- #

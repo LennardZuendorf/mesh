@@ -91,6 +91,14 @@ def test_create_note_explicit_owner(cfg: Config, vault: Path) -> None:
     assert note.owner == "other-agent"
 
 
+def test_create_note_rejects_owner_outside_collections_in_core(cfg: Config, vault: Path) -> None:
+    """The owner rule is enforced in core (not just the CLI), so MCP/daemon
+    note writes get it too — and nothing is written on rejection."""
+    with pytest.raises(ValueError, match="unknown owner"):
+        create_note(cfg, "Ghost", owner="ghost-agent", body="x")
+    assert list((vault / "notes").rglob("n-*.md")) == []
+
+
 def test_create_note_tags_and_timestamps_present(cfg: Config, vault: Path) -> None:
     note = create_note(cfg, "Tagged", tags=["ndc", "flights"], body="x")
     assert note.tags == ["ndc", "flights"]

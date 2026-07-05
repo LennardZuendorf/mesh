@@ -27,6 +27,7 @@ from typer.testing import CliRunner
 import brain.cli.__main__ as main
 import brain.cli.task as task_cli
 import brain.core.tasks as tasks_core
+import brain.storage.locks as locks_mod
 from brain.cli.__main__ import app
 from brain.core.tasks import (
     TaskNotFoundError,
@@ -324,14 +325,14 @@ def test_update_task_acquires_entity_lock(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: list[Path] = []
-    real = tasks_core.acquire
+    real = locks_mod.acquire
 
     def spy(lock_path: Path):  # type: ignore[no-untyped-def]
         seen.append(lock_path)
         return real(lock_path)
 
     _seed_task(vault)
-    monkeypatch.setattr(tasks_core, "acquire", spy)
+    monkeypatch.setattr(locks_mod, "acquire", spy)
     update_task(cfg, "t-seed", priority="high")
     assert seen == [vault / "tasks" / ".locks" / "t-seed.lock"]
 
@@ -349,7 +350,7 @@ def test_update_task_resolves_inside_lock(
     """
     _seed_task(vault, status="open")
     events: list[str] = []
-    real_acquire = tasks_core.acquire
+    real_acquire = locks_mod.acquire
     real_resolve = tasks_core._resolve_task_path
 
     def spy_acquire(lock_path: Path):  # type: ignore[no-untyped-def]
@@ -360,7 +361,7 @@ def test_update_task_resolves_inside_lock(
         events.append("resolve")
         return real_resolve(config, task_id)
 
-    monkeypatch.setattr(tasks_core, "acquire", spy_acquire)
+    monkeypatch.setattr(locks_mod, "acquire", spy_acquire)
     monkeypatch.setattr(tasks_core, "_resolve_task_path", spy_resolve)
     update_task(cfg, "t-seed", priority="high")
     assert events.index("acquire") < events.index("resolve")

@@ -21,11 +21,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import frontmatter
-import yaml
-
 from brain.schemas.config import Config
 from brain.schemas.search import SearchResult
+from brain.storage.files import read_post
 
 _ID_PREFIXES = ("n-", "t-")
 _DEFAULT_LIMIT = 10
@@ -62,17 +60,13 @@ def iter_corpus(config: Config) -> Iterator[Path]:
 def read_row(path: Path) -> CorpusRow | None:
     """Parse one corpus file into a :class:`CorpusRow`; ``None`` if unreadable.
 
-    A vanished file (``OSError``) or a malformed frontmatter block
-    (``yaml.YAMLError``) is skipped silently — foreign and corrupt files must
-    never crash a scan (mirrors ``list_notes`` / ``scan_recent``).
+    Thin adapter over :func:`brain.storage.files.read_post` — the single safe
+    reader that skips a vanished file (``OSError``) or a malformed frontmatter
+    block (``yaml.YAMLError``) silently, so foreign and corrupt files never crash
+    a scan.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        post = frontmatter.loads(text)
-    except yaml.YAMLError:
+    post = read_post(path)
+    if post is None:
         return None
     return CorpusRow(path=path, meta=dict(post.metadata), body=post.content)
 

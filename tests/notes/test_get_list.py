@@ -501,3 +501,45 @@ def test_cli_list_invalid_sort_exits_2(brain_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-a")
     result = _invoke(["note", "list", "--sort", "bogus"])
     assert result.exit_code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Malformed-YAML tolerance (regression) — foreign/corrupt files skip silently  #
+# --------------------------------------------------------------------------- #
+
+
+def _seed_malformed(vault: Path, name: str) -> Path:
+    """Write a ``.md`` under ``notes/`` whose frontmatter is invalid YAML."""
+    path = vault / "notes" / f"{name}.md"
+    path.write_text('---\ntitle: "unterminated\ntags: [a, b\n---\nBody.\n', encoding="utf-8")
+    return path
+
+
+def test_list_notes_skips_malformed_yaml(cfg: Config, vault: Path) -> None:
+    """A corrupt-frontmatter file must be skipped, not crash the listing."""
+    _seed_note(vault, note_id="n-good", title="Good One")
+    _seed_malformed(vault, "n-broken")
+    views = list_notes(cfg)
+    assert [v.note.id for v in views] == ["n-good"]
+
+
+def test_get_note_by_slug_skips_malformed_yaml(cfg: Config, vault: Path) -> None:
+    """The slug scan reads every brain file; a malformed one must not crash it."""
+    _seed_note(vault, note_id="n-good", title="Good One")
+    _seed_malformed(vault, "n-broken")  # brain-id stem → enters the slug scan
+    assert get_note(cfg, "good-one").note.id == "n-good"
+
+
+def test_get_note_malformed_brain_file_is_not_found(cfg: Config, vault: Path) -> None:
+    """A brain file with corrupt YAML resolves to not-found, mirroring get_task."""
+    _seed_malformed(vault, "n-broken")
+    with pytest.raises(NoteNotFoundError):
+        get_note(cfg, "n-broken")
+
+
+def test_list_notes_since_tolerates_naive_datetime(cfg: Config, vault: Path) -> None:
+    """A note with a naive/date-only ``updated`` must not raise on ``--since`` compare."""
+    _seed_note(vault, note_id="n-naive", title="Naive", extra={"updated": "2026-01-01"})
+    _seed_note(vault, note_id="n-fresh", title="Fresh", updated=_now())
+    ids = {v.note.id for v in list_notes(cfg, since="7d")}
+    assert ids == {"n-fresh"}  # naive 2026-01-01 is older than the 7d cutoff, not a crash

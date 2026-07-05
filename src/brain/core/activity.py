@@ -27,12 +27,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import frontmatter
-import yaml
-
 from brain.core.notes import _parse_since
-from brain.daemon.client import DaemonClient
+from brain.daemon.client import DaemonClient, DaemonError
+from brain.index.watch import scan_recent
 from brain.schemas.config import Config
+from brain.storage.files import read_post
 
 __all__ = ["recent_activity"]
 
@@ -61,10 +60,17 @@ def recent_activity(
     filtered = cutoff is not None or owner is not None or mine
 
     fetch_limit = -1 if filtered else limit
-    result = DaemonClient().activity_recent(config, fetch_limit)
-    entries: list[dict[str, Any]] = (
-        list(result.get("entries", [])) if isinstance(result, dict) else []
-    )
+    try:
+        result = DaemonClient().activity_recent(config, fetch_limit)
+        entries: list[dict[str, Any]] = (
+            list(result.get("entries", [])) if isinstance(result, dict) else []
+        )
+    except DaemonError:
+        # The daemon is up but ``activity.recent`` is unavailable — a config-less
+        # 503 stub, or a 500 from its warm-index handler. The accelerator is never a
+        # gate, so scan the folder directly for the same rows the client's own
+        # socket-down fallback returns, rather than surfacing a traceback.
+        entries = scan_recent(config, fetch_limit)
 
     if cutoff is not None:
         entries = [e for e in entries if _mtime(e) >= cutoff]
@@ -86,14 +92,8 @@ def _mtime(entry: dict[str, Any]) -> float:
 
 def _read_meta(path: str) -> dict[str, Any] | None:
     """Frontmatter metadata at ``path``, or ``None`` on a read/parse failure."""
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        return dict(frontmatter.loads(text).metadata)
-    except yaml.YAMLError:
-        return None
+    post = read_post(Path(path))
+    return dict(post.metadata) if post is not None else None
 
 
 def _owner_match(config: Config, entry: dict[str, Any], *, owner: str | None, mine: bool) -> bool:

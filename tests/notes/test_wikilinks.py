@@ -230,3 +230,16 @@ def test_append_related_is_idempotent(cfg: Config, vault: Path) -> None:
     append_note(cfg, "n-srcc", "extra 2")
     second = _reload(src).metadata["related"]
     assert first == second == ["n-refc"]  # no dupes accumulate across writes
+
+
+def test_malformed_yaml_note_does_not_crash_wikilinks(cfg: Config, vault: Path) -> None:
+    """A corrupt note in ``notes/`` must be skipped by title-index and dangling scans."""
+    _seed_note(vault, note_id="n-ref", title="Target")
+    (vault / "notes" / "n-broken.md").write_text(
+        '---\ntitle: "unterminated\n---\n[[Nowhere]]\n', encoding="utf-8"
+    )
+    # Title resolution still works despite the corrupt sibling.
+    _, related = resolve_wikilinks("[[Target]]", vault)
+    assert related == ["n-ref"]
+    # find_dangling (feeds `brain status`) skips the corrupt file instead of raising.
+    assert find_dangling(vault) == []
