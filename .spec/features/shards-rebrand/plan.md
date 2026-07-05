@@ -189,8 +189,8 @@ uv.lock                   # regenerated via `uv lock`
 
 | Unit | Status |
 |---|---|
-| shards-rebrand/1 | NOT STARTED |
-| shards-rebrand/2 | NOT STARTED |
-| shards-rebrand/3 | NOT STARTED |
-| shards-rebrand/4 | NOT STARTED |
-| shards-rebrand/5 | NOT STARTED |
+| shards-rebrand/1 | DONE |
+| shards-rebrand/2 | DONE |
+| shards-rebrand/3 | DONE |
+| shards-rebrand/4 | DONE (committed `87fd993`) |
+| shards-rebrand/5 | GitHub repo + remote DONE; local dir `mv` handed to operator |
