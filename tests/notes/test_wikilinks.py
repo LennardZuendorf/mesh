@@ -1,17 +1,17 @@
 """notes/5 — wikilinks: ``[[Title]]`` / ``[[n-id]]`` / ``[[t-id]]`` → ``related``.
 
-Exercises R4 (Wikilinks). :func:`brain.core.wikilinks.resolve_wikilinks` scans a
+Exercises R4 (Wikilinks). :func:`shards.core.wikilinks.resolve_wikilinks` scans a
 note body for ``[[...]]`` links and returns ``(body_unchanged, resolved_ids)``:
 a ``[[Title]]`` link is resolved by an on-disk lookup across ``notes/`` (no
 daemon), an id-form ``[[n-id]]`` / ``[[t-id]]`` passes through verbatim and its
 id is taken directly (no file lookup). Unresolvable titles stay verbatim in the
-body and surface via :func:`brain.core.wikilinks.find_dangling` for ``brain
+body and surface via :func:`shards.core.wikilinks.find_dangling` for ``shards
 status``. The amend verbs (``append_note`` / ``update_note``) call the resolver
 on every body write and persist the derived ``related`` list — ``related`` is a
 pure function of the body.
 
-Only brain-owned notes (id ``n-…``) participate in title resolution, mirroring
-``list_notes``: a coexisting Tolaria/foreign file (title present, non-brain id)
+Only shards-owned notes (id ``n-…``) participate in title resolution, mirroring
+``list_notes``: a coexisting Tolaria/foreign file (title present, non-shards id)
 must never shadow a link nor leak a foreign id into ``related``.
 """
 
@@ -23,10 +23,10 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from brain.core.notes import append_note, update_note
-from brain.core.wikilinks import find_dangling, resolve_wikilinks
-from brain.schemas.config import Config, load_config
-from brain.storage.files import note_folder
+from shards.core.notes import append_note, update_note
+from shards.core.wikilinks import find_dangling, resolve_wikilinks
+from shards.schemas.config import Config, load_config
+from shards.storage.files import note_folder
 
 _WHEN = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -40,7 +40,7 @@ def _seed_note(
     body: str = "Body line.",
     related: list[str] | None = None,
 ) -> Path:
-    """Write a brain note straight to disk in the folder matching its type."""
+    """Write a shards note straight to disk in the folder matching its type."""
     meta: dict[str, object] = {
         "id": note_id,
         "type": note_type,
@@ -59,7 +59,7 @@ def _seed_note(
 
 
 def _seed_tolaria(vault: Path, name: str, meta: dict[str, object]) -> Path:
-    """Write a non-brain Markdown file (id is not a brain ``n-`` id) under ``notes/``."""
+    """Write a non-shards Markdown file (id is not a shards ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
     path.write_text(
         frontmatter.dumps(frontmatter.Post("Tolaria content.", **meta)), encoding="utf-8"
@@ -72,7 +72,7 @@ def _reload(path: Path) -> frontmatter.Post:
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -148,26 +148,26 @@ def test_find_dangling_empty_when_all_resolve(vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Brain-notes-only: coexisting Tolaria files must not resolve or leak ids       #
+# Shards-notes-only: coexisting Tolaria files must not resolve or leak ids       #
 # --------------------------------------------------------------------------- #
 
 
 def test_foreign_tolaria_title_does_not_resolve(vault: Path) -> None:
-    # A non-brain file with a title but a foreign id must not shadow the link.
+    # A non-shards file with a title but a foreign id must not shadow the link.
     _seed_tolaria(vault, "daily-2026-06-01", {"id": "tol-123", "title": "Daily Log"})
     _seed_note(vault, note_id="n-src", title="Src", body="See [[Daily Log]].")
     out_body, related = resolve_wikilinks("See [[Daily Log]].", vault)
     assert related == []  # foreign id never leaks into related
     assert "[[Daily Log]]" in out_body  # unresolved -> left verbatim
-    # The brain note's link to the foreign title is dangling, reported for status.
+    # The shards note's link to the foreign title is dangling, reported for status.
     assert find_dangling(vault) == ["Daily Log"]
 
 
-def test_brain_note_wins_over_foreign_same_title(vault: Path) -> None:
+def test_shards_note_wins_over_foreign_same_title(vault: Path) -> None:
     _seed_tolaria(vault, "foreign", {"id": "tol-9", "title": "Shared Title"})
-    _seed_note(vault, note_id="n-brain", title="Shared Title")
+    _seed_note(vault, note_id="n-shards", title="Shared Title")
     _, related = resolve_wikilinks("[[Shared Title]]", vault)
-    assert related == ["n-brain"]
+    assert related == ["n-shards"]
 
 
 # --------------------------------------------------------------------------- #
@@ -241,5 +241,5 @@ def test_malformed_yaml_note_does_not_crash_wikilinks(cfg: Config, vault: Path) 
     # Title resolution still works despite the corrupt sibling.
     _, related = resolve_wikilinks("[[Target]]", vault)
     assert related == ["n-ref"]
-    # find_dangling (feeds `brain status`) skips the corrupt file instead of raising.
+    # find_dangling (feeds `shards status`) skips the corrupt file instead of raising.
     assert find_dangling(vault) == []

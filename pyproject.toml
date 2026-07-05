@@ -1,7 +1,7 @@
 [project]
-name = "brain"
+name = "shards"
 version = "0.1.0"
-description = "Thin coordination over one Tolaria Markdown folder — note, task, search."
+description = "A mesh for multi-agent collaboration over one Tolaria Markdown folder — note, task, search."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-brain = "brain.cli.__main__:app"
-brain-mcp = "brain.mcp.server:main"
+shards = "shards.cli.__main__:app"
+shards-mcp = "shards.mcp.server:main"
 
 [dependency-groups]
 dev = [
@@ -33,7 +33,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/brain"]
+packages = ["src/shards"]
 
 [tool.ruff]
 line-length = 100
@@ -58,4 +58,4 @@ pythonpath = ["src"]
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["src/brain"]
+source = ["src/shards"]

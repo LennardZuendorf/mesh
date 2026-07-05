@@ -1,10 +1,10 @@
 """notes/4 — get / list: preview modes, slug resolve, filters/sort.
 
-Exercises R3 (Read / list): :func:`brain.core.notes.get_note` and
-:func:`brain.core.notes.list_notes` plus the ``brain note get`` / ``brain note
+Exercises R3 (Read / list): :func:`shards.core.notes.get_note` and
+:func:`shards.core.notes.list_notes` plus the ``shards note get`` / ``shards note
 list`` CLI surface. ``get`` yields frontmatter + a 200-char body preview
 (``--full`` / ``--meta-only`` / ``--related`` switch the shape); ``list`` only
-surfaces files carrying a valid brain ``n-`` id (Tolaria files are skipped) and
+surfaces files carrying a valid shards ``n-`` id (Tolaria files are skipped) and
 supports tag/owner/type/``--since`` filters with ``--sort`` and ``--limit``.
 
 Ordering tests seed *distinct* timestamps: Python's sort is stable, so ties fall
@@ -20,7 +20,7 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from brain.core.notes import (
+from shards.core.notes import (
     AmbiguousSlugError,
     NoteNotFoundError,
     NoteView,
@@ -28,8 +28,8 @@ from brain.core.notes import (
     list_notes,
     resolve_slug,
 )
-from brain.schemas.config import Config, load_config
-from brain.storage.files import note_folder
+from shards.schemas.config import Config, load_config
+from shards.storage.files import note_folder
 
 
 def _now() -> datetime:
@@ -50,7 +50,7 @@ def _seed_note(
     related: list[str] | None = None,
     extra: dict[str, object] | None = None,
 ) -> Path:
-    """Write a brain note straight to disk in the folder matching its type."""
+    """Write a shards note straight to disk in the folder matching its type."""
     when = _now()
     meta: dict[str, object] = {
         "id": note_id,
@@ -72,7 +72,7 @@ def _seed_note(
 
 
 def _seed_tolaria(vault: Path, name: str, meta: dict[str, object] | None = None) -> Path:
-    """Write a non-brain Markdown file (no valid ``n-`` id) under ``notes/``."""
+    """Write a non-shards Markdown file (no valid ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
     post = frontmatter.Post("Tolaria content.", **(meta or {}))
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
@@ -80,14 +80,14 @@ def _seed_tolaria(vault: Path, name: str, meta: dict[str, object] | None = None)
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
 def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
     from typer.testing import CliRunner
 
-    from brain.cli.__main__ import app
+    from shards.cli.__main__ import app
 
     return CliRunner().invoke(app, args)
 
@@ -160,11 +160,11 @@ def test_get_note_refuses_foreign_file(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# list_notes (core) — brain-id gate + filters + sort/limit                     #
+# list_notes (core) — shards-id gate + filters + sort/limit                     #
 # --------------------------------------------------------------------------- #
 
 
-def test_list_skips_files_without_brain_id(cfg: Config, vault: Path) -> None:
+def test_list_skips_files_without_shards_id(cfg: Config, vault: Path) -> None:
     _seed_note(vault, note_id="n-real", title="Real")
     _seed_tolaria(vault, "tolaria-plain")  # no frontmatter at all
     _seed_tolaria(vault, "tolaria-titled", {"title": "Tolaria", "tags": ["x"]})  # no id
@@ -283,11 +283,11 @@ def test_list_default_limit_is_20(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain note get                                                         #
+# CLI — shards note get                                                         #
 # --------------------------------------------------------------------------- #
 
 
-def test_cli_get_default_preview_truncates_at_200(brain_config: Path, vault: Path) -> None:
+def test_cli_get_default_preview_truncates_at_200(shards_config: Path, vault: Path) -> None:
     body = "A" * 250
     _seed_note(vault, note_id="n-seed", title="Seed", body=body)
     result = _invoke(["note", "get", "n-seed"])
@@ -297,7 +297,7 @@ def test_cli_get_default_preview_truncates_at_200(brain_config: Path, vault: Pat
     assert "A" * 201 not in result.output  # truncated, not the full 250
 
 
-def test_cli_get_full_shows_whole_body(brain_config: Path, vault: Path) -> None:
+def test_cli_get_full_shows_whole_body(shards_config: Path, vault: Path) -> None:
     body = "A" * 250
     _seed_note(vault, note_id="n-seed", body=body)
     result = _invoke(["note", "get", "n-seed", "--full"])
@@ -305,7 +305,7 @@ def test_cli_get_full_shows_whole_body(brain_config: Path, vault: Path) -> None:
     assert "A" * 250 in result.output
 
 
-def test_cli_get_meta_only_omits_body(brain_config: Path, vault: Path) -> None:
+def test_cli_get_meta_only_omits_body(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-seed", body="UNIQUEBODYMARKER")
     result = _invoke(["note", "get", "n-seed", "--meta-only"])
     assert result.exit_code == 0, result.output
@@ -313,7 +313,7 @@ def test_cli_get_meta_only_omits_body(brain_config: Path, vault: Path) -> None:
     assert "UNIQUEBODYMARKER" not in result.output
 
 
-def test_cli_get_related_only(brain_config: Path, vault: Path) -> None:
+def test_cli_get_related_only(shards_config: Path, vault: Path) -> None:
     _seed_note(
         vault,
         note_id="n-seed",
@@ -328,21 +328,21 @@ def test_cli_get_related_only(brain_config: Path, vault: Path) -> None:
     assert "title:" not in result.output  # only the related list
 
 
-def test_cli_get_not_found_exits_3(brain_config: Path, vault: Path) -> None:
+def test_cli_get_not_found_exits_3(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-seed")
     result = _invoke(["note", "get", "n-missing"])
     assert result.exit_code == 3
 
 
-def test_cli_get_foreign_file_exits_3(brain_config: Path, vault: Path) -> None:
+def test_cli_get_foreign_file_exits_3(shards_config: Path, vault: Path) -> None:
     """Finding #1: a foreign file addressed by stem is not-found (exit 3), no crash."""
     _seed_tolaria(vault, "tolaria-cli", {"title": "Tolaria Cli"})
     result = _invoke(["note", "get", "tolaria-cli"])
     assert result.exit_code == 3, result.output
 
 
-def test_cli_get_broken_brain_file_exits_3(brain_config: Path, vault: Path) -> None:
-    """Finding #3: a brain-id file with malformed frontmatter maps to exit 3, not a traceback."""
+def test_cli_get_broken_shards_file_exits_3(shards_config: Path, vault: Path) -> None:
+    """Finding #3: a shards-id file with malformed frontmatter maps to exit 3, not a traceback."""
     # Valid n- stem (so it resolves) but frontmatter is missing required fields.
     path = vault / "notes" / "n-broken.md"
     post = frontmatter.Post("body", id="n-broken", type="note")  # no title/created/updated
@@ -352,7 +352,7 @@ def test_cli_get_broken_brain_file_exits_3(brain_config: Path, vault: Path) -> N
     assert result.exception is None or isinstance(result.exception, SystemExit), result.output
 
 
-def test_cli_get_ambiguous_slug_exits_2_lists_ids(brain_config: Path, vault: Path) -> None:
+def test_cli_get_ambiguous_slug_exits_2_lists_ids(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-aaaa", title="Dup Title")
     _seed_note(vault, note_id="n-bbbb", title="Dup Title", note_type="log")
     result = _invoke(["note", "get", "dup-title"])
@@ -361,7 +361,7 @@ def test_cli_get_ambiguous_slug_exits_2_lists_ids(brain_config: Path, vault: Pat
     assert "n-bbbb" in result.output
 
 
-def test_cli_get_json_single_object(brain_config: Path, vault: Path) -> None:
+def test_cli_get_json_single_object(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-seed", title="Seed", tags=["x"], body="the body")
     result = _invoke(["--json", "note", "get", "n-seed"])
     assert result.exit_code == 0, result.output
@@ -373,26 +373,26 @@ def test_cli_get_json_single_object(brain_config: Path, vault: Path) -> None:
     assert obj["body"] == "the body"
 
 
-def test_cli_get_json_full_body(brain_config: Path, vault: Path) -> None:
+def test_cli_get_json_full_body(shards_config: Path, vault: Path) -> None:
     body = "A" * 250
     _seed_note(vault, note_id="n-seed", body=body)
     obj = json.loads(_invoke(["--json", "note", "get", "n-seed", "--full"]).output)
     assert obj["body"] == body
 
 
-def test_cli_get_json_meta_only_has_no_body(brain_config: Path, vault: Path) -> None:
+def test_cli_get_json_meta_only_has_no_body(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-seed", body="x")
     obj = json.loads(_invoke(["--json", "note", "get", "n-seed", "--meta-only"]).output)
     assert "body" not in obj
 
 
-def test_cli_get_json_related_is_object(brain_config: Path, vault: Path) -> None:
+def test_cli_get_json_related_is_object(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-seed", related=["n-aaaa"])
     obj = json.loads(_invoke(["--json", "note", "get", "n-seed", "--related"]).output)
     assert obj == {"related": ["n-aaaa"]}
 
 
-def test_cli_get_quiet_emits_id_only(brain_config: Path, vault: Path) -> None:
+def test_cli_get_quiet_emits_id_only(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-seed", title="Seed", body="body")
     result = _invoke(["--quiet", "note", "get", "n-seed"])
     assert result.exit_code == 0, result.output
@@ -400,11 +400,11 @@ def test_cli_get_quiet_emits_id_only(brain_config: Path, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain note list                                                        #
+# CLI — shards note list                                                        #
 # --------------------------------------------------------------------------- #
 
 
-def test_cli_list_surfaces_brain_notes_only(brain_config: Path, vault: Path) -> None:
+def test_cli_list_surfaces_shards_notes_only(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-real", title="Real")
     _seed_tolaria(vault, "tolaria", {"title": "Tolaria"})
     result = _invoke(["note", "list"])
@@ -413,7 +413,7 @@ def test_cli_list_surfaces_brain_notes_only(brain_config: Path, vault: Path) -> 
     assert "Tolaria" not in result.output
 
 
-def test_cli_list_json_is_array(brain_config: Path, vault: Path) -> None:
+def test_cli_list_json_is_array(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-a", updated=_now())
     _seed_note(vault, note_id="n-b", updated=_now() - timedelta(minutes=1))
     result = _invoke(["--json", "note", "list"])
@@ -423,7 +423,7 @@ def test_cli_list_json_is_array(brain_config: Path, vault: Path) -> None:
     assert [o["id"] for o in arr] == ["n-a", "n-b"]
 
 
-def test_cli_list_quiet_one_id_per_line(brain_config: Path, vault: Path) -> None:
+def test_cli_list_quiet_one_id_per_line(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-a", updated=_now())
     _seed_note(vault, note_id="n-b", updated=_now() - timedelta(minutes=1))
     result = _invoke(["--quiet", "note", "list"])
@@ -431,7 +431,7 @@ def test_cli_list_quiet_one_id_per_line(brain_config: Path, vault: Path) -> None
     assert result.output.split() == ["n-a", "n-b"]
 
 
-def test_cli_list_tags_and_filter(brain_config: Path, vault: Path) -> None:
+def test_cli_list_tags_and_filter(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-both", tags=["ndc", "flights"], updated=_now())
     _seed_note(
         vault,
@@ -444,7 +444,7 @@ def test_cli_list_tags_and_filter(brain_config: Path, vault: Path) -> None:
     assert result.output.split() == ["n-both"]
 
 
-def test_cli_list_any_tag_filter(brain_config: Path, vault: Path) -> None:
+def test_cli_list_any_tag_filter(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-both", tags=["ndc", "flights"], updated=_now())
     _seed_note(
         vault,
@@ -457,14 +457,14 @@ def test_cli_list_any_tag_filter(brain_config: Path, vault: Path) -> None:
     assert result.output.split() == ["n-both", "n-one"]
 
 
-def test_cli_list_owner_filter(brain_config: Path, vault: Path) -> None:
+def test_cli_list_owner_filter(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-a", owner="alice", updated=_now())
     _seed_note(vault, note_id="n-b", owner="bob", updated=_now() - timedelta(minutes=1))
     result = _invoke(["--quiet", "note", "list", "--owner", "alice"])
     assert result.output.split() == ["n-a"]
 
 
-def test_cli_list_type_filter(brain_config: Path, vault: Path) -> None:
+def test_cli_list_type_filter(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-note", note_type="note", updated=_now())
     _seed_note(
         vault,
@@ -476,28 +476,28 @@ def test_cli_list_type_filter(brain_config: Path, vault: Path) -> None:
     assert result.output.split() == ["n-dec"]
 
 
-def test_cli_list_since_filter(brain_config: Path, vault: Path) -> None:
+def test_cli_list_since_filter(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-recent", updated=_now() - timedelta(days=1))
     _seed_note(vault, note_id="n-old", updated=_now() - timedelta(days=30))
     result = _invoke(["--quiet", "note", "list", "--since", "7d"])
     assert result.output.split() == ["n-recent"]
 
 
-def test_cli_list_sort_title(brain_config: Path, vault: Path) -> None:
+def test_cli_list_sort_title(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-b", title="Bravo", updated=_now())
     _seed_note(vault, note_id="n-a", title="Alpha", updated=_now() - timedelta(minutes=1))
     result = _invoke(["--quiet", "note", "list", "--sort", "title"])
     assert result.output.split() == ["n-a", "n-b"]
 
 
-def test_cli_list_limit(brain_config: Path, vault: Path) -> None:
+def test_cli_list_limit(shards_config: Path, vault: Path) -> None:
     for i in range(5):
         _seed_note(vault, note_id=f"n-{i:02d}", updated=_now() - timedelta(minutes=i))
     result = _invoke(["--quiet", "note", "list", "--limit", "2"])
     assert len(result.output.split()) == 2
 
 
-def test_cli_list_invalid_sort_exits_2(brain_config: Path, vault: Path) -> None:
+def test_cli_list_invalid_sort_exits_2(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-a")
     result = _invoke(["note", "list", "--sort", "bogus"])
     assert result.exit_code == 2
@@ -524,14 +524,14 @@ def test_list_notes_skips_malformed_yaml(cfg: Config, vault: Path) -> None:
 
 
 def test_get_note_by_slug_skips_malformed_yaml(cfg: Config, vault: Path) -> None:
-    """The slug scan reads every brain file; a malformed one must not crash it."""
+    """The slug scan reads every shards file; a malformed one must not crash it."""
     _seed_note(vault, note_id="n-good", title="Good One")
-    _seed_malformed(vault, "n-broken")  # brain-id stem → enters the slug scan
+    _seed_malformed(vault, "n-broken")  # shards-id stem → enters the slug scan
     assert get_note(cfg, "good-one").note.id == "n-good"
 
 
-def test_get_note_malformed_brain_file_is_not_found(cfg: Config, vault: Path) -> None:
-    """A brain file with corrupt YAML resolves to not-found, mirroring get_task."""
+def test_get_note_malformed_shards_file_is_not_found(cfg: Config, vault: Path) -> None:
+    """A shards file with corrupt YAML resolves to not-found, mirroring get_task."""
     _seed_malformed(vault, "n-broken")
     with pytest.raises(NoteNotFoundError):
         get_note(cfg, "n-broken")

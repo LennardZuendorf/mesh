@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from brain.core.ids import generate_task_id
-from brain.schemas.task import Task
-from brain.storage.files import task_folder
+from shards.core.ids import generate_task_id
+from shards.schemas.task import Task
+from shards.storage.files import task_folder
 
 # --------------------------------------------------------------------------- #
 # Task schema                                                                   #
@@ -109,7 +109,7 @@ def test_task_unknown_keys_round_trip_unchanged() -> None:
         "claimed_by": None,
         "blocks": [],
         "blocked_by": [],
-        # Keys brain does not own must survive a load/dump cycle untouched.
+        # Keys shards does not own must survive a load/dump cycle untouched.
         "tolaria_pinned": True,
         "custom_ref": "PROJ-123",
     }

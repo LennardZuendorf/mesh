@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from brain.storage.files import atomic_write, note_folder
-from brain.storage.locks import LockError, acquire
-from brain.storage.sandbox import safe_resolve
+from shards.storage.files import atomic_write, note_folder
+from shards.storage.locks import LockError, acquire
+from shards.storage.sandbox import safe_resolve
 
 # --------------------------------------------------------------------------- #
 # atomic_write                                                                  #

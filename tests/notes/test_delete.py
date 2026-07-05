@@ -1,7 +1,7 @@
 """notes/6 — delete: guarded hard delete.
 
-Exercises R5 (Delete): :func:`brain.core.notes.delete_note` plus the
-``brain note delete`` CLI surface. Delete is a *hard* delete — the file is
+Exercises R5 (Delete): :func:`shards.core.notes.delete_note` plus the
+``shards note delete`` CLI surface. Delete is a *hard* delete — the file is
 removed from disk permanently (no archive, no trash) and any
 ``notes/.locks/<id>.lock`` residue is cleared. The CLI guards it: an interactive
 TTY prompts ``Delete <id>? [y/N]`` and aborts unless the user confirms; a machine
@@ -9,7 +9,7 @@ path (``--json`` / ``--quiet`` / piped stdin) without ``--force`` refuses (exit 
 rather than silently destroying data; ``--force`` skips the prompt entirely.
 
 ``sys.stdin.isatty()`` is always False under Typer's ``CliRunner``, so the
-interactive-prompt paths monkeypatch :func:`brain.cli.note._is_tty` to simulate a
+interactive-prompt paths monkeypatch :func:`shards.cli.note._is_tty` to simulate a
 terminal while still feeding the answer through the runner's stdin.
 """
 
@@ -26,17 +26,17 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import brain.cli.note as note_cli
-import brain.storage.locks as locks_mod
-from brain.cli.__main__ import app
-from brain.core.notes import (
+import shards.cli.note as note_cli
+import shards.storage.locks as locks_mod
+from shards.cli.__main__ import app
+from shards.core.notes import (
     AmbiguousSlugError,
     NoteNotFoundError,
     delete_note,
 )
-from brain.schemas.config import Config, load_config
-from brain.storage.files import note_folder
-from brain.storage.locks import acquire
+from shards.schemas.config import Config, load_config
+from shards.storage.files import note_folder
+from shards.storage.locks import acquire
 
 _STALE_AGE = 400.0  # seconds; > LOCK_TTL_SECONDS (300) so a lock ages out
 
@@ -58,7 +58,7 @@ def _seed_note(
     title: str = "Seed Note",
     body: str = "Body line.",
 ) -> Path:
-    """Write a brain note straight to disk in the folder matching its type."""
+    """Write a shards note straight to disk in the folder matching its type."""
     meta: dict[str, object] = {
         "id": note_id,
         "type": note_type,
@@ -81,7 +81,7 @@ def _lock_path(vault: Path, note_id: str) -> Path:
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -163,12 +163,12 @@ def test_delete_note_is_hard_no_archive_or_trash(cfg: Config, vault: Path) -> No
 
 
 # --------------------------------------------------------------------------- #
-# Finding #1 — foreign (non-brain) files are never resolved / deleted          #
+# Finding #1 — foreign (non-shards) files are never resolved / deleted          #
 # --------------------------------------------------------------------------- #
 
 
 def _seed_foreign(vault: Path, name: str, title: str) -> Path:
-    """Write a coexisting Tolaria file with no brain ``n-`` id (non-``n-`` stem)."""
+    """Write a coexisting Tolaria file with no shards ``n-`` id (non-``n-`` stem)."""
     path = vault / "notes" / f"{name}.md"
     post = frontmatter.Post("Foreign content.", title=title, tags=["x"])
     path.write_text(frontmatter.dumps(post), encoding="utf-8")

@@ -2,10 +2,10 @@
 type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
-updated: 2026-07-04
+updated: 2026-07-05
 ---
 
-# Brain — Plan
+# Shards — Plan
 
 **Status:** Phase 1–2 **delivered** — all five features implemented and tested (578 tests, mypy strict, ruff clean) on branch `feat/phase-1-mvp`. Built bottom-up behind binary whole-feature gates.
 
@@ -23,6 +23,7 @@ updated: 2026-07-04
 | 4 | search | ✅ DONE | `tests/search/` | `feat(search)` |
 | 5 | memory | ✅ DONE | `tests/memory/` | `feat(memory)` |
 | 6 | tasks-graph | ⏳ deferred (Phase 3) | `tests/tasks/` | — |
+| 7 | [shards-rebrand](features/shards-rebrand/plan.md) | 🛠 in progress | full suite | `chore(rebrand)` |
 
 ---
 
@@ -33,9 +34,9 @@ updated: 2026-07-04
 | **notes** | schema, writes, wikilinks, config, global CLI |
 | **tasks** | lifecycle, `O_EXCL` claim (v1) |
 | **daemon** | socket, watcher, warm index, admin, `on_vault_change` hook |
-| **search** | `indexed_client`, tag-pull, fallback, `brain search` |
+| **search** | `indexed_client`, tag-pull, fallback, `shards search` |
 | **memory** | MCP, `recent-activity`, `build-context`, `session-start` |
 
-**Freshness:** daemon watcher fires hook → search `indexed_client.incremental_update`. `brain reindex` → `full_rebuild()`.
+**Freshness:** daemon watcher fires hook → search `indexed_client.incremental_update`. `shards reindex` → `full_rebuild()`.
 
-Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature unit plans were compounded here and removed — unit-level truth is now `tests/` + `src/brain/`.
+Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature unit plans were compounded here and removed — unit-level truth is now `tests/` + `src/shards/`.

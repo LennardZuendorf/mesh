@@ -4,10 +4,10 @@ scope: design
 design_format: google-labs-code/design.md-compatible
 children:
   - plan.md
-updated: 2026-07-04
+updated: 2026-07-05
 ---
 
-# Brain — Design
+# Shards — Design
 
 CLI + MCP, no UI. **Tone:** quiet, deterministic, instant. Humans get terse text; agents get strict JSON. Same behaviour with or without daemon.
 

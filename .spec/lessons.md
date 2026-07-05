@@ -12,7 +12,7 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 -->
 
 ### A green gate is not a complete feature
-**Pattern:** pytest + mypy + ruff all passed while `brain daemon start` (admin unit) and the MCP server were entirely unbuilt, and while `search --status` was silently dropped on the hybrid path — because no test exercised the missing behaviour. A green gate only proves the tests that exist pass.
+**Pattern:** pytest + mypy + ruff all passed while `shards daemon start` (admin unit) and the MCP server were entirely unbuilt, and while `search --status` was silently dropped on the hybrid path — because no test exercised the missing behaviour. A green gate only proves the tests that exist pass.
 **Rule:** Verify features against the spec's requirement list and by running the assembled binary end-to-end, not just by gate colour. Cross-check units-built vs required surface before declaring done; a missing verb/flag has no failing test to turn the gate red.
 **Tags:** verification, testing, cli, done-definition
 **Date:** 2026-07-04
@@ -48,13 +48,13 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Date:** 2026-07-04
 
 ### Resolve user paths — expanduser() every config path
-**Pattern:** `BRAIN_CONFIG_PATH` was `expanduser()`'d but `[core].tolaria_path` was not, and `realpath` does not expand `~`. A natural `path = "~/vault"` became a literal `./~/vault` under the process CWD — silently writing the whole vault to the wrong place and rooting the sandbox there.
+**Pattern:** `SHARDS_CONFIG_PATH` was `expanduser()`'d but `[core].tolaria_path` was not, and `realpath` does not expand `~`. A natural `path = "~/vault"` became a literal `./~/vault` under the process CWD — silently writing the whole vault to the wrong place and rooting the sandbox there.
 **Rule:** Every path that comes from a human-authored config or env var gets `expanduser()` at the parse boundary (a pydantic field validator), consistently across *all* path fields. `realpath`/`resolve` is not a substitute for `~` expansion.
 **Tags:** config, paths, sandbox
 **Date:** 2026-07-04
 
 ### Instant CLI: import heavy and daemon-only deps lazily
-**Pattern:** `index/watch.py` imported `watchdog.observers` at module top, and the CLI entrypoint pulled `watch` in transitively — so every `brain note new` / `task claim` loaded watchdog and its fsevents C-extension though only the daemon process ever instantiates an `Observer`, taxing the "instant CLI, heavy work in the daemon" mandate on every invocation.
+**Pattern:** `index/watch.py` imported `watchdog.observers` at module top, and the CLI entrypoint pulled `watch` in transitively — so every `shards note new` / `task claim` loaded watchdog and its fsevents C-extension though only the daemon process ever instantiates an `Observer`, taxing the "instant CLI, heavy work in the daemon" mandate on every invocation.
 **Rule:** Keep daemon-only / heavy imports out of any module on the CLI import path. Import them lazily inside the function that needs them (`Watcher.start()`), so command startup pays only for what it uses.
 **Tags:** cli, startup, performance, imports
 **Date:** 2026-07-04

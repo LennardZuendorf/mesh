@@ -1,7 +1,7 @@
 """notes/1 — config, Note schema, and id generation.
 
 Covers the shared primitives every later feature inherits: the pydantic Config
-model (with BRAIN_CONFIG_PATH / BRAIN_AGENT overrides), the Note frontmatter
+model (with SHARDS_CONFIG_PATH / SHARDS_AGENT overrides), the Note frontmatter
 schema (unknown-key round-trip), and the deterministic hash-id generator.
 """
 
@@ -12,16 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from brain.core.ids import generate_note_id, generate_task_id
-from brain.schemas.config import Config, load_config
-from brain.schemas.note import Note
+from shards.core.ids import generate_note_id, generate_task_id
+from shards.schemas.config import Config, load_config
+from shards.schemas.note import Note
 
 # --------------------------------------------------------------------------- #
 # Config                                                                        #
 # --------------------------------------------------------------------------- #
 
 
-def test_config_reads_all_sections(brain_config: Path, vault: Path) -> None:
+def test_config_reads_all_sections(shards_config: Path, vault: Path) -> None:
     cfg = load_config()
     assert isinstance(cfg, Config)
     assert cfg.core.tolaria_path == vault
@@ -55,35 +55,35 @@ def test_missing_config_raises_systemexit_2(tmp_path: Path) -> None:
     assert exc.value.code == 2
 
 
-def test_brain_config_path_override_is_authoritative(
+def test_shards_config_path_override_is_authoritative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Point BRAIN_CONFIG_PATH at a nonexistent file. If the override were ignored
-    # and it silently fell back to ~/.brain/config.toml this would not raise.
+    # Point SHARDS_CONFIG_PATH at a nonexistent file. If the override were ignored
+    # and it silently fell back to ~/.shards/config.toml this would not raise.
     missing = tmp_path / "nope.toml"
-    monkeypatch.setenv("BRAIN_CONFIG_PATH", str(missing))
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(missing))
     with pytest.raises(SystemExit) as exc:
         load_config()
     assert exc.value.code == 2
 
 
-def test_brain_config_path_isolates_from_home(brain_config: Path, vault: Path) -> None:
-    # The fixture set BRAIN_CONFIG_PATH; load_config must read *that* file, not
-    # any real ~/.brain/config.toml on the host running the suite.
+def test_shards_config_path_isolates_from_home(shards_config: Path, vault: Path) -> None:
+    # The fixture set SHARDS_CONFIG_PATH; load_config must read *that* file, not
+    # any real ~/.shards/config.toml on the host running the suite.
     cfg = load_config()
     assert cfg.core.tolaria_path == vault
 
 
-def test_brain_agent_env_overrides_config_agent(
-    brain_config: Path, monkeypatch: pytest.MonkeyPatch
+def test_shards_agent_env_overrides_config_agent(
+    shards_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("BRAIN_AGENT", "env-agent")
+    monkeypatch.setenv("SHARDS_AGENT", "env-agent")
     cfg = load_config()
     assert cfg.core.agent == "env-agent"
     assert cfg.agent == "env-agent"
 
 
-def test_config_agent_used_when_env_absent(brain_config: Path) -> None:
+def test_config_agent_used_when_env_absent(shards_config: Path) -> None:
     cfg = load_config()
     assert cfg.agent == "test-agent"
 
@@ -149,7 +149,7 @@ def test_note_unknown_keys_round_trip_unchanged() -> None:
         "created": _now(),
         "updated": _now(),
         "related": [],
-        # Keys brain does not own must survive a load/dump cycle untouched.
+        # Keys shards does not own must survive a load/dump cycle untouched.
         "tolaria_pinned": True,
         "custom_ref": "PROJ-123",
     }

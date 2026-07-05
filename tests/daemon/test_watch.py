@@ -2,7 +2,7 @@
 
 Coverage maps 1:1 to the unit's acceptance criteria:
 
-* **Index** — a ``VaultIndex`` keyed by brain id: ``reparse`` reads frontmatter for
+* **Index** — a ``VaultIndex`` keyed by shards id: ``reparse`` reads frontmatter for
   a path, ``evict`` drops a (possibly already-gone) path without error, ``recent``
   returns mtime-sorted rows.
 * **Reconcile** — a file whose frontmatter ``status``/``type`` maps to a different
@@ -47,9 +47,9 @@ from watchdog.events import (
     FileMovedEvent,
 )
 
-from brain.daemon.client import DaemonClient, DaemonError
-from brain.daemon.server import DaemonServer
-from brain.index.watch import (
+from shards.daemon.client import DaemonClient, DaemonError
+from shards.daemon.server import DaemonServer
+from shards.index.watch import (
     DEFAULT_RECENT_LIMIT,
     VaultIndex,
     Watcher,
@@ -59,8 +59,8 @@ from brain.index.watch import (
     register_change_hook,
     scan_recent,
 )
-from brain.schemas.config import Config, load_config
-from brain.storage.sandbox import safe_resolve
+from shards.schemas.config import Config, load_config
+from shards.storage.sandbox import safe_resolve
 
 # --------------------------------------------------------------------------- #
 # Fixtures & helpers                                                          #
@@ -68,7 +68,7 @@ from brain.storage.sandbox import safe_resolve
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -245,7 +245,7 @@ def test_reparse_indexes_note_by_id(vault: Path) -> None:
     assert entry.meta["title"] == "Indexed Note"
 
 
-def test_reparse_skips_file_without_brain_id(vault: Path) -> None:
+def test_reparse_skips_file_without_shards_id(vault: Path) -> None:
     foreign = vault / "notes" / "tolaria.md"
     foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
     index = VaultIndex()
@@ -335,7 +335,7 @@ def test_reconcile_ignores_foreign_file(cfg: Config, vault: Path) -> None:
     )
     final = reconcile_path(cfg, foreign)
     assert final == foreign.resolve()
-    assert foreign.exists()  # no brain id → never moved
+    assert foreign.exists()  # no shards id → never moved
 
 
 def test_reconcile_returns_unmoved_when_source_races_away(
@@ -351,7 +351,7 @@ def test_reconcile_returns_unmoved_when_source_races_away(
     def _vanish(_src: object, _dst: object) -> None:
         raise FileNotFoundError
 
-    monkeypatch.setattr("brain.index.watch.os.replace", _vanish)
+    monkeypatch.setattr("shards.index.watch.os.replace", _vanish)
     result = reconcile_path(cfg, path)  # must not raise
     # Left in place (move failed); the resolved original path is returned so a
     # later event can reconcile it.
@@ -477,10 +477,10 @@ def test_index_recent_sorted_by_mtime_desc_and_limited(vault: Path) -> None:
     assert [r["id"] for r in rows] == ["n-2", "n-3"]  # most-recent first, capped at 2
 
 
-def test_scan_recent_fallback_mtime_sorted_and_brain_ids_only(cfg: Config, vault: Path) -> None:
+def test_scan_recent_fallback_mtime_sorted_and_shards_ids_only(cfg: Config, vault: Path) -> None:
     _write_note(vault, note_id="n-old", title="Old", mtime=1000.0)
     _write_task(vault, task_id="t-new", status="open", mtime=5000.0)
-    # A foreign Tolaria file (no brain id) must be excluded.
+    # A foreign Tolaria file (no shards id) must be excluded.
     foreign = vault / "notes" / "tolaria.md"
     foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
     rows = scan_recent(cfg, limit=10)
@@ -620,7 +620,7 @@ def test_daemon_start_clears_leftover_change_hooks(
     # The daemon's own hook is ``lambda p: incremental_update(config, p)``; patch the
     # target it resolves so a fired hook is observable.
     monkeypatch.setattr(
-        "brain.daemon.server.incremental_update", lambda config, path: calls.append(path)
+        "shards.daemon.server.incremental_update", lambda config, path: calls.append(path)
     )
     # Simulate a leftover hook a clean stop never removed (e.g. a crashed run).
     register_change_hook(lambda p: calls.append(p))
@@ -646,7 +646,7 @@ def test_daemon_client_is_up_reflects_liveness(
 def test_watch_module_does_not_eagerly_bind_observer_backend() -> None:
     """The heavy platform observer backend is imported lazily inside ``Watcher.start``,
     so a daemon-less CLI importing ``watch`` (for ``scan_recent``) never binds it."""
-    import brain.index.watch as watch_mod
+    import shards.index.watch as watch_mod
 
     assert not hasattr(watch_mod, "Observer")
     assert not hasattr(watch_mod, "BaseObserver")

@@ -2,14 +2,14 @@
 
 Exercises the task read verbs and the cancel lifecycle transition:
 
-* :func:`brain.core.tasks.list_tasks` scans **both** ``tasks/open/`` and
+* :func:`shards.core.tasks.list_tasks` scans **both** ``tasks/open/`` and
   ``tasks/done/``, surfaces only files whose frontmatter validates as a
-  :class:`~brain.schemas.task.Task` (``t-`` id, ``type: task``), and applies
+  :class:`~shards.schemas.task.Task` (``t-`` id, ``type: task``), and applies
   conjunctive ``status`` / ``owner`` / ``--mine`` / tag / ``--since`` filters with
   ``--sort`` and ``--limit`` (same semantics as notes).
-* :func:`brain.core.tasks.get_task` reads one task by id from either folder into a
-  :class:`~brain.core.tasks.TaskView`; not-found raises (CLI exit 3).
-* :func:`brain.core.tasks.cancel_task` appends a ``## Cancelled`` section (ISO-8601
+* :func:`shards.core.tasks.get_task` reads one task by id from either folder into a
+  :class:`~shards.core.tasks.TaskView`; not-found raises (CLI exit 3).
+* :func:`shards.core.tasks.cancel_task` appends a ``## Cancelled`` section (ISO-8601
   timestamp + optional reason), sets ``status=cancelled``, bumps ``updated``, and
   moves the file to ``tasks/done/`` — all under the per-entity lock, idempotent on
   a terminal status.
@@ -29,9 +29,9 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import brain.cli.task as task_cli
-from brain.cli.__main__ import app
-from brain.core.tasks import (
+import shards.cli.task as task_cli
+from shards.cli.__main__ import app
+from shards.core.tasks import (
     TaskNotFoundError,
     TaskView,
     _resolve_task_path,
@@ -39,15 +39,15 @@ from brain.core.tasks import (
     get_task,
     list_tasks,
 )
-from brain.schemas.config import Config, load_config
-from brain.storage.files import task_folder
+from shards.schemas.config import Config, load_config
+from shards.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 _ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -77,7 +77,7 @@ def _seed_task(
     created: datetime = _OLD,
     updated: datetime = _OLD,
 ) -> Path:
-    """Write a brain task straight to disk in the folder matching its status."""
+    """Write a shards task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -101,7 +101,7 @@ def _seed_task(
 
 
 def _seed_foreign(vault: Path, sub: str, name: str, meta: dict[str, object] | None = None) -> Path:
-    """Write a non-brain Markdown file (no valid ``t-`` id / ``type: task``)."""
+    """Write a non-shards Markdown file (no valid ``t-`` id / ``type: task``)."""
     folder = vault / "tasks" / sub
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}.md"
@@ -134,7 +134,7 @@ def _done_path(vault: Path, task_id: str = "t-seed") -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# list_tasks (core) — brain-id/type gate + scans both folders                  #
+# list_tasks (core) — shards-id/type gate + scans both folders                  #
 # --------------------------------------------------------------------------- #
 
 
@@ -405,7 +405,7 @@ def test_cancel_already_cancelled_does_not_write(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An already-cancelled cancel must not touch atomic_write (pure no-op)."""
-    import brain.core.tasks as tasks_core
+    import shards.core.tasks as tasks_core
 
     _seed_task(vault, status="cancelled", body="Task body.\n\n## Cancelled\n\nx")
     calls: list[Path] = []
@@ -438,7 +438,7 @@ def test_cancel_id_reresolves_from_done(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain task list                                                        #
+# CLI — shards task list                                                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -459,7 +459,7 @@ def test_cli_list_default_limit_caps(cfg: Config, vault: Path) -> None:
 
 
 def test_cli_list_mine_status_json_is_array(cfg: Config, vault: Path) -> None:
-    """Acceptance: brain task list --mine --status claimed --json → JSON array of tasks."""
+    """Acceptance: shards task list --mine --status claimed --json → JSON array of tasks."""
     _seed_task(vault, task_id="t-owned", owner="test-agent", status="open", updated=_now())
     _seed_task(
         vault,
@@ -511,7 +511,7 @@ def test_list_command_registered() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain task get                                                         #
+# CLI — shards task get                                                         #
 # --------------------------------------------------------------------------- #
 
 
@@ -585,7 +585,7 @@ def test_get_command_registered() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain task cancel                                                       #
+# CLI — shards task cancel                                                       #
 # --------------------------------------------------------------------------- #
 
 

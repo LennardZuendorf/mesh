@@ -24,19 +24,19 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import brain.cli.__main__ as main
-import brain.cli.task as task_cli
-import brain.core.tasks as tasks_core
-import brain.storage.locks as locks_mod
-from brain.cli.__main__ import app
-from brain.core.tasks import (
+import shards.cli.__main__ as main
+import shards.cli.task as task_cli
+import shards.core.tasks as tasks_core
+import shards.storage.locks as locks_mod
+from shards.cli.__main__ import app
+from shards.core.tasks import (
     TaskNotFoundError,
     create_task,
     update_task,
 )
-from brain.schemas.config import Config, load_config
-from brain.schemas.task import Task
-from brain.storage.files import task_folder
+from shards.schemas.config import Config, load_config
+from shards.schemas.task import Task
+from shards.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 # t- prefix + one-or-more Crockford base-32 digits (no I, L, O, U), 4+ long.
@@ -44,7 +44,7 @@ _CROCKFORD = set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -73,7 +73,7 @@ def _seed_task(
     blocked_by: list[str] | None = None,
     extra: dict[str, object] | None = None,
 ) -> Path:
-    """Write a brain task straight to disk in the folder matching its status."""
+    """Write a shards task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -128,7 +128,7 @@ def test_create_task_created_equals_updated(cfg: Config, vault: Path) -> None:
 
 
 def test_create_task_default_owner_from_config(cfg: Config, vault: Path) -> None:
-    # brain_config sets [core].agent = "test-agent".
+    # shards_config sets [core].agent = "test-agent".
     task = create_task(cfg, "Owned")
     assert task.owner == "test-agent"
 
@@ -368,7 +368,7 @@ def test_update_task_resolves_inside_lock(
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain task new                                                          #
+# CLI — shards task new                                                          #
 # --------------------------------------------------------------------------- #
 
 
@@ -427,7 +427,7 @@ def test_cli_task_new_blocks_blocked_by_stored(cfg: Config, vault: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain task update                                                       #
+# CLI — shards task update                                                       #
 # --------------------------------------------------------------------------- #
 
 

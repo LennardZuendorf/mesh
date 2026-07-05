@@ -2,14 +2,14 @@
 
 This unit wires the ``indexed`` client's re-index calls to the vault's lifecycle:
 
-* :func:`~brain.index.indexed_client.incremental_update` shells ``indexed index
+* :func:`~shards.index.indexed_client.incremental_update` shells ``indexed index
   update <path> --collection <c>`` for a single changed file, and — crucially —
   **swallows every failure** so a missing binary or a non-zero exit can never
   crash the watchdog observer thread that calls it.
-* :func:`~brain.index.indexed_client.full_rebuild` shells ``indexed index create
-  <vault> --collection <c>``; :func:`~brain.index.indexed_client.reindex` is its
-  alias and the delegate ``brain reindex`` calls.
-* :class:`~brain.daemon.server.DaemonServer`, when started with a vault config,
+* :func:`~shards.index.indexed_client.full_rebuild` shells ``indexed index create
+  <vault> --collection <c>``; :func:`~shards.index.indexed_client.reindex` is its
+  alias and the delegate ``shards reindex`` calls.
+* :class:`~shards.daemon.server.DaemonServer`, when started with a vault config,
   registers ``incremental_update`` on the module-level watcher change-hook so
   *every* create/modify/move/delete re-indexes just that file. Registration is
   explicit and config-bound — never a module-import side-effect.
@@ -32,11 +32,11 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from brain.cli.__main__ import app
-from brain.daemon import server as server_mod
-from brain.index import indexed_client
-from brain.index.watch import clear_change_hooks, on_vault_change
-from brain.schemas.config import Config, load_config
+from shards.cli.__main__ import app
+from shards.daemon import server as server_mod
+from shards.index import indexed_client
+from shards.index.watch import clear_change_hooks, on_vault_change
+from shards.schemas.config import Config, load_config
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                     #
@@ -44,7 +44,7 @@ from brain.schemas.config import Config, load_config
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -223,7 +223,7 @@ def test_daemon_start_registers_incremental_update_hook(
 ) -> None:
     """A config-ful ``DaemonServer.start`` wires ``incremental_update`` to the hook.
 
-    The lambda resolves ``incremental_update`` in the ``brain.daemon.server``
+    The lambda resolves ``incremental_update`` in the ``shards.daemon.server``
     namespace, so patch it there (``raising=False`` keeps the RED clean before the
     wiring exists). Firing ``on_vault_change`` then reaches the recorder with the
     startup config, proving every watcher event re-indexes that path.
@@ -270,14 +270,14 @@ def test_daemon_without_config_registers_no_hook(
 
 
 # --------------------------------------------------------------------------- #
-# brain reindex — delegates to indexed_client.reindex == full_rebuild          #
+# shards reindex — delegates to indexed_client.reindex == full_rebuild          #
 # --------------------------------------------------------------------------- #
 
 
-def test_brain_reindex_cli_calls_full_rebuild(
-    brain_config: Path, monkeypatch: pytest.MonkeyPatch
+def test_shards_reindex_cli_calls_full_rebuild(
+    shards_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``brain reindex`` reaches ``indexed_client.reindex`` → ``full_rebuild``."""
+    """``shards reindex`` reaches ``indexed_client.reindex`` → ``full_rebuild``."""
     calls: list[Config] = []
     monkeypatch.setattr(indexed_client, "full_rebuild", lambda config: calls.append(config))
     result = CliRunner().invoke(app, ["reindex"])

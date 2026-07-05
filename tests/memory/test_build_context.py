@@ -1,10 +1,10 @@
-"""memory/3 — build-context lens: ``core/context.py`` + ``brain build-context``.
+"""memory/3 — build-context lens: ``core/context.py`` + ``shards build-context``.
 
 ``build_context`` is a read-only, daemon-independent BFS over the ``related``
 id graph, starting at a seed id and stopping at ``--depth`` hops (``depth=1`` =
 seed + its direct ``related`` entries). It resolves both ``n-`` (notes/) and
-``t-`` (tasks/) ids via :func:`brain.core.notes.get_note` /
-:func:`brain.core.tasks.get_task`, and returns a JSON-serialisable list of the
+``t-`` (tasks/) ids via :func:`shards.core.notes.get_note` /
+:func:`shards.core.tasks.get_task`, and returns a JSON-serialisable list of the
 standard note/task frontmatter shape plus ``path``, in BFS traversal order with
 the seed first and every id visited at most once.
 
@@ -19,7 +19,7 @@ Acceptance coverage:
 * **mixed ids** — a note whose ``related`` spans an ``n-`` note and a ``t-`` task
   resolves both.
 * **entry shape** — every entry carries the frontmatter keys plus ``path``.
-* **CLI** — ``brain build-context`` is a leaf command; ``--json`` emits the array;
+* **CLI** — ``shards build-context`` is a leaf command; ``--json`` emits the array;
   ``--depth`` controls the horizon; an unknown seed exits 3.
 
 Order assertions are on *lists*, not sets, so a broken traversal that happens to
@@ -37,10 +37,10 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from brain.cli.__main__ import app
-from brain.core.context import SeedNotFoundError, build_context
-from brain.schemas.config import Config, load_config
-from brain.storage.files import note_folder, task_folder
+from shards.cli.__main__ import app
+from shards.core.context import SeedNotFoundError, build_context
+from shards.schemas.config import Config, load_config
+from shards.storage.files import note_folder, task_folder
 
 # --------------------------------------------------------------------------- #
 # Fixtures & seeding helpers                                                   #
@@ -48,7 +48,7 @@ from brain.storage.files import note_folder, task_folder
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -62,7 +62,7 @@ def _seed_note(
     owner: str = "test-agent",
     body: str = "Body line.",
 ) -> Path:
-    """Write a brain note with an explicit ``related`` frontmatter list."""
+    """Write a shards note with an explicit ``related`` frontmatter list."""
     when = datetime.now(UTC)
     meta: dict[str, Any] = {
         "id": note_id,
@@ -91,7 +91,7 @@ def _seed_task(
     owner: str = "test-agent",
     body: str = "Task body.",
 ) -> Path:
-    """Write a brain task with an explicit ``related`` frontmatter list."""
+    """Write a shards task with an explicit ``related`` frontmatter list."""
     when = datetime.now(UTC)
     meta: dict[str, Any] = {
         "id": task_id,
@@ -269,7 +269,7 @@ def test_missing_related_id_is_skipped_not_raised(cfg: Config, vault: Path) -> N
 
 
 # --------------------------------------------------------------------------- #
-# CLI: brain build-context                                                     #
+# CLI: shards build-context                                                     #
 # --------------------------------------------------------------------------- #
 
 

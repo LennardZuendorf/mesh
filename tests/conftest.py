@@ -1,7 +1,7 @@
-"""Shared pytest fixtures for the brain test suite.
+"""Shared pytest fixtures for the shards test suite.
 
 The keystone fixtures land with notes/1: a sandboxed temp vault plus a config
-pointed at it via ``BRAIN_CONFIG_PATH``. Every later feature inherits these, so
+pointed at it via ``SHARDS_CONFIG_PATH``. Every later feature inherits these, so
 they stay deliberately dependency-free (pure filesystem + env) and rely on
 pytest's ``tmp_path`` / ``monkeypatch`` for automatic per-test cleanup.
 """
@@ -46,15 +46,15 @@ def config_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def brain_config(
+def shards_config(
     vault: Path,
     config_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path:
-    """Write a minimal config pointing at ``vault`` and export BRAIN_CONFIG_PATH.
+    """Write a minimal config pointing at ``vault`` and export SHARDS_CONFIG_PATH.
 
     ``monkeypatch.setenv`` is undone automatically after the test, isolating the
-    suite from any real ``~/.brain/config.toml``.
+    suite from any real ``~/.shards/config.toml``.
     """
     config_path.write_text(
         "\n".join(
@@ -75,7 +75,7 @@ def brain_config(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("BRAIN_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
     # Ensure a stray real agent identity never leaks into config tests.
-    monkeypatch.delenv("BRAIN_AGENT", raising=False)
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
     return config_path

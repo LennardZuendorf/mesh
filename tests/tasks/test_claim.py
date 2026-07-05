@@ -30,23 +30,23 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import brain.cli.task as task_cli
-import brain.core.tasks as tasks_core
-import brain.storage.locks as locks_mod
-from brain.cli.__main__ import app
-from brain.core.tasks import (
+import shards.cli.task as task_cli
+import shards.core.tasks as tasks_core
+import shards.storage.locks as locks_mod
+from shards.cli.__main__ import app
+from shards.core.tasks import (
     ClaimConflictError,
     TaskNotFoundError,
     claim_task,
 )
-from brain.schemas.config import Config, load_config
-from brain.storage.files import task_folder
+from shards.schemas.config import Config, load_config
+from shards.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -70,7 +70,7 @@ def _seed_task(
     created: datetime = _OLD,
     updated: datetime = _OLD,
 ) -> Path:
-    """Write a brain task straight to disk in the folder matching its status."""
+    """Write a shards task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -374,7 +374,7 @@ def test_claim_concurrent_single_winner(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain task claim                                                        #
+# CLI — shards task claim                                                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -450,8 +450,8 @@ def test_cli_claim_agentless_config_exits_2(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("BRAIN_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("BRAIN_AGENT", raising=False)
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
     result = _invoke(["task", "claim", "t-noagent"])
     assert result.exit_code == 2, result.output
 

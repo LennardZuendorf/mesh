@@ -1,7 +1,7 @@
 """tasks/6 — ``task delete``: guarded hard delete (R5).
 
-Exercises R5 (Delete): :func:`brain.core.tasks.delete_task` plus the
-``brain task delete`` CLI surface. Delete is a *hard* delete — the file is
+Exercises R5 (Delete): :func:`shards.core.tasks.delete_task` plus the
+``shards task delete`` CLI surface. Delete is a *hard* delete — the file is
 removed from disk permanently (no archive, no trash) — and it resolves a task in
 **any** lifecycle state, scanning both ``tasks/open/`` and ``tasks/done/``
 (id-only, no title slug). The removal runs *inside* the per-entity ``O_EXCL``
@@ -15,7 +15,7 @@ piped stdin) without ``--force`` refuses (exit 2) rather than silently destroyin
 data; ``--force`` skips the prompt entirely.
 
 ``sys.stdin.isatty()`` is always False under Typer's ``CliRunner``, so the
-interactive-prompt paths monkeypatch :func:`brain.cli.task._is_tty` to simulate a
+interactive-prompt paths monkeypatch :func:`shards.cli.task._is_tty` to simulate a
 terminal while still feeding the answer through the runner's stdin.
 """
 
@@ -32,24 +32,24 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import brain.cli.task as task_cli
-import brain.storage.locks as locks_mod
-from brain.cli.__main__ import app
-from brain.core.tasks import (
+import shards.cli.task as task_cli
+import shards.storage.locks as locks_mod
+from shards.cli.__main__ import app
+from shards.core.tasks import (
     TaskNotFoundError,
     delete_task,
     get_task,
 )
-from brain.schemas.config import Config, load_config
-from brain.storage.files import task_folder
-from brain.storage.locks import acquire
+from shards.schemas.config import Config, load_config
+from shards.storage.files import task_folder
+from shards.storage.locks import acquire
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 _STALE_AGE = 400.0  # seconds; > LOCK_TTL_SECONDS (300) so a lock ages out
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -67,7 +67,7 @@ def _seed_task(
     claimed_by: str | None = None,
     body: str = "Task body.",
 ) -> Path:
-    """Write a brain task straight to disk in the folder matching its status."""
+    """Write a shards task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",

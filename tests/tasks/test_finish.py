@@ -29,22 +29,22 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import brain.cli.task as task_cli
-from brain.cli.__main__ import app
-from brain.core.tasks import (
+import shards.cli.task as task_cli
+from shards.cli.__main__ import app
+from shards.core.tasks import (
     TaskNotFoundError,
     _resolve_task_path,
     finish_task,
 )
-from brain.schemas.config import Config, load_config
-from brain.storage.files import task_folder
+from shards.schemas.config import Config, load_config
+from shards.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 _ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -68,7 +68,7 @@ def _seed_task(
     created: datetime = _OLD,
     updated: datetime = _OLD,
 ) -> Path:
-    """Write a brain task straight to disk in the folder matching its status."""
+    """Write a shards task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -186,7 +186,7 @@ def test_finish_already_done_does_not_write(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An already-done finish must not touch atomic_write (pure no-op)."""
-    import brain.core.tasks as tasks_core
+    import shards.core.tasks as tasks_core
 
     _seed_task(vault, status="done", body="Task body.\n\n## Outcome\n\nx")
     calls: list[Path] = []
@@ -280,7 +280,7 @@ def test_finish_concurrent_appends_outcome_once(cfg: Config, vault: Path) -> Non
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain task finish                                                       #
+# CLI — shards task finish                                                       #
 # --------------------------------------------------------------------------- #
 
 

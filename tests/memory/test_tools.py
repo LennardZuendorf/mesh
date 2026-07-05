@@ -1,15 +1,15 @@
-"""memory/1 — MCP surface: ``mcp/server.py`` FastMCP ``brain_*`` tools.
+"""memory/1 — MCP surface: ``mcp/server.py`` FastMCP ``shards_*`` tools.
 
 Acceptance coverage:
 
 * **Registration** — every tool in the ``memory/tech.md`` table is registered under
-  its exact ``brain_*`` name, and *only* those (a set-equality check catches both a
+  its exact ``shards_*`` name, and *only* those (a set-equality check catches both a
   missing tool and a stray extra one in a single assertion).
 * **Withholding** — the unsafe / admin surface (``note_delete``, ``task_delete``,
   ``daemon`` controls, ``reindex``, ``status``, and the Phase-3 ``task_release``) is
   absent.
 * **Typed params, not flag strings** — a tool's input schema exposes real typed
-  fields (``brain_note_get`` takes ``id: str``), never ``--id`` CLI option strings.
+  fields (``shards_note_get`` takes ``id: str``), never ``--id`` CLI option strings.
 * **Annotation mapping** — at least one tool per class: read-only
   (``readOnlyHint``), idempotent (``idempotentHint``), write (no special hint), and
   destructive (``destructiveHint``).
@@ -28,43 +28,43 @@ from typing import Any
 
 import pytest
 
-import brain.mcp.server as server
-from brain.core.notes import NoteView
-from brain.schemas.config import Config, load_config
-from brain.schemas.note import Note
+import shards.mcp.server as server
+from shards.core.notes import NoteView
+from shards.schemas.config import Config, load_config
+from shards.schemas.note import Note
 
 # The tech.md tool table, braces expanded — the complete public MCP surface.
 _EXPECTED_TOOLS: frozenset[str] = frozenset(
     {
-        "brain_note_new",
-        "brain_note_append",
-        "brain_note_get",
-        "brain_note_list",
-        "brain_note_update",
-        "brain_task_new",
-        "brain_task_get",
-        "brain_task_list",
-        "brain_task_claim",
-        "brain_task_finish",
-        "brain_task_update",
-        "brain_task_cancel",
-        "brain_search",
-        "brain_recent_activity",
-        "brain_build_context",
+        "shards_note_new",
+        "shards_note_append",
+        "shards_note_get",
+        "shards_note_list",
+        "shards_note_update",
+        "shards_task_new",
+        "shards_task_get",
+        "shards_task_list",
+        "shards_task_claim",
+        "shards_task_finish",
+        "shards_task_update",
+        "shards_task_cancel",
+        "shards_search",
+        "shards_recent_activity",
+        "shards_build_context",
     }
 )
 
 # Explicitly withheld: delete + daemon/admin, and the Phase-3 release verb.
 _WITHHELD_TOOLS: frozenset[str] = frozenset(
     {
-        "brain_note_delete",
-        "brain_task_delete",
-        "brain_daemon_start",
-        "brain_daemon_stop",
-        "brain_daemon",
-        "brain_reindex",
-        "brain_status",
-        "brain_task_release",
+        "shards_note_delete",
+        "shards_task_delete",
+        "shards_daemon_start",
+        "shards_daemon_stop",
+        "shards_daemon",
+        "shards_reindex",
+        "shards_status",
+        "shards_task_release",
     }
 )
 
@@ -85,7 +85,7 @@ def _registered() -> dict[str, Any]:
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -113,8 +113,8 @@ def test_withheld_tools_are_absent() -> None:
 
 
 def test_note_get_takes_typed_id_field_not_flag_string() -> None:
-    """``brain_note_get`` exposes ``id: str`` as a schema field, not ``--id``."""
-    tool = _registered()["brain_note_get"]
+    """``shards_note_get`` exposes ``id: str`` as a schema field, not ``--id``."""
+    tool = _registered()["shards_note_get"]
     props = tool.parameters["properties"]
     assert "id" in props
     assert props["id"]["type"] == "string"
@@ -131,8 +131,8 @@ def test_note_get_takes_typed_id_field_not_flag_string() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["brain_note_get", "brain_note_list", "brain_task_get", "brain_task_list",
-     "brain_search", "brain_recent_activity", "brain_build_context"],
+    ["shards_note_get", "shards_note_list", "shards_task_get", "shards_task_list",
+     "shards_search", "shards_recent_activity", "shards_build_context"],
 )
 def test_read_tools_are_read_only(name: str) -> None:
     tool = _registered()[name]
@@ -142,7 +142,7 @@ def test_read_tools_are_read_only(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["brain_note_update", "brain_task_claim", "brain_task_finish", "brain_task_update"],
+    ["shards_note_update", "shards_task_claim", "shards_task_finish", "shards_task_update"],
 )
 def test_mutating_tools_are_idempotent(name: str) -> None:
     tool = _registered()[name]
@@ -150,7 +150,7 @@ def test_mutating_tools_are_idempotent(name: str) -> None:
     assert tool.annotations.idempotentHint is True
 
 
-@pytest.mark.parametrize("name", ["brain_note_new", "brain_note_append", "brain_task_new"])
+@pytest.mark.parametrize("name", ["shards_note_new", "shards_note_append", "shards_task_new"])
 def test_write_tools_carry_no_special_hint(name: str) -> None:
     """Plain writes get *no* hint (not read-only, not idempotent, not destructive)."""
     tool = _registered()[name]
@@ -158,7 +158,7 @@ def test_write_tools_carry_no_special_hint(name: str) -> None:
 
 
 def test_cancel_tool_is_destructive() -> None:
-    tool = _registered()["brain_task_cancel"]
+    tool = _registered()["shards_task_cancel"]
     assert tool.annotations is not None
     assert tool.annotations.destructiveHint is True
 
@@ -194,7 +194,7 @@ def test_note_get_returns_dict_shape_over_mocked_core(
     # Patch the name the tool binds (imported into the server module).
     monkeypatch.setattr(server, "get_note", _fake_get_note)
 
-    result = server.brain_note_get(id="n-abcd")
+    result = server.shards_note_get(id="n-abcd")
 
     assert result["id"] == "n-abcd"
     assert result["type"] == "note"
@@ -205,7 +205,7 @@ def test_note_get_returns_dict_shape_over_mocked_core(
 
     # And through FastMCP's real dispatch (typed-field coercion + result wrapping),
     # not just the raw function — the same shape must land in structured content.
-    dispatched = asyncio.run(server.app.call_tool("brain_note_get", {"id": "n-abcd"}))
+    dispatched = asyncio.run(server.app.call_tool("shards_note_get", {"id": "n-abcd"}))
     assert dispatched.structured_content == result
 
 
@@ -224,7 +224,7 @@ def test_recent_activity_tool_calls_core_recent_activity(
 
     monkeypatch.setattr(server, "recent_activity", _spy)
 
-    out = server.brain_recent_activity(since="7d", owner=None, mine=True, limit=5)
+    out = server.shards_recent_activity(since="7d", owner=None, mine=True, limit=5)
 
     assert out == sentinel
     assert seen == {"since": "7d", "owner": None, "mine": True, "limit": 5}
@@ -243,7 +243,7 @@ def test_build_context_tool_calls_core_build_context(
 
     monkeypatch.setattr(server, "build_context", _spy)
 
-    out = server.brain_build_context(seed_id="n-seed", depth=2)
+    out = server.shards_build_context(seed_id="n-seed", depth=2)
 
     assert out == sentinel
     assert seen == {"seed_id": "n-seed", "depth": 2}

@@ -1,4 +1,4 @@
-"""memory/4 — ``brain session-start`` warm-start lens + SessionStart hook config.
+"""memory/4 — ``shards session-start`` warm-start lens + SessionStart hook config.
 
 ``session-start`` composes two read-only lenses into a single warm-start payload
 for an agent session: the recent-activity window (``recent_activity(7d, mine)``)
@@ -27,7 +27,7 @@ Acceptance coverage:
 * **--json** — emits a machine-readable JSON array; command name is hyphenated
   (``session-start``) and registered as a leaf command.
 * **hook config** — ``hooks/session_start.json`` matches the product.md UX spec:
-  a single SessionStart ``command`` hook running ``brain session-start
+  a single SessionStart ``command`` hook running ``shards session-start
   --meta-only --json``.
 """
 
@@ -41,10 +41,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from brain.cli.__main__ import app
-from brain.core.tasks import TaskView
-from brain.schemas.config import Config, load_config
-from brain.schemas.task import Task
+from shards.cli.__main__ import app
+from shards.core.tasks import TaskView
+from shards.schemas.config import Config, load_config
+from shards.schemas.task import Task
 
 # The hook config file, located relative to this test (repo-root/hooks/…), never
 # the process cwd — the suite may run from anywhere.
@@ -53,7 +53,7 @@ _HOOK_PATH = Path(__file__).resolve().parents[2] / "hooks" / "session_start.json
 _EXPECTED_HOOK: dict[str, Any] = {
     "hooks": {
         "SessionStart": [
-            {"hooks": [{"type": "command", "command": "brain session-start --meta-only --json"}]}
+            {"hooks": [{"type": "command", "command": "shards session-start --meta-only --json"}]}
         ]
     }
 }
@@ -65,7 +65,7 @@ _EXPECTED_HOOK: dict[str, Any] = {
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -139,8 +139,8 @@ def _patch_sources(
             calls["list_tasks"] = kwargs
         return list(tasks)
 
-    monkeypatch.setattr("brain.cli.session.recent_activity", _fake_recent)
-    monkeypatch.setattr("brain.cli.session.list_tasks", _fake_list_tasks)
+    monkeypatch.setattr("shards.cli.session.recent_activity", _fake_recent)
+    monkeypatch.setattr("shards.cli.session.list_tasks", _fake_list_tasks)
 
 
 def _invoke(args: list[str]) -> Any:
@@ -348,7 +348,7 @@ def test_hook_matches_product_spec() -> None:
 
     assert json.loads(text) == _EXPECTED_HOOK
     # The load-bearing command string, asserted on the raw text too.
-    assert "brain session-start --meta-only --json" in text
+    assert "shards session-start --meta-only --json" in text
 
 
 def test_hook_runs_once_at_session_start() -> None:

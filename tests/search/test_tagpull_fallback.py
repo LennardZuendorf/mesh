@@ -1,15 +1,15 @@
 """search/1 — tag-pull + substring fallback (R2, R3, R4).
 
-Exercises the daemon-independent recall path: :func:`brain.index.tagpull.tagpull`
+Exercises the daemon-independent recall path: :func:`shards.index.tagpull.tagpull`
 (frontmatter-only tag pull, AND semantics, zero body cost) and
-:func:`brain.index.fallback.search_fallback` (substring scoring matrix + a single
-stderr degradation notice), plus the ``brain search`` CLI surface that routes
+:func:`shards.index.fallback.search_fallback` (substring scoring matrix + a single
+stderr degradation notice), plus the ``shards search`` CLI surface that routes
 between them (``--tags`` without a query → tag pull; a query → fallback because no
 ``indexed`` engine is available in this unit).
 
 Corpus for both is **every** ``*.md`` under ``notes/`` and ``tasks/`` (full
 recursive walk, broader than ``note list`` / ``task list``): typed note subfolders,
-both task folders, and coexisting non-brain (foreign) files, which surface with
+both task folders, and coexisting non-shards (foreign) files, which surface with
 ``id: None``.
 
 Scoring matrix (highest matching tier wins): title exact ``1.0`` · title
@@ -29,11 +29,11 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from brain.cli.__main__ import app
-from brain.index.fallback import search_fallback
-from brain.index.tagpull import tagpull
-from brain.schemas.config import Config, load_config
-from brain.schemas.search import SearchResult
+from shards.cli.__main__ import app
+from shards.index.fallback import search_fallback
+from shards.index.tagpull import tagpull
+from shards.schemas.config import Config, load_config
+from shards.schemas.search import SearchResult
 
 _NOW = datetime(2026, 6, 20, 12, 0, 0, tzinfo=UTC)
 
@@ -44,7 +44,7 @@ _NOW = datetime(2026, 6, 20, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -66,7 +66,7 @@ def _seed(
     updated: datetime = _NOW,
     created: datetime = _NOW,
 ) -> Path:
-    """Write a brain file (valid ``n-``/``t-`` id) at ``notes|tasks/<rel>/<id>.md``."""
+    """Write a shards file (valid ``n-``/``t-`` id) at ``notes|tasks/<rel>/<id>.md``."""
     meta: dict[str, object] = {
         "id": entry_id,
         "type": entry_type,
@@ -96,7 +96,7 @@ def _seed_foreign(
     body: str = "Foreign body.",
     extra: dict[str, object] | None = None,
 ) -> Path:
-    """Write a non-brain Markdown file (no ``n-``/``t-`` id)."""
+    """Write a non-shards Markdown file (no ``n-``/``t-`` id)."""
     meta: dict[str, object] = {}
     if title is not None:
         meta["title"] = title
@@ -354,17 +354,17 @@ def test_fallback_quiet_suppresses_notice(
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain search                                                          #
+# CLI — shards search                                                          #
 # --------------------------------------------------------------------------- #
 
 
-def test_cli_help_reachable(brain_config: Path) -> None:
+def test_cli_help_reachable(shards_config: Path) -> None:
     result = _invoke(["search", "--help"])
     assert result.exit_code == 0, result.output
     assert "search" in result.output.lower()
 
 
-def test_cli_tags_routes_to_tagpull(brain_config: Path, vault: Path) -> None:
+def test_cli_tags_routes_to_tagpull(shards_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", tags=["ndc"], title="NDC Note")
     _seed(vault, "notes", entry_id="n-miss", tags=["other"], title="Other")
     result = _invoke(["search", "--tags", "ndc"])
@@ -376,7 +376,7 @@ def test_cli_tags_routes_to_tagpull(brain_config: Path, vault: Path) -> None:
     assert all("snippet" not in h and "body" not in h for h in arr)
 
 
-def test_cli_query_degraded_json_and_notice(brain_config: Path, vault: Path) -> None:
+def test_cli_query_degraded_json_and_notice(shards_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record", body="full detail")
     result = _invoke(["search", "Alpha Decision Record"])
     assert result.exit_code == 0, result.output
@@ -386,14 +386,14 @@ def test_cli_query_degraded_json_and_notice(brain_config: Path, vault: Path) -> 
     assert _NOTICE in result.stderr
 
 
-def test_cli_quiet_suppresses_notice(brain_config: Path, vault: Path) -> None:
+def test_cli_quiet_suppresses_notice(shards_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
     result = _invoke(["--quiet", "search", "Alpha Decision Record"])
     assert result.exit_code == 0, result.output
     assert _NOTICE not in result.stderr
 
 
-def test_cli_json_hit_shape(brain_config: Path, vault: Path) -> None:
+def test_cli_json_hit_shape(shards_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Shape Report", tags=["t"], owner="me")
     result = _invoke(["search", "Shape Report"])
     assert result.exit_code == 0, result.output
@@ -403,7 +403,7 @@ def test_cli_json_hit_shape(brain_config: Path, vault: Path) -> None:
     assert hit["path"].endswith("n-hit.md")
 
 
-def test_cli_meta_only_omits_snippet(brain_config: Path, vault: Path) -> None:
+def test_cli_meta_only_omits_snippet(shards_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Meta Report", body="BODYMARK")
     result = _invoke(["search", "Meta Report", "--meta-only"])
     assert result.exit_code == 0, result.output
@@ -412,7 +412,7 @@ def test_cli_meta_only_omits_snippet(brain_config: Path, vault: Path) -> None:
     assert "body" not in hit
 
 
-def test_cli_full_includes_body(brain_config: Path, vault: Path) -> None:
+def test_cli_full_includes_body(shards_config: Path, vault: Path) -> None:
     # --full carries the complete Markdown body in the declared ``snippet`` field
     # (the hit shape has no separate ``body`` key).
     _seed(vault, "notes", entry_id="n-hit", title="Full Report", body="UNIQUE-BODY-MARK")
@@ -423,7 +423,7 @@ def test_cli_full_includes_body(brain_config: Path, vault: Path) -> None:
     assert "body" not in hit
 
 
-def test_cli_threshold_excludes(brain_config: Path, vault: Path) -> None:
+def test_cli_threshold_excludes(shards_config: Path, vault: Path) -> None:
     # Body-only hit (0.4) is below the default 0.65 threshold → excluded.
     _seed(vault, "notes", entry_id="n-body", title="Nothing", body="the needle here")
     excluded = _invoke(["search", "needle"])
@@ -433,7 +433,7 @@ def test_cli_threshold_excludes(brain_config: Path, vault: Path) -> None:
     assert {h["id"] for h in json.loads(included.stdout)} == {"n-body"}
 
 
-def test_cli_limit_caps_results(brain_config: Path, vault: Path) -> None:
+def test_cli_limit_caps_results(shards_config: Path, vault: Path) -> None:
     for i in range(4):
         _seed(vault, "notes", entry_id=f"n-{i}", title="Report", updated=_NOW - timedelta(days=i))
     result = _invoke(["search", "Report", "--limit", "2"])

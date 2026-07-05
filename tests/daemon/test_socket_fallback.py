@@ -2,17 +2,17 @@
 
 Two halves, matching the unit's acceptance criteria:
 
-* **Server** — an ``asyncio`` unix socket at ``$XDG_RUNTIME_DIR/brain.sock`` (mode
+* **Server** — an ``asyncio`` unix socket at ``$XDG_RUNTIME_DIR/shards.sock`` (mode
   ``0600``) speaking NDJSON. ``ping`` returns ``{"pong": true}``; unknown methods
   yield a ``404`` error; the five not-yet-built methods yield a ``503`` stub. Error
   envelopes carry **no** ``id`` field (only success echoes the request id). These
   are exercised end-to-end over a real blocking socket against a daemon run in a
   background event-loop thread.
-* **Client** — :class:`~brain.daemon.client.DaemonClient` connects, and on a
+* **Client** — :class:`~shards.daemon.client.DaemonClient` connects, and on a
   connection failure (``ConnectionRefusedError`` / ``FileNotFoundError``) invokes
   the caller's fallback instead of raising. ``note.get`` / ``task.get`` fall back
   to a single-file ``python-frontmatter`` read; ``note.list`` / ``task.list`` fall
-  back to a recursive scan returning only brain-id-bearing files. Writes never go
+  back to a recursive scan returning only shards-id-bearing files. Writes never go
   through the client at all — there is no write method on it.
 
 Sockets live under a short ``/tmp`` dir because ``AF_UNIX`` paths are capped near
@@ -37,10 +37,10 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from brain.daemon.client import DaemonClient, DaemonError, default_socket_path
-from brain.daemon.server import DaemonServer
-from brain.schemas.config import Config, load_config
-from brain.storage.files import note_folder, task_folder
+from shards.daemon.client import DaemonClient, DaemonError, default_socket_path
+from shards.daemon.server import DaemonServer
+from shards.schemas.config import Config, load_config
+from shards.storage.files import note_folder, task_folder
 
 _STUB_METHODS = (
     "search.query",
@@ -57,7 +57,7 @@ _STUB_METHODS = (
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -207,12 +207,12 @@ def test_default_socket_path_uses_xdg_runtime_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert default_socket_path() == tmp_path / "brain.sock"
+    assert default_socket_path() == tmp_path / "shards.sock"
 
 
-def test_default_socket_path_falls_back_to_brain_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_socket_path_falls_back_to_shards_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    assert default_socket_path() == Path.home() / ".brain" / "run" / "brain.sock"
+    assert default_socket_path() == Path.home() / ".shards" / "run" / "shards.sock"
 
 
 # --------------------------------------------------------------------------- #
@@ -274,7 +274,7 @@ def test_call_prefers_socket_when_daemon_up(socket_path: Path) -> None:
 
 
 def test_call_falls_back_on_connection_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise ConnectionRefusedError
@@ -284,7 +284,7 @@ def test_call_falls_back_on_connection_refused(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_call_falls_back_on_file_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise FileNotFoundError
@@ -326,7 +326,7 @@ def test_note_list_falls_back_to_recursive_id_scan(
 ) -> None:
     _seed_note(vault, note_id="n-a", title="A")
     _seed_note(vault, note_id="n-b", title="B", note_type="decision")
-    # A foreign Tolaria file (no brain id) must be excluded from the scan.
+    # A foreign Tolaria file (no shards id) must be excluded from the scan.
     foreign = vault / "notes" / "tolaria.md"
     foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
     client = DaemonClient(socket_path=missing_socket)
@@ -385,7 +385,7 @@ def test_client_exposes_no_write_methods() -> None:
 
 def test_call_falls_back_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hung daemon raises TimeoutError (an OSError) — must fall back, not escape."""
-    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise TimeoutError
@@ -396,7 +396,7 @@ def test_call_falls_back_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_call_falls_back_on_broken_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
     """A mid-response crash (BrokenPipeError, an OSError) must fall back."""
-    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise BrokenPipeError
@@ -407,7 +407,7 @@ def test_call_falls_back_on_broken_pipe(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_call_falls_back_on_truncated_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     """A truncated/garbled reply raises json.JSONDecodeError — must fall back."""
-    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise json.JSONDecodeError("Expecting value", "", 0)
@@ -474,7 +474,7 @@ def test_task_get_falls_back_to_file_when_daemon_returns_503(
 
 def test_call_falls_back_on_503_daemon_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 503 DaemonError from a live daemon is fallback-eligible by default."""
-    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise DaemonError(503, "not yet available")
@@ -485,7 +485,7 @@ def test_call_falls_back_on_503_daemon_error(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_call_propagates_non_fallback_domain_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A domain error (e.g. 3 not-found) must propagate — never be swallowed."""
-    client = DaemonClient(socket_path=Path("/nonexistent/brain.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
     ran: list[bool] = []
 
     def boom(method: str, params: dict[str, object]) -> object:
@@ -519,7 +519,7 @@ def test_socket_umask_guard_yields_0600_without_chmod(
     def _no_chmod(*_a: object, **_k: object) -> None:
         return None
 
-    monkeypatch.setattr("brain.daemon.server.os.chmod", _no_chmod)
+    monkeypatch.setattr("shards.daemon.server.os.chmod", _no_chmod)
     old_umask = os.umask(0o000)  # most permissive → bind would yield 0777 without the guard
     server = DaemonServer(socket_path)
     loop = asyncio.new_event_loop()

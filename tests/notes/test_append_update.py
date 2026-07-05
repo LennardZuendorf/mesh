@@ -1,8 +1,8 @@
 """notes/3 — append / update: section append, tag mutation, locked concurrent edits.
 
-Exercises R2 (Amend): ``brain note append`` (with ``--section`` / ``--timestamp``)
-and ``brain note update`` (tag delta/replace, ``--type`` folder move). Every write
-goes through :func:`brain.storage.files.atomic_write`; the per-entity
+Exercises R2 (Amend): ``shards note append`` (with ``--section`` / ``--timestamp``)
+and ``shards note update`` (tag delta/replace, ``--type`` folder move). Every write
+goes through :func:`shards.storage.files.atomic_write`; the per-entity
 ``notes/.locks/<id>.lock`` (``O_EXCL``) is held for the whole read-modify-write
 cycle so concurrent appends serialize without lost updates.
 """
@@ -17,19 +17,19 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-import brain.core.notes as notes_core
-import brain.storage.locks as locks_mod
-from brain.cli.__main__ import app
-from brain.core.notes import (
+import shards.core.notes as notes_core
+import shards.storage.locks as locks_mod
+from shards.cli.__main__ import app
+from shards.core.notes import (
     AmbiguousSlugError,
     NoteNotFoundError,
     append_note,
     apply_tag_spec,
     update_note,
 )
-from brain.schemas.config import Config, load_config
-from brain.schemas.note import Note
-from brain.storage.files import note_folder
+from shards.schemas.config import Config, load_config
+from shards.schemas.note import Note
+from shards.storage.files import note_folder
 
 _ISO_UTC = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\b")
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
@@ -47,7 +47,7 @@ def _seed_note(
     updated: datetime = _OLD,
     extra: dict[str, object] | None = None,
 ) -> Path:
-    """Write a brain note straight to disk in the folder matching its type."""
+    """Write a shards note straight to disk in the folder matching its type."""
     meta: dict[str, object] = {
         "id": note_id,
         "type": note_type,
@@ -72,7 +72,7 @@ def _reload(path: Path) -> frontmatter.Post:
 
 
 @pytest.fixture
-def cfg(brain_config: Path) -> Config:
+def cfg(shards_config: Path) -> Config:
     return load_config()
 
 
@@ -219,16 +219,16 @@ def _append_worker(config_path: str, note_id: str, text: str, barrier: object) -
     """Child-process body: load config, wait on the barrier, append once."""
     import os
 
-    os.environ["BRAIN_CONFIG_PATH"] = config_path
-    from brain.core.notes import append_note as _append
-    from brain.schemas.config import load_config as _load
+    os.environ["SHARDS_CONFIG_PATH"] = config_path
+    from shards.core.notes import append_note as _append
+    from shards.schemas.config import load_config as _load
 
     child_cfg = _load()
     barrier.wait()  # type: ignore[attr-defined]
     _append(child_cfg, note_id, text)
 
 
-def test_concurrent_appends_all_land(brain_config: Path, vault: Path) -> None:
+def test_concurrent_appends_all_land(shards_config: Path, vault: Path) -> None:
     _seed_note(vault)
     n = 6
     ctx = mp.get_context("fork")
@@ -236,7 +236,7 @@ def test_concurrent_appends_all_land(brain_config: Path, vault: Path) -> None:
     procs = [
         ctx.Process(
             target=_append_worker,
-            args=(str(brain_config), "n-seed", f"MARKER-{i}", barrier),
+            args=(str(shards_config), "n-seed", f"MARKER-{i}", barrier),
         )
         for i in range(n)
     ]
@@ -341,12 +341,12 @@ def test_ambiguous_slug_raises(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Finding #4 — amend verbs refuse foreign (non-brain) files                     #
+# Finding #4 — amend verbs refuse foreign (non-shards) files                     #
 # --------------------------------------------------------------------------- #
 
 
 def _seed_foreign(vault: Path, name: str, title: str) -> Path:
-    """Write a coexisting Tolaria file with no brain ``n-`` id (non-``n-`` stem)."""
+    """Write a coexisting Tolaria file with no shards ``n-`` id (non-``n-`` stem)."""
     path = vault / "notes" / f"{name}.md"
     post = frontmatter.Post("Foreign body.", title=title, tags=["x"])
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
@@ -372,7 +372,7 @@ def test_update_refuses_foreign_file(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — brain note append / update                                             #
+# CLI — shards note append / update                                             #
 # --------------------------------------------------------------------------- #
 
 
@@ -382,20 +382,20 @@ def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
     return CliRunner().invoke(app, args)
 
 
-def test_cli_append_success(brain_config: Path, vault: Path) -> None:
+def test_cli_append_success(shards_config: Path, vault: Path) -> None:
     path = _seed_note(vault)
     result = _invoke(["note", "append", "n-seed", "cli text"])
     assert result.exit_code == 0, result.output
     assert "cli text" in _reload(path).content
 
 
-def test_cli_append_not_found_exits_3(brain_config: Path, vault: Path) -> None:
+def test_cli_append_not_found_exits_3(shards_config: Path, vault: Path) -> None:
     _seed_note(vault)
     result = _invoke(["note", "append", "n-missing", "x"])
     assert result.exit_code == 3
 
 
-def test_cli_append_section_and_timestamp(brain_config: Path, vault: Path) -> None:
+def test_cli_append_section_and_timestamp(shards_config: Path, vault: Path) -> None:
     path = _seed_note(vault)
     result = _invoke(
         ["note", "append", "n-seed", "logged", "--section", "Follow-ups", "--timestamp"]
@@ -407,14 +407,14 @@ def test_cli_append_section_and_timestamp(brain_config: Path, vault: Path) -> No
     assert "logged" in content
 
 
-def test_cli_update_tags(brain_config: Path, vault: Path) -> None:
+def test_cli_update_tags(shards_config: Path, vault: Path) -> None:
     path = _seed_note(vault, tags=["ndc", "stale"])
     result = _invoke(["note", "update", "n-seed", "--tags", "+x,-stale"])
     assert result.exit_code == 0, result.output
     assert _reload(path).metadata["tags"] == ["ndc", "x"]
 
 
-def test_cli_update_type_moves_file(brain_config: Path, vault: Path) -> None:
+def test_cli_update_type_moves_file(shards_config: Path, vault: Path) -> None:
     old_path = _seed_note(vault, note_type="note")
     result = _invoke(["note", "update", "n-seed", "--type", "decision"])
     assert result.exit_code == 0, result.output
@@ -422,14 +422,14 @@ def test_cli_update_type_moves_file(brain_config: Path, vault: Path) -> None:
     assert not old_path.exists()
 
 
-def test_cli_update_ambiguous_slug_exits_2(brain_config: Path, vault: Path) -> None:
+def test_cli_update_ambiguous_slug_exits_2(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-aaaa", title="Dup Title")
     _seed_note(vault, note_id="n-bbbb", title="Dup Title", note_type="log")
     result = _invoke(["note", "update", "dup-title", "--tags", "+x"])
     assert result.exit_code == 2
 
 
-def test_cli_append_quiet_emits_id_only(brain_config: Path, vault: Path) -> None:
+def test_cli_append_quiet_emits_id_only(shards_config: Path, vault: Path) -> None:
     _seed_note(vault)
     result = _invoke(["--quiet", "note", "append", "n-seed", "x"])
     assert result.exit_code == 0, result.output
