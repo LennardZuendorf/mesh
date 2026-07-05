@@ -40,6 +40,14 @@ def test_config_accepts_path_alias(config_path: Path, vault: Path) -> None:
     assert cfg.core.agent == "aliased"
 
 
+def test_config_expands_tilde_in_path(config_path: Path) -> None:
+    # `realpath` does not expand `~`; a literal `~/vault` would otherwise become
+    # a `./~/vault` dir under CWD. The field validator must expand it.
+    config_path.write_text('[core]\npath = "~/vault"\n', encoding="utf-8")
+    cfg = load_config(config_path)
+    assert cfg.core.tolaria_path == Path.home() / "vault"
+
+
 def test_missing_config_raises_systemexit_2(tmp_path: Path) -> None:
     missing = tmp_path / "does-not-exist.toml"
     with pytest.raises(SystemExit) as exc:

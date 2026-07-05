@@ -15,7 +15,7 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 _ENV_CONFIG_PATH = "BRAIN_CONFIG_PATH"
 _ENV_AGENT = "BRAIN_AGENT"
@@ -34,6 +34,13 @@ class CoreConfig(BaseModel):
         validation_alias=AliasChoices("tolaria_path", "path"),
     )
     agent: str | None = None
+
+    @field_validator("tolaria_path", mode="after")
+    @classmethod
+    def _expand_user(cls, value: Path) -> Path:
+        """Expand a leading ``~`` — ``realpath`` does not, so ``~/vault`` would
+        otherwise become a literal ``./~/vault`` under the process CWD."""
+        return value.expanduser()
 
 
 class SearchConfig(BaseModel):

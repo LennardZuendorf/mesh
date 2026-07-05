@@ -11,10 +11,10 @@ fields; it will extend this model.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 NoteType = Literal["note", "log", "decision", "reference"]
 
@@ -36,3 +36,10 @@ class Note(BaseModel):
     created: datetime
     updated: datetime
     related: list[str] = Field(default_factory=list)
+
+    @field_validator("created", "updated", mode="after")
+    @classmethod
+    def _as_aware_utc(cls, value: datetime) -> datetime:
+        """Read a naive timestamp (e.g. a bare ``date`` or a foreign note) as UTC,
+        so sorting and ``--since`` never mix naive and aware datetimes."""
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value

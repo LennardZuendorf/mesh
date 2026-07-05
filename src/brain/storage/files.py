@@ -14,6 +14,9 @@ import os
 import tempfile
 from pathlib import Path
 
+import frontmatter
+import yaml
+
 # type -> path relative to the vault root.
 _NOTE_SUBDIRS: dict[str, tuple[str, ...]] = {
     "note": ("notes",),
@@ -47,10 +50,43 @@ def atomic_write(path: Path, content: str) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
+        _fsync_dir(path.parent)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             tmp_path.unlink()
         raise
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort fsync of ``directory`` so a rename survives power loss.
+
+    The rename itself is atomic; this makes the *directory entry* durable. Guarded
+    because some filesystems reject an ``fsync`` on a directory fd — durability is
+    a best effort, never a correctness dependency."""
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+
+def read_post(path: Path) -> frontmatter.Post | None:
+    """Read and parse a Markdown file's frontmatter; ``None`` if unreadable.
+
+    A vanished/unreadable file (``OSError``) or a malformed YAML frontmatter
+    block (``yaml.YAMLError``) yields ``None`` — foreign and corrupt files must
+    skip silently, never crash a scan or a lookup. The single safe reader every
+    scanner and lookup routes through (``.metadata`` / ``.content`` off the
+    returned :class:`frontmatter.Post`)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        return frontmatter.loads(text)
+    except yaml.YAMLError:
+        return None
 
 
 def note_folder(note_type: str, tolaria_path: Path) -> Path:
