@@ -199,12 +199,12 @@ uv.lock                   # regenerated via `uv lock`
 
 ## Follow-ups (open — pick up on any device)
 
-The rename + reframe landed nominal (units 1–5 done). **Two reviews are owed and not yet
-run** — a device-independent next action. Run each in a **fresh thread** on this branch
-(`feat/phase-1-mvp`, rebrand commits `87fd993` + `d407eec`). Be adversarial; verify claims by
-running commands; do **not** push or edit without approval.
+The rename + reframe landed nominal (units 1–5 done). One **pre-merge gate is owed and not yet
+run**: an adversarial correctness audit of the rename. Run it in a **fresh thread** on this branch
+(`feat/phase-1-mvp`, rebrand commits `87fd993` + `d407eec`). Be adversarial; verify by running
+commands; do **not** push or edit without approval.
 
-**A. Adversarial correctness audit of the rename.** Falsify the "purely nominal" claim.
+**Adversarial correctness audit of the rename.** Falsify the "purely nominal" claim.
 Hunt: over-matches (a swap that changed a URL / external name / docstring meaning / fixture
 semantic), half-renames (symbol renamed, caller missed — esp. `_SHARDS_ID_PREFIX`, `shards_id`,
 `_is_shards_id`, `shards_files`), path/env/socket constants all migrated and consistent
@@ -213,19 +213,10 @@ contract break (`shards_*`, entry points `shards`/`shards-mcp`, `FastMCP("shards
 `~/.brain/` state. Verify empirically: `uv sync` → `uv run pytest -q` (exit code, not tail) →
 `uv run ruff check .` → `uv run mypy src/` → `uv run shards --help` → import `shards.mcp.server`;
 `git grep -in brain -- ':!.agents'` — confirm residual is exactly the GBrain link + `.agents`
-`brainstorming`.
+`brainstorming`. Output: prioritized findings, each `file:line` + concrete fix.
 
-**B. Critical product review of the repositioning.** Is "a mesh for multi-agent collaboration
-over CLI + MCP" substantive or a buzzword over the same three-verbs-over-a-folder mechanic? Does
-the story match the code; where does it overclaim? Name "shards": collisions, connotation,
-searchability vs "brain". Differentiation vs the cited alternatives (GBrain, Mem0, Basic Memory);
-is "coordination, not just memory" earned? Internal consistency across `.spec/product.md`,
-`tech.md`, `design.md`, `README.md`, `AGENTS.md`, CLI help. Honesty of the thesis: is the mesh
-framing writing a check the primitives don't cash — what to cut/tone down.
+> The **product-positioning review** is *not* rebrand-scoped — it critiques the whole repositioning
+> and can reopen root `product.md`. It lives in root [../../plan.md](../../plan.md) § Open reviews.
 
-Sources to read first: `.spec/product.md`, `.spec/tech.md`, and this feature folder.
-Output: two separated sections (Correctness, Product), prioritized, each finding `file:line` +
-concrete fix.
-
-**Also open (operator-owned):** `git push` of `feat/phase-1-mvp` (blocked earlier by 1Password
-SSH agent, not a repo fault); optional cosmetic local dir move `Development/brain → shards`.
+**Also open (operator-owned):** `git push` of `feat/phase-1-mvp` (was blocked by 1Password SSH
+agent — now unblocked, branch pushed); optional cosmetic local dir move `Development/brain → shards`.

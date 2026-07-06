@@ -2,7 +2,7 @@
 type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
-updated: 2026-07-05
+updated: 2026-07-06
 ---
 
 # Shards — Plan
@@ -40,3 +40,17 @@ updated: 2026-07-05
 **Freshness:** daemon watcher fires hook → search `indexed_client.incremental_update`. `shards reindex` → `full_rebuild()`.
 
 Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature unit plans were compounded here and removed — unit-level truth is now `tests/` + `src/shards/`.
+
+---
+
+## Open reviews
+
+- **Product-positioning review** (post-rebrand, cross-cutting — not rebrand-scoped). Critique the
+  "mesh for multi-agent collaboration over CLI + MCP" repositioning against the three-verbs-over-a-folder
+  mechanic: is it substantive or buzzword; does the story match the code / where does it overclaim;
+  name `shards` collisions vs `brain`; differentiation vs GBrain / Mem0 / Basic Memory; internal
+  consistency across `product.md`, `tech.md`, `design.md`, `README.md`, `AGENTS.md`, CLI help; what
+  to cut or tone down. Run in a fresh thread, adversarial; may reopen root `product.md`. Findings →
+  `file:line` + concrete fix. (Rebrand-correctness audit lives in
+  [features/shards-rebrand/plan.md](features/shards-rebrand/plan.md) § Follow-ups — that one is the
+  feature's own pre-merge gate.)
