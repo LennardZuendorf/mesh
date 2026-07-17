@@ -2,14 +2,17 @@
 type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
-updated: 2026-07-06
+children:
+  - features/shards-rebrand/plan.md
+  - features/cli-toolset-rework/plan.md
+updated: 2026-07-17
 ---
 
 # Shards — Plan
 
-**Status:** Phase 1–2 **delivered** — all five features implemented and tested (578 tests, mypy strict, ruff clean) on branch `feat/phase-1-mvp`. Built bottom-up behind binary whole-feature gates.
+**Status:** Phase 1–2 **delivered** — all five features implemented and tested (591 tests, mypy strict, ruff clean) on branch `feat/phase-1-mvp`. Built bottom-up behind binary whole-feature gates.
 
-**Focus:** Phase 3 (tasks-graph) — `ready` / `release`, strict `--strict` gate, unblock-cascade. **Deferred, not started.**
+**Focus:** [cli-toolset-rework](features/cli-toolset-rework/plan.md) — keep-and-rework decision (GBrain/Beads rejected), internal tidying, performance push, graph-query output, projects convention. Phase 3 (tasks-graph) — `ready` / `release`, `blocks`/`blocked_by`, cycle-check, no parent-child hierarchy — is designed inside that feature (unit `cli-toolset-rework/6`, tech.md § Workstream D) but stays **deferred, gated on `cli-toolset-rework/1`–`5` DONE.**
 
 ---
 
@@ -22,8 +25,9 @@ updated: 2026-07-06
 | 3 | daemon | ✅ DONE | `tests/daemon/` | `feat(daemon)` |
 | 4 | search | ✅ DONE | `tests/search/` | `feat(search)` |
 | 5 | memory | ✅ DONE | `tests/memory/` | `feat(memory)` |
-| 6 | tasks-graph | ⏳ deferred (Phase 3) | `tests/tasks/` | — |
+| 6 | tasks-graph | ⏳ deferred (Phase 3; design in `cli-toolset-rework/6`) | `tests/tasks/` | — |
 | 7 | [shards-rebrand](features/shards-rebrand/plan.md) | 🛠 in progress | full suite | `chore(rebrand)` |
+| 8 | [cli-toolset-rework](features/cli-toolset-rework/plan.md) | 📝 scoped, units not started | full suite + new | — |
 
 ---
 
@@ -54,3 +58,11 @@ Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature
   `file:line` + concrete fix. (Rebrand-correctness audit lives in
   [features/shards-rebrand/plan.md](features/shards-rebrand/plan.md) § Follow-ups — that one is the
   feature's own pre-merge gate.)
+
+---
+
+## Open questions
+
+- **Rust rewrite for CLI startup performance** — under evaluation via parallel performance
+  research; not decided. Runtime stays Python 3.11+ for now. →
+  [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Open Questions

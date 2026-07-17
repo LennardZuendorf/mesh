@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-07-05
+updated: 2026-07-17
 ---
 
 # Shards — Technical Architecture
@@ -55,6 +55,21 @@ src/shards/
 
 ---
 
+## Performance
+
+**Goal:** instant CLI — sub-~100ms cold start target. **Principle:** heavy work lives in the warm
+daemon; the CLI import path pays only for what it uses (invariant 6, extended from `watchdog` to
+every heavy dependency — `pydantic`, `FastMCP`, `python-frontmatter`). Keep-and-optimize: the
+runtime stays Python 3.11+, the existing daemon + hybrid-search architecture is tuned, not
+restructured (whether a future Rust rewrite is warranted is an **open question**, not a decision —
+see [Risks](#risks)).
+
+**Detailed optimization tactics: pending performance research (this branch)** — see
+[features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Workstream B for the
+execution plan.
+
+---
+
 ## Shared primitives (DRY)
 
 A task is a note with `type: task`, so every cross-cutting mechanic has **one** implementation the two verbs share — never per-verb copies (copies drift; the spec's whole thesis is a small, single-surface core):
@@ -99,7 +114,7 @@ A task is a note with `type: task`, so every cross-cutting mechanic has **one** 
 
 `notes → tasks → daemon → search → memory` — **all implemented (Phase 1–2).** `tasks-graph` deferred to Phase 3.
 
-Implementation is the source of truth: `src/shards/` + `tests/` (578 tests, mypy strict, ruff clean).
+Implementation is the source of truth: `src/shards/` + `tests/` (591 tests, mypy strict, ruff clean).
 
 ---
 
@@ -119,8 +134,9 @@ Contracts compounded from the (now-deleted) feature specs. Full detail lives in 
 
 | Risk | Mitigation |
 |---|---|
-| `indexed` drift | Contract pinned in search tech |
+| `indexed` drift | Contract pinned in search tech; `search --health` signal tracked as a gap → [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Gaps |
 | Windows sockets | Loopback TCP / named pipe |
 | Claim race | `O_EXCL`, works daemon-less |
 | Stale locks | TTL + dead PID |
 | Untrusted content | Sandbox + socket `0600` |
+| Python cold-start floor insufficient after lazy-import work | **Open question, not decided:** a Rust rewrite is under evaluation via parallel performance research; runtime stays Python 3.11+ for now → [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Open Questions |

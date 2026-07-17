@@ -5,7 +5,7 @@ children:
   - tech.md
   - design.md
   - plan.md
-updated: 2026-07-05
+updated: 2026-07-17
 ---
 
 # Shards — Product
@@ -20,7 +20,7 @@ A mesh for multi-agent collaboration over one Tolaria Markdown folder. Three ver
 
 ## Requirements
 
-1. **Three verbs.** `note`, `task`, `search` cover capture, coordination, recall. Phase 2 adjuncts (signed off): `recent-activity`, `build-context`, `session-start` — read-only lenses, not a fourth verb. Admin (`daemon`, `status`, `reindex`) is human-only.
+1. **Three verbs.** `note`, `task`, `search` cover capture, coordination, recall. Phase 2 adjuncts (signed off): `recent-activity`, `build-context`, `session-start` — read-only lenses, not a fourth verb. Admin (`daemon`, `status`, `reindex`) is human-only. Scoped, not yet signed off: a graph-query lens and **projects** as a convention (note type + task field + scoped view) — explicitly not a fourth verb. → [features/cli-toolset-rework/](features/cli-toolset-rework/product.md)
 2. **Markdown is truth.** Schema-valid frontmatter; Shards owns the interface, Tolaria owns the vault/Git.
 3. **Tasks are handoff.** Model: `owner`, `claimed_by`, `claim`/`finish`/`cancel`, later `blocks`/`blocked_by`. **v1:** claim/finish/cancel/list; graph edges recordable but inert until Phase 3.
 4. **Hybrid recall via `indexed`.** Ranked search over `notes/` + `tasks/`; JSON with `path`; substring fallback when `indexed`/daemon unavailable or `[search].hybrid=false`.
@@ -66,3 +66,4 @@ No memory primitive, handoff primitive, DB, external task backend, enrichment lo
 
 - **MCP annotations:** `read-only` / `idempotent` / `write` / `destructive`. Cancel exposed; hard-delete and admin withheld. → [tech.md](tech.md) § Implemented surfaces
 - **`[tasks].collections`:** valid agent identities for `--owner` validation; not folder splits. → [tech.md](tech.md)
+- **Toolset direction (2026-07):** evaluated replacing shards with GBrain (rejected — mandates Postgres/PGLite, no task primitive) and Beads (rejected — moved its source of truth to Dolt, a SQL DB, contradicting Markdown-as-truth). Decision: keep shards, rework internals + performance + two additive capabilities (graph-query output, projects convention); task-graph (Phase 3) designed but stays deferred. → [features/cli-toolset-rework/](features/cli-toolset-rework/product.md)
