@@ -25,7 +25,7 @@ is designed here but stays deferred and gated behind the rest.
 | | |
 |---|---|
 | **Owns** | Graph-query output (first-class BFS-over-`related` query); projects-as-convention (`type: project` note, `project:` field on tasks, project-scoped views); the decision record for keep-vs-replace; the performance goal statement; the deferred task-graph (Phase 3) design. |
-| **Does not own** | Internal refactor mechanics (module extraction/decomposition — tech-only, no product surface); performance optimization tactics (pending parallel research, tracked as an open question); the positioning/overclaiming review itself (already queued in root [plan.md](../../plan.md) § Open reviews — this feature only flags it as a gap); CI tooling. |
+| **Does not own** | Internal refactor mechanics (module extraction/decomposition — tech-only, no product surface); performance optimization tactics (measured and decided, not pending — see [tech.md](tech.md) § Decisions, § Workstream B); the positioning/overclaiming review itself (already queued in root [plan.md](../../plan.md) § Open reviews — this feature only flags it as a gap); CI tooling. |
 | **Deferred** | Executing the task-graph (Phase 3) build — design only this branch, gated on this feature's own units shipping first. |
 
 ---
@@ -87,10 +87,13 @@ task frontmatter, without introducing a fourth verb.
 - No `project` verb this branch — projects are a convention (note type + frontmatter field + scoped view) only.
 - No execution of the Phase-3 task-graph build — design captured in [tech.md](tech.md) / [plan.md](plan.md), gated behind this feature's own units.
 - No resolution of the mesh-positioning/overclaiming review — that review is already queued in root [plan.md](../../plan.md) § Open reviews; this feature only surfaces it as a gap to close.
-- No decision on rewriting the CLI in Rust — recorded as an open question in [tech.md](tech.md) § Open Questions, not resolved here.
+- No Rust rewrite of the CLI — resolved (shelved) in [tech.md](tech.md) § Decisions; runtime stays Python 3.11+, optimized via the pydantic→msgspec swap and the measured tactics in [tech.md](tech.md) § Workstream B.
 
 ---
 
-## Open Questions
+## Resolved
 
-1. **Rust rewrite for CLI startup performance** — under active evaluation via parallel performance research. Runtime stays Python 3.11+ for now (keep-and-optimize). See [tech.md](tech.md) § Open Questions.
+- **Rust rewrite for CLI startup performance — shelved.** Measured Rust cold start (~2–10ms) against
+  Python's measured ~260–300ms today: a real gap, but below human-perceptibility for how shards is
+  actually used (agent tool calls + human CLI, not a hot loop). Runtime stays Python 3.11+,
+  optimized — not rewritten. See [tech.md](tech.md) § Decisions.

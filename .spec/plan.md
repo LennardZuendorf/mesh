@@ -10,7 +10,7 @@ updated: 2026-07-17
 
 # Shards — Plan
 
-**Status:** Phase 1–2 **delivered** — all five features implemented and tested (591 tests, mypy strict, ruff clean) on branch `feat/phase-1-mvp`. Built bottom-up behind binary whole-feature gates.
+**Status:** Phase 1–2 **delivered** — all five features implemented and tested (591 tests, ty clean, ruff clean) on branch `feat/phase-1-mvp`. Built bottom-up behind binary whole-feature gates.
 
 **Focus:** [cli-toolset-rework](features/cli-toolset-rework/plan.md) — keep-and-rework decision (GBrain/Beads rejected), internal tidying, performance push, graph-query output, projects convention. Phase 3 (tasks-graph) — `ready` / `release`, `blocks`/`blocked_by`, cycle-check, no parent-child hierarchy — is designed inside that feature (unit `cli-toolset-rework/6`, tech.md § Workstream D) but stays **deferred, gated on `cli-toolset-rework/1`–`5` DONE.**
 
@@ -61,8 +61,8 @@ Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature
 
 ---
 
-## Open questions
+## Resolved
 
-- **Rust rewrite for CLI startup performance** — under evaluation via parallel performance
-  research; not decided. Runtime stays Python 3.11+ for now. →
-  [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Open Questions
+- **Rust rewrite for CLI startup performance** — evaluated and shelved; runtime stays Python
+  3.11+, optimized via the pydantic→msgspec swap (~150–180ms floor). →
+  [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Decisions

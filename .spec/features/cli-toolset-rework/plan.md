@@ -43,8 +43,12 @@ which **is** that row's design — root `plan.md` should treat `tasks-graph` as 
    evolution path if it earns a verb later. → tech.md § Workstream C.
 4. **Task graph stops at blocks + ready + release for v1.** No parent-child hierarchy — the
    bug class Beads shipped. → tech.md § Workstream D.
-5. **Rust rewrite is an open question, not a decision.** Runtime stays Python 3.11+ pending
-   parallel performance research. → tech.md § Open Questions.
+5. **Rust rewrite: resolved, shelved.** Runtime stays Python 3.11+, optimized. → tech.md §
+   Decisions.
+6. **pydantic v2 → msgspec: adopted**, folded into unit 2, gated on a round-trip-fidelity spike
+   (Invariant 3 — unknown frontmatter keys must still round-trip). → tech.md § Decisions.
+7. **Type checker: mypy → ty.** New dev toolchain: uv · ruff · ty · pytest. → root `tech.md` §
+   Stack, `AGENTS.md` § 3–4.
 
 ---
 
@@ -80,33 +84,55 @@ src/shards/daemon/server.py     # owns the hook-registry object (was module-leve
 - Full existing suite (~591 tests) passes unmodified in behavior — only import paths change.
 - No test imports `cli/search.py`'s private `_hit_dict`/`_query_search` from `mcp/server.py`.
 
-**Verification:** `uv run pytest -q` green, `uv run mypy src/` clean, `uv run ruff check .` clean; `git grep` for the old private-helper cross-import returns nothing.
+**Verification:** `uv run pytest -q` green, `uv run ty check src/` clean, `uv run ruff check .` clean; `git grep` for the old private-helper cross-import returns nothing.
 
 ---
 
-### cli-toolset-rework/2 — Performance push
+### cli-toolset-rework/2 — Performance push (incl. pydantic → msgspec swap)
 
-**Goal:** Baseline CLI cold-start, extend lazy-import discipline to `pydantic`/`FastMCP`/`python-frontmatter`, trim dependencies, add a CI startup-time regression guard.
+**Goal:** Ship the measured performance plan (tech.md § Workstream B): stop wrapping hot
+invocations in `uv run`; swap `schemas/` pydantic → msgspec — **gated on a round-trip-fidelity
+spike** (tech.md § Decisions); decompose eager CLI sub-verb imports (hygiene, not perf); add a CI
+startup-time regression guard. Target: ~150–180ms cold start (down from ~230–300ms).
 
 **Requirements:** — (non-functional; the "superfast and small" constraint)
 
 **Dependencies:** —
 
+**Ordering note:** the msgspec swap in this unit is foundational to `schemas/`. Unit
+`cli-toolset-rework/4` (projects) also edits `schemas/note.py` + `schemas/task.py` — it must land
+**after** this unit's swap, not just after unit 1 (see Dependencies table below). The round-trip
+spike gates the swap itself; if it fails, this unit ships only the `uv run` + hygiene + CI-guard
+tactics and the schema swap reverts to pydantic.
+
 **Files:**
 
 ```
-src/shards/cli/__main__.py          # audit + lazy-import heavy deps
-src/shards/schemas/*.py             # audit pydantic import placement
-src/shards/mcp/server.py            # audit FastMCP import placement
-.github/workflows/ci.yml            # startup-time guard (shared with unit 5)
+src/shards/schemas/note.py           # pydantic BaseModel -> msgspec Struct
+src/shards/schemas/task.py           # pydantic BaseModel -> msgspec Struct
+src/shards/schemas/config.py         # CoreConfig: pydantic BaseModel -> msgspec Struct;
+                                      # expanduser() field-validator -> msgspec equivalent
+src/shards/schemas/search.py         # pydantic BaseModel -> msgspec Struct
+src/shards/cli/note.py               # pydantic.ValidationError -> msgspec.ValidationError
+src/shards/cli/task.py               # pydantic.ValidationError -> msgspec.ValidationError
+src/shards/core/notes.py             # pydantic.ValidationError -> msgspec.ValidationError
+src/shards/core/tasks.py             # pydantic.ValidationError -> msgspec.ValidationError
+src/shards/cli/__main__.py           # decompose eager sub-verb imports (hygiene, not perf)
+.github/workflows/ci.yml             # startup-time guard (shared with unit 5)
 ```
 
 **Test scenarios:**
 
-- `shards --help` cold-start time recorded before and after; regression guard fails CI on regression past the recorded baseline.
-- No behavior change to any command.
+- **Gating spike:** a note/task file carrying unknown/foreign frontmatter keys round-trips
+  byte-for-byte through msgspec `Struct`s exactly as it did under pydantic — proven **before** the
+  full swap proceeds.
+- `shards --help` / `note new` / `task claim` cold-start time recorded before and after; regression
+  guard fails CI on regression past the recorded baseline.
+- No behavior change to any command's inputs/outputs.
 
-**Verification:** Baseline + post numbers recorded in this plan's Progress notes; CI guard job passes on this branch.
+**Verification:** Baseline + post numbers recorded in this plan's Progress notes; round-trip
+fidelity spike result recorded (pass → swap proceeds / fail → swap reverts) before merge; CI guard
+job passes on this branch; `uv run ty check src/` clean.
 
 ---
 
@@ -141,7 +167,8 @@ src/shards/mcp/server.py       # corresponding shards_* tool, read-only annotati
 
 **Requirements:** R2
 
-**Dependencies:** cli-toolset-rework/1 (read-lens layer)
+**Dependencies:** cli-toolset-rework/1 (read-lens layer); cli-toolset-rework/2 (this unit edits
+`schemas/note.py` + `schemas/task.py` — must land after the msgspec swap, not before)
 
 **Files:**
 
@@ -164,7 +191,7 @@ src/shards/core/*.py          # project-scoped read-lens
 
 ### cli-toolset-rework/5 — Gaps: CI, contract pinning, trust boundary, soft-delete
 
-**Goal:** Add CI (pytest + mypy + ruff + startup guard + spec-test-count check), pin the `indexed` NDJSON contract with a shared schema + `search --health`, document the owner-identity trust boundary, evaluate optional soft-delete.
+**Goal:** Add CI (pytest + ruff + ty + startup guard + spec-test-count check), pin the `indexed` NDJSON contract with a shared schema + `search --health`, document the owner-identity trust boundary, evaluate optional soft-delete.
 
 **Requirements:** — (non-functional hardening)
 
@@ -173,7 +200,7 @@ src/shards/core/*.py          # project-scoped read-lens
 **Files:**
 
 ```
-.github/workflows/ci.yml        # pytest + mypy + ruff + startup guard + spec-test-count check
+.github/workflows/ci.yml        # pytest + ruff + ty + startup guard + spec-test-count check
 src/shards/index/indexed_client.py  # shared NDJSON schema
 src/shards/cli/search.py        # --health / status signal
 docs or AGENTS.md               # owner-identity trust-boundary note
@@ -210,9 +237,9 @@ src/shards/storage/files.py     # soft-delete evaluation (may land as a follow-u
 | Unit | Blocks | Blocked by |
 |---|---|---|
 | cli-toolset-rework/1 | 3, 4, 5, 6 | — |
-| cli-toolset-rework/2 | 5, 6 | — |
+| cli-toolset-rework/2 | 4, 5, 6 | — |
 | cli-toolset-rework/3 | 6 | cli-toolset-rework/1 |
-| cli-toolset-rework/4 | 6 | cli-toolset-rework/1 |
+| cli-toolset-rework/4 | 6 | cli-toolset-rework/1, cli-toolset-rework/2 |
 | cli-toolset-rework/5 | 6 | cli-toolset-rework/1, cli-toolset-rework/2 |
 | cli-toolset-rework/6 | — | cli-toolset-rework/1–5 |
 
@@ -229,10 +256,3 @@ src/shards/storage/files.py     # soft-delete evaluation (may land as a follow-u
 | cli-toolset-rework/5 | NOT STARTED |
 | cli-toolset-rework/6 | NOT STARTED (gated, deferred) |
 
----
-
-## Open Questions
-
-1. **Rust rewrite for CLI startup performance** — pending parallel performance research; not
-   decided on this branch. See [tech.md](tech.md) § Open Questions. Unit 2's baseline numbers
-   should inform, not preempt, that decision.

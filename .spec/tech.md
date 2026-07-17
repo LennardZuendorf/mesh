@@ -18,13 +18,13 @@ Daemon-centric, never daemon-dependent. Warm index + watcher in the daemon; writ
 |---|---|
 | Runtime | Python 3.11+, `uv` / `pipx` |
 | CLI | `typer` |
-| Data | Markdown + `python-frontmatter`, `pydantic` v2 |
+| Data | Markdown + `python-frontmatter`, `msgspec` |
 | Watcher | `watchdog` |
 | Agents | `FastMCP` |
 | Vault | Tolaria folder + MCP (inherited) |
 | Search engine | `indexed` (first-party hybrid; Shards wraps) |
 
-**Added deps only:** typer, python-frontmatter, pydantic, watchdog, FastMCP. Shards code stays small — wrapper, daemon, locks, wikilinks.
+**Added deps only:** typer, python-frontmatter, msgspec, watchdog, FastMCP. Shards code stays small — wrapper, daemon, locks, wikilinks.
 
 ---
 
@@ -57,16 +57,24 @@ src/shards/
 
 ## Performance
 
-**Goal:** instant CLI — sub-~100ms cold start target. **Principle:** heavy work lives in the warm
-daemon; the CLI import path pays only for what it uses (invariant 6, extended from `watchdog` to
-every heavy dependency — `pydantic`, `FastMCP`, `python-frontmatter`). Keep-and-optimize: the
-runtime stays Python 3.11+, the existing daemon + hybrid-search architecture is tuned, not
-restructured (whether a future Rust rewrite is warranted is an **open question**, not a decision —
-see [Risks](#risks)).
+**Goal:** instant CLI. **Target:** ~150–180ms cold start (the msgspec path, below) — the honest
+floor, not the aspiration. ~100ms is the "feels instant" UX threshold, not a number literally
+reachable while keeping `typer` + a schema-validator class. **Principle:** heavy work lives in the
+warm daemon; the CLI import path pays only for what it uses (invariant 6). `watchdog` stays
+lazy-imported (daemon-only). Measured non-levers, no action needed: `FastMCP` is already off the
+CLI hot path (separate `shards-mcp` console script); `python-frontmatter` already uses PyYAML's C
+loader. The dominant cost was `pydantic` v2's one-time schema-compile tax, paid the moment the
+first `BaseModel` subclass is defined — unavoidable via lazy-import alone, since any real command
+needs config. Fixed by swapping `schemas/` to **msgspec** (~90ms saved), gated on a
+round-trip-fidelity spike protecting invariant 3. Keep-and-optimize: the runtime stays Python
+3.11+, the existing daemon + hybrid-search architecture is tuned, not restructured — a Rust
+rewrite was evaluated and **shelved** (see [Risks](#risks)).
 
-**Detailed optimization tactics: pending performance research (this branch)** — see
-[features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Workstream B for the
-execution plan.
+**Optimization tactics — measured and decided:** stop wrapping hot invocations in `uv run`; swap
+`schemas/` pydantic → msgspec (gated on the round-trip-fidelity spike); decompose eager CLI
+sub-verb imports (hygiene, not perf); CI startup-time regression guard. Full plan:
+[features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Workstream B, §
+Decisions.
 
 ---
 
@@ -78,7 +86,7 @@ A task is a note with `type: task`, so every cross-cutting mechanic has **one** 
 - **Safe read** — read-text + `frontmatter.loads` guarding **both** `OSError` and `yaml.YAMLError` (foreign/corrupt files skip silently) is one reader (`storage/files.read_post`); every scanner (`tagpull`, `activity`, `wikilinks`, `scan_recent`) routes through it.
 - **Vault walk** — one iterator over `notes/**` + `tasks/{open,done}/`; all scanners consume it.
 - **CLI output** — one `cli/_output.py` surface (`emit_mutation`, `preview`, `is_json`/`is_quiet`/`is_machine`, delete-guard); `note` and `task` render through it. The interactive-tty check stays a per-module seam so the delete tests can fake it.
-- **Frontmatter is serialized from the pydantic model** (`model_dump`), never a parallel hand-built dict — the schema is the single on-disk contract.
+- **Frontmatter is serialized from the schema model** (msgspec `Struct`), never a parallel hand-built dict — the schema is the single on-disk contract.
 - **Terminalize** — `finish`/`cancel` are thin wrappers over one `_terminate_task(*, heading, status, text)`.
 - **Exit codes** are a fixed convention — `2` validation/ambiguous, `3` not-found, `4` claim-conflict — that each CLI handler maps its domain exceptions to at the boundary.
 
@@ -114,7 +122,7 @@ A task is a note with `type: task`, so every cross-cutting mechanic has **one** 
 
 `notes → tasks → daemon → search → memory` — **all implemented (Phase 1–2).** `tasks-graph` deferred to Phase 3.
 
-Implementation is the source of truth: `src/shards/` + `tests/` (591 tests, mypy strict, ruff clean).
+Implementation is the source of truth: `src/shards/` + `tests/` (591 tests, ty clean, ruff clean).
 
 ---
 
@@ -139,4 +147,5 @@ Contracts compounded from the (now-deleted) feature specs. Full detail lives in 
 | Claim race | `O_EXCL`, works daemon-less |
 | Stale locks | TTL + dead PID |
 | Untrusted content | Sandbox + socket `0600` |
-| Python cold-start floor insufficient after lazy-import work | **Open question, not decided:** a Rust rewrite is under evaluation via parallel performance research; runtime stays Python 3.11+ for now → [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Open Questions |
+| Python cold-start floor (~150–180ms after the msgspec swap) | **Resolved — no Rust rewrite.** Evaluated and shelved: the ~2–10ms Rust floor is below human-perceptibility for shards's usage (agent tool calls + human CLI, not a hot loop). Runtime stays Python 3.11+, optimized. Only future fallback (not scheduled): a thin Rust client over the existing daemon socket, if a hot-loop use ever emerges → [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Decisions |
+| msgspec `Struct`s reject unknown keys by default | Invariant 3 ("unknown frontmatter keys round-trip") is load-bearing; a round-trip-fidelity spike gates the swap — if it fails, the swap reverts and Python stays at the pre-swap ~230–250ms floor → [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Decisions |
