@@ -3,15 +3,11 @@ type: entrypoint
 scope: design
 design_format: google-labs-code/design.md-compatible
 children:
-  - features/notes/plan.md
-  - features/tasks/plan.md
-  - features/daemon/plan.md
-  - features/search/plan.md
-  - features/memory/plan.md
-updated: 2026-06-21
+  - plan.md
+updated: 2026-07-05
 ---
 
-# Brain — Design
+# Shards — Design
 
 CLI + MCP, no UI. **Tone:** quiet, deterministic, instant. Humans get terse text; agents get strict JSON. Same behaviour with or without daemon.
 

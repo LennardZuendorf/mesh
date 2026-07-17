@@ -1,6 +1,6 @@
-# AGENTS.md — Brain Engineering Guide
+# AGENTS.md — Shards Engineering Guide
 
-> **`brain`** — a thin coordination layer over a single Tolaria Markdown folder.
+> **`shards`** — a mesh for multi-agent collaboration over a single Tolaria Markdown folder.
 > Three verbs (`note`, `task`, `search`), one daemon, one folder, all agents.
 
 ---
@@ -51,16 +51,16 @@ memory subsystem, or an external task tracker.
 
 - **Notes + search = memory.** No separate memory store; recall delegates to `indexed`.
 - **Tasks = coordination = handoff.** v1: `owner` / `claimed_by` / `claim` / `finish` / `cancel` / `list`. The dependency graph (`blocks` / `blocked_by` readiness, `release`, strict gate) is a deferred later phase.
-- **Markdown is the source of truth.** Brain owns the *interface* (and writes), not the data.
+- **Markdown is the source of truth.** Shards owns the *interface* (and writes), not the data.
 
-**Connections (what brain talks to):**
+**Connections (what shards talks to):**
 
 | System | Role | Boundary |
 |---|---|---|
-| **Tolaria vault + MCP** | The one Markdown folder (`notes/`, `tasks/`) — source of truth — plus Tolaria's filesystem-direct MCP read tools | Brain **owns writes** and cheap direct reads; **coexists** with Tolaria on the same folder; Git/sync and the vault are Tolaria's job |
-| **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Brain's `search` is a thin wrapper; the brain↔indexed contract is co-designed; falls back to a built-in substring scan if absent |
-| **Cowork agents** | Consumers (flights-agent, tolaria-agent, …) | Call brain via CLI (`--json`) and the `memory` MCP tools |
-| **`$BRAIN_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine` |
+| **Tolaria vault + MCP** | The one Markdown folder (`notes/`, `tasks/`) — source of truth — plus Tolaria's filesystem-direct MCP read tools | Shards **owns writes** and cheap direct reads; **coexists** with Tolaria on the same folder; Git/sync and the vault are Tolaria's job |
+| **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Shards's `search` is a thin wrapper; the shards↔indexed contract is co-designed; falls back to a built-in substring scan if absent |
+| **Cowork agents** | Consumers (flights-agent, tolaria-agent, …) | Call shards via CLI (`--json`) and the `memory` MCP tools |
+| **`$SHARDS_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine` |
 | **The daemon** | Watcher + warm frontmatter index; drives `indexed index update`; shared by CLI and MCP | An accelerator, never a hard dependency — CLI degrades gracefully when it's down |
 
 ---
@@ -71,7 +71,7 @@ memory subsystem, or an external task tracker.
 
 **Core libraries:** `typer` (CLI), `python-frontmatter` (YAML frontmatter), `pydantic` v2
 (schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search is delegated to
-the first-party `indexed` engine (hybrid lexical + vector); Brain keeps only a deterministic
+the first-party `indexed` engine (hybrid lexical + vector); Shards keeps only a deterministic
 tag-pull and a substring fallback in-process.
 
 **Dev tools:** `ruff` (lint/format), `mypy` (strict), `pytest` + `pytest-cov`, `pre-commit`.
@@ -89,12 +89,12 @@ uv run ruff format .              # Format
 uv run mypy src/                  # Type-check (strict)
 uv run pytest -q                  # Run tests
 uv run pytest -q --cov=src        # With coverage
-uv run brain --help               # CLI help
-uv run brain daemon start         # Start the local daemon
+uv run shards --help               # CLI help
+uv run shards daemon start         # Start the local daemon
 ```
 
-> The repo is currently at **spec stage** (no implementation yet). The stack and commands above
-> are the agreed target; honour them as code lands.
+> Phase 1–2 is **delivered** — all five features implemented and tested (578 tests, mypy strict,
+> ruff clean). Phase 3 (tasks-graph) is deferred; the commands above are live.
 
 ### Git commit standards
 
@@ -119,7 +119,7 @@ docs(spec): wrap indexed for ranked retrieval
 ## 5. Repository Structure
 
 ```
-brain/
+shards/
 ├── AGENTS.md            # this guide  (CLAUDE.md is a symlink to it)
 ├── CLAUDE.md -> AGENTS.md
 ├── README.md            # short overview
@@ -128,7 +128,7 @@ brain/
 │   ├── design.md        # root: CLI design language  ├── plan.md     # root: feature sequence
 │   ├── lessons.md       # root: accumulated lessons
 │   └── features/        # notes, tasks, daemon, search, memory (product + tech + plan each)
-└── src/brain/
+└── src/shards/
     ├── cli/             # typer app: note, task, search, daemon, status (thin)
     ├── mcp/             # FastMCP memory server over the same daemon (thin)
     ├── daemon/          # asyncio unix-socket server: watcher + warm frontmatter index (drives indexed)

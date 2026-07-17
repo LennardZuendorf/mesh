@@ -1,0 +1,14 @@
+"""Scaffold smoke test — the CLI imports and reports its version."""
+
+from __future__ import annotations
+
+from typer.testing import CliRunner
+
+from shards import __version__
+from shards.cli.__main__ import app
+
+
+def test_version_matches_package() -> None:
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.stdout

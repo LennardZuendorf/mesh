@@ -1,14 +1,14 @@
 # --- Secrets & local config (never commit) ---
-.brain/
+.shards/
 config.toml
 config.local.toml
 .env
 .env.*
 *.secret
 
-# --- Brain CLI derived cache / search index (disposable) ---
-.brain-index/
-*.brain-index
+# --- Shards CLI derived cache / search index (disposable) ---
+.shards-index/
+*.shards-index
 index.sqlite
 index.sqlite-*
 
@@ -34,6 +34,9 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .tox/
+
+# --- Agent tooling caches ---
+.serena/
 
 # --- Editors / OS ---
 .idea/
