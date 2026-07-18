@@ -25,7 +25,7 @@ from pathlib import Path
 
 import frontmatter
 import yaml
-from pydantic import ValidationError
+from msgspec import ValidationError
 
 from shards.core.ids import generate_task_id
 from shards.core.notes import _matches_tags, _parse_since, _validate_owner, apply_tag_spec

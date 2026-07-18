@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
-from pydantic import ValidationError
+from msgspec import ValidationError
 
 from shards.core.notes import NoteError, get_note
 from shards.core.tasks import TaskError, get_task

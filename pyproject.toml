@@ -9,7 +9,7 @@ authors = [{ name = "Lennard Zundorf" }]
 dependencies = [
     "typer>=0.12",
     "python-frontmatter>=1.1",
-    "pydantic>=2.7",
+    "msgspec>=0.18",
     "watchdog>=4.0",
     "fastmcp>=2.0",
 ]

@@ -17,7 +17,7 @@ import json
 import sys
 
 import typer
-from pydantic import ValidationError
+from msgspec import ValidationError
 
 from shards.cli import _output
 from shards.core.tasks import (

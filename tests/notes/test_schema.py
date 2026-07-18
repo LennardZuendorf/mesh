@@ -1,6 +1,6 @@
 """notes/1 — config, Note schema, and id generation.
 
-Covers the shared primitives every later feature inherits: the pydantic Config
+Covers the shared primitives every later feature inherits: the msgspec Config
 model (with SHARDS_CONFIG_PATH / SHARDS_AGENT overrides), the Note frontmatter
 schema (unknown-key round-trip), and the deterministic hash-id generator.
 """
@@ -119,15 +119,13 @@ def test_note_carries_exact_fields() -> None:
 
 
 def test_note_type_rejects_unknown_value() -> None:
-    from pydantic import ValidationError
+    # msgspec validates on ``model_validate`` (the disk/frontmatter entry point),
+    # not on direct construction — mirroring how production reads notes.
+    from msgspec import ValidationError
 
     with pytest.raises(ValidationError):
-        Note(
-            id="n-a3f2",
-            type="journal",  # type: ignore[arg-type]
-            title="x",
-            created=_now(),
-            updated=_now(),
+        Note.model_validate(
+            {"id": "n-a3f2", "type": "journal", "title": "x", "created": _now(), "updated": _now()}
         )
 
 

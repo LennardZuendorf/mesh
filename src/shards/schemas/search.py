@@ -6,17 +6,17 @@ the substring fallback. It is deliberately looser than :class:`~shards.schemas.n
 the corpus includes coexisting non-shards (foreign) Markdown files, so ``id`` /
 ``type`` / ``title`` are all optional (a foreign file surfaces with ``id: None``).
 ``path`` is always present — the design contract is that search results are
-addressable on disk.
+addressable on disk. It carries no foreign keys, so it needs no ``extra`` stash.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+import msgspec
 
 
-class SearchResult(BaseModel):
+class SearchResult(msgspec.Struct, kw_only=True):
     """One recall hit: identity (nullable for foreign files), score, and location.
 
     ``score`` is engine-defined (``1.0`` for an exact tag pull, the substring
