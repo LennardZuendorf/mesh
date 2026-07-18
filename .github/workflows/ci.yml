@@ -1,8 +1,9 @@
 name: CI
 
-# Minimal gate for cli-toolset-rework/2: lint, type-check, tests, and the
-# startup-time regression guard. Unit 5 extends this (ruff format, spec
-# test-count check) — keep additions non-conflicting with this job.
+# Minimal gate for cli-toolset-rework/2, extended by cli-toolset-rework/5 with
+# a `ruff format --check` gate. The spec-test-count drift check listed in the
+# gaps table is deliberately NOT added here — the count is still settling and
+# the controller syncs it in the spec during the branch's finishing phase.
 
 on:
   push:
@@ -26,8 +27,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-groups
 
-      - name: Lint (ruff)
+      - name: Lint (ruff check)
         run: uv run ruff check .
+
+      - name: Format (ruff format --check)
+        run: uv run ruff format --check .
 
       - name: Type-check (ty)
         run: uv run ty check src/
