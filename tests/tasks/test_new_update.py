@@ -177,6 +177,7 @@ def test_create_task_writes_only_canonical_keys(cfg: Config, vault: Path) -> Non
         "status",
         "priority",
         "claimed_by",
+        "project",
         "blocks",
         "blocked_by",
     }

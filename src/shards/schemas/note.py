@@ -22,7 +22,7 @@ from typing import Any, Literal, Self
 
 import msgspec
 
-NoteType = Literal["note", "log", "decision", "reference"]
+NoteType = Literal["note", "log", "decision", "reference", "project"]
 
 # The stash field name. Excluded from the "known schema field" set so a foreign
 # frontmatter key *literally* named ``extra`` is treated as unknown (stashed and

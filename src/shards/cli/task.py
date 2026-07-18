@@ -60,6 +60,9 @@ def new_command(
         None, "--owner", help="Owner identity (must be in [tasks].collections)."
     ),
     body: str | None = typer.Option(None, "--body", help="Task body text."),
+    project: str | None = typer.Option(
+        None, "--project", help="Soft-link this task to a project note id."
+    ),
     blocks: str | None = typer.Option(
         None, "--blocks", help="Comma-separated task ids this blocks (inert v1)."
     ),
@@ -78,6 +81,7 @@ def new_command(
             tags=tag_list,
             owner=owner,
             body=body or "",
+            project=project,
             blocks=_csv(blocks),
             blocked_by=_csv(blocked_by),
         )
@@ -101,6 +105,9 @@ def update_command(
         None, "--tags", help="Delta (+x,-y) or replacement (x,y) tag list."
     ),
     title: str | None = typer.Option(None, "--title", help="Rewrite the task title."),
+    project: str | None = typer.Option(
+        None, "--project", help="Set the project soft link (a project note id)."
+    ),
     blocks: str | None = typer.Option(
         None, "--blocks", help="Replace the blocks list (comma-separated, inert v1)."
     ),
@@ -108,7 +115,7 @@ def update_command(
         None, "--blocked-by", help="Replace the blocked_by list (comma-separated, inert v1)."
     ),
 ) -> None:
-    """Update a task's fields (priority, tags, title, blocks/blocked_by)."""
+    """Update a task's fields (priority, tags, title, project, blocks/blocked_by)."""
     config = load_config()
     try:
         task = update_task(
@@ -117,6 +124,7 @@ def update_command(
             priority=priority,
             tags=tags,
             title=title,
+            project=project,
             blocks=_csv(blocks),
             blocked_by=_csv(blocked_by),
         )
@@ -206,6 +214,7 @@ def _task_meta_lines(task: Task) -> list[str]:
         f"priority: {task.priority or ''}",
         f"owner: {task.owner or ''}",
         f"claimed_by: {task.claimed_by or ''}",
+        f"project: {task.project or ''}",
         f"tags: {', '.join(task.tags)}",
         f"blocks: {', '.join(task.blocks)}",
         f"blocked_by: {', '.join(task.blocked_by)}",
@@ -260,6 +269,9 @@ def list_command(
     mine: bool = typer.Option(False, "--mine", help="Only tasks I own or have claimed."),
     tags: str | None = typer.Option(None, "--tags", help="Comma-separated tag filter (AND)."),
     any_tag: bool = typer.Option(False, "--any-tag", help="Switch --tags to OR semantics."),
+    project: str | None = typer.Option(
+        None, "--project", help="Only tasks scoped to this project note id."
+    ),
     since: str | None = typer.Option(None, "--since", help="Recency: 7d or an ISO date."),
     sort: str = typer.Option("updated", "--sort", help="updated | created | title."),
     limit: int = typer.Option(20, "--limit", help="Cap the number of results."),
@@ -277,6 +289,7 @@ def list_command(
             mine=mine_flag,
             tags=tag_list,
             any_tag=any_tag,
+            project=project,
             since=since,
             sort=sort,
             limit=limit,
