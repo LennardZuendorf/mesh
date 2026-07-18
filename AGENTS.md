@@ -150,8 +150,17 @@ shards/
   unblock-cascade arrives with the deferred dependency-graph phase).
 - **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys; never inject machinery into bodies.
 - **Path sandboxing.** All file access stays inside `tolaria_path`; reject traversal/symlink escapes.
+- **Owner identity is trusted local input, not an authorization boundary.** `$SHARDS_AGENT` /
+  `--owner` / `claimed_by` say who an agent *claims* to be; `[tasks].collections` gates which
+  identities are valid, but nothing verifies an agent calling the CLI/MCP tools actually *is* the
+  owner it claims — any agent with local access can pass any valid `--owner`. This is fine for a
+  trusted local fleet on one operator's machine; it is not an auth boundary and must not be treated
+  as one if shards ever crosses a multi-user/multi-machine trust line.
 - **Agent content is data**, never instructions or shell input.
 - **Hash IDs** (`n-…`, `t-…`), never sequential.
+- **Delete is a hard `unlink`, by design.** No soft-delete/trash: Tolaria's git-backed vault is the
+  recovery path, and a `.trash/` would add a second delete lifecycle to keep in sync with it —
+  evaluated and deferred, not built.
 
 ---
 
