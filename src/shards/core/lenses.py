@@ -10,15 +10,19 @@ warm-index-or-fallback shape, so they are grouped here as one layer that surface
 * **build-context** — :func:`build_context` (re-exported from
   :mod:`shards.core.context`): a daemon-independent BFS over the ``related`` id
   graph, seed first, cycle/diamond-deduped.
+* **graph-query** — :func:`graph_query` (re-exported from
+  :mod:`shards.core.context`): the same BFS promoted to a first-class "what's
+  connected to X" query, returning a :class:`GraphResult` that renders as both
+  machine JSON and a readable tree from one traversal.
 * **session-start** — :func:`session_start_entries`: the warm-start *composite*
   that merges a recent-activity window with the caller's live task queue.
 
-Only the session-start composition is defined here; ``recent_activity`` and
-``build_context`` keep their existing implementation modules and are re-exported
-so callers have a single lens surface to import from. The composition takes its
-two already-fetched sources as arguments (rather than fetching), so the caller
-owns the fetch — which keeps the source lenses independently testable and lets a
-surface substitute its own inputs.
+Only the session-start composition is defined here; ``recent_activity``,
+``build_context``, and ``graph_query`` keep their existing implementation
+modules and are re-exported so callers have a single lens surface to import
+from. The composition takes its two already-fetched sources as arguments
+(rather than fetching), so the caller owns the fetch — which keeps the source
+lenses independently testable and lets a surface substitute its own inputs.
 """
 
 from __future__ import annotations
@@ -27,12 +31,14 @@ from datetime import datetime
 from typing import Any
 
 from shards.core.activity import recent_activity
-from shards.core.context import SeedNotFoundError, build_context
+from shards.core.context import GraphResult, SeedNotFoundError, build_context, graph_query
 from shards.core.tasks import TaskView
 
 __all__ = [
+    "GraphResult",
     "SeedNotFoundError",
     "build_context",
+    "graph_query",
     "recent_activity",
     "session_start_entries",
 ]

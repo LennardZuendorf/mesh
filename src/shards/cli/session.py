@@ -27,6 +27,13 @@ identically.
 task queue, de-duplicates by id, and orders *tasks first* then the remaining
 activity newest-first — the payload the ``SessionStart`` hook feeds a fresh
 agent session.
+
+``graph`` (cli-toolset-rework/3) delegates to :func:`shards.core.context.graph_query`
+— the same daemon-free BFS ``build-context`` performs, promoted to a first-class
+"what's connected to X" query. ``--json`` emits ``{seed, nodes, edges}``; the
+default text is a readable indented tree; ``--quiet`` is ids only. Like
+``build-context`` it never touches the daemon or hybrid search, so it has no
+degradation notice.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ import typer
 from shards.core.lenses import (
     SeedNotFoundError,
     build_context,
+    graph_query,
     recent_activity,
     session_start_entries,
 )
@@ -188,3 +196,41 @@ def build_context_command(
             f"{entry.get('id', '')}\t{entry.get('type', '')}\t"
             f"{entry.get('title', '')}\t{entry.get('path', '')}"
         )
+
+
+def graph_command(
+    ctx: typer.Context,
+    seed_id: str = typer.Argument(..., help="Seed note/task id (n-… or t-…) to expand from."),
+    depth: int = typer.Option(1, "--depth", help="Hops to walk (0 = seed only; 1 = direct)."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Machine-readable {seed, nodes, edges}."
+    ),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only, one per line."),
+) -> None:
+    """Query what's connected to a seed id: readable tree, or JSON nodes+edges."""
+    config = load_config()
+
+    # Coalesce the leaf flags with the root callback's global flags so a flag given
+    # on either side of the command name takes effect. Same daemon-free traversal
+    # as build-context, so there is no degradation notice.
+    json_out = json_out or bool(getattr(ctx.obj, "json", False))
+    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+
+    try:
+        result = graph_query(config, seed_id, depth=depth)
+    except SeedNotFoundError:
+        if not quiet:
+            typer.echo(f"graph: seed not found: {seed_id}", err=True)
+        raise typer.Exit(3) from None
+
+    # Both branches below render the one already-computed `result` — no second
+    # traversal for JSON vs. tree output.
+    if json_out:
+        typer.echo(json.dumps(result.to_dict()))
+        return
+    if quiet:
+        for entry_id in result.ids:
+            typer.echo(entry_id)
+        return
+    for line in result.tree_lines():
+        typer.echo(line)

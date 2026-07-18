@@ -51,6 +51,7 @@ _EXPECTED_TOOLS: frozenset[str] = frozenset(
         "shards_search",
         "shards_recent_activity",
         "shards_build_context",
+        "shards_graph",
     }
 )
 
@@ -132,7 +133,7 @@ def test_note_get_takes_typed_id_field_not_flag_string() -> None:
 @pytest.mark.parametrize(
     "name",
     ["shards_note_get", "shards_note_list", "shards_task_get", "shards_task_list",
-     "shards_search", "shards_recent_activity", "shards_build_context"],
+     "shards_search", "shards_recent_activity", "shards_build_context", "shards_graph"],
 )
 def test_read_tools_are_read_only(name: str) -> None:
     tool = _registered()[name]

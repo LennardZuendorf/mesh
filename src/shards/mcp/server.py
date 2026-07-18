@@ -11,7 +11,7 @@ takes ``id: str``, not ``--id <id>``. Each tool carries an MCP annotation
 declaring its effect, so an agent runtime can reason about safety before calling:
 
 * **read-only** (``readOnlyHint``) — ``note_get`` / ``note_list`` / ``task_get`` /
-  ``task_list`` / ``search`` / ``recent_activity`` / ``build_context``;
+  ``task_list`` / ``search`` / ``recent_activity`` / ``build_context`` / ``graph``;
 * **idempotent** (``idempotentHint``) — ``note_update`` / ``task_claim`` /
   ``task_finish`` / ``task_update`` (re-running lands the same state);
 * **write** (no special hint) — ``note_new`` / ``note_append`` / ``task_new``;
@@ -33,7 +33,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from shards.core.activity import recent_activity
-from shards.core.context import build_context
+from shards.core.context import build_context, graph_query
 from shards.core.notes import (
     NoteView,
     append_note,
@@ -205,6 +205,12 @@ def shards_build_context(seed_id: str, depth: int = 1) -> list[dict[str, Any]]:
     return build_context(config, seed_id, depth=depth)
 
 
+def shards_graph(seed_id: str, depth: int = 1) -> dict[str, Any]:
+    """Query what's connected to a seed id: ``{seed, nodes, edges}`` (BFS to depth)."""
+    config = load_config()
+    return graph_query(config, seed_id, depth=depth).to_dict()
+
+
 # --------------------------------------------------------------------------- #
 # Write tools (no special hint)                                               #
 # --------------------------------------------------------------------------- #
@@ -347,6 +353,7 @@ def _register() -> None:
     app.tool(shards_search, annotations=_READ_ONLY)
     app.tool(shards_recent_activity, annotations=_READ_ONLY)
     app.tool(shards_build_context, annotations=_READ_ONLY)
+    app.tool(shards_graph, annotations=_READ_ONLY)
     # Write (no special hint).
     app.tool(shards_note_new)
     app.tool(shards_note_append)

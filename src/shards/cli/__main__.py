@@ -60,6 +60,11 @@ _LEAVES: dict[str, tuple[str, str, str]] = {
         "build_context_command",
         "Expand the related graph around a seed id (BFS to --depth).",
     ),
+    "graph": (
+        "shards.cli.session",
+        "graph_command",
+        "Query what's connected to a seed id (tree, or JSON nodes+edges).",
+    ),
     "session-start": (
         "shards.cli.session",
         "session_start_command",
@@ -76,6 +81,7 @@ _ORDER: tuple[str, ...] = (
     "reindex",
     "recent-activity",
     "build-context",
+    "graph",
     "session-start",
 )
 
