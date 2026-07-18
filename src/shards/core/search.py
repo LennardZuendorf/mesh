@@ -34,7 +34,7 @@ from shards.index.fallback import search_fallback
 from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
 
-__all__ = ["hit_dict", "query_search"]
+__all__ = ["hit_dict", "query_search", "search_health"]
 
 
 def _daemon_up() -> bool:
@@ -94,6 +94,48 @@ def query_search(
         threshold=threshold,
         quiet=quiet,
     )
+
+
+def search_health(config: Config) -> dict[str, Any]:
+    """Report which recall path a query would take right now — never raises.
+
+    Silent degradation (root ``tech.md`` § Risks — "``indexed`` drift") means a
+    caller has no way to tell a hybrid ``indexed`` hit apart from a substring
+    fallback hit short of reading a stderr notice. This surfaces the individual
+    gates :func:`query_search` checks — ``hybrid_configured`` (``[search].hybrid``),
+    ``collection`` (``[search].collection``), ``daemon_up`` (the warm daemon
+    liveness ping), and ``indexed_binary_available`` (whether the ``indexed``
+    executable is even on ``PATH``, via :func:`~shards.index.indexed_client.indexed_available`)
+    — plus the resulting ``mode`` (``"indexed"`` only when every gate is open,
+    ``"fallback"`` otherwise) and a terse ``reason`` naming the first closed gate.
+    Every gate is a cheap check (config read, ping, ``PATH`` lookup) — this never
+    shells ``indexed`` itself, so it works whether or not the binary is installed.
+    """
+    hybrid_configured = config.search.hybrid
+    collection = config.search.collection
+    daemon_up = _daemon_up()
+    indexed_binary_available = indexed_client.indexed_available()
+
+    reason: str | None = None
+    if not hybrid_configured:
+        reason = "hybrid disabled ([search].hybrid = false)"
+    elif collection is None:
+        reason = "no collection configured ([search].collection unset)"
+    elif not daemon_up:
+        reason = "daemon down"
+    elif not indexed_binary_available:
+        reason = "indexed binary not found on PATH"
+
+    payload: dict[str, Any] = {
+        "mode": "indexed" if reason is None else "fallback",
+        "hybrid_configured": hybrid_configured,
+        "collection": collection,
+        "daemon_up": daemon_up,
+        "indexed_binary_available": indexed_binary_available,
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    return payload
 
 
 def _read_body(path: str) -> str:

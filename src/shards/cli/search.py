@@ -18,6 +18,12 @@ Output is JSON by design (search is a machine-first path): a list of hits shaped
 ``--meta-only`` drops the body/snippet; ``--full`` swaps the snippet for the
 complete Markdown body. Infrastructure notices go to stderr only, never into the
 JSON payload.
+
+``--health`` is a status check, not a recall path: it reports (JSON, via
+:func:`~shards.core.search.search_health`) whether hybrid ``indexed`` is
+actually reachable/in-use right now versus the substring fallback, so silent
+degradation stops being silent. It short-circuits before any query/tag-pull
+runs and never shells ``indexed`` itself, so it works with ``indexed`` absent.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import json
 
 import typer
 
-from shards.core.search import hit_dict, query_search
+from shards.core.search import hit_dict, query_search, search_health
 from shards.index.tagpull import tagpull
 from shards.schemas.config import load_config
 
@@ -59,10 +65,22 @@ def search_command(
     ),
     meta_only: bool = typer.Option(False, "--meta-only", help="Omit body/snippet from hits."),
     full: bool = typer.Option(False, "--full", help="Include the full Markdown body per hit."),
+    health: bool = typer.Option(
+        False,
+        "--health",
+        help="Report indexed reachability vs. substring fallback (JSON), then exit.",
+    ),
 ) -> None:
     """Search notes + tasks. ``--tags`` (no query) pulls by tag; a query scores by match."""
     config = load_config()
     quiet = bool(getattr(ctx.obj, "quiet", False))
+
+    if health:
+        # Status check, not a recall path: report the gates and exit before any
+        # query/tag-pull runs, regardless of what else was passed on the line.
+        typer.echo(json.dumps(search_health(config)))
+        return
+
     tag_list = list(tags) if tags else None
 
     if query is None:

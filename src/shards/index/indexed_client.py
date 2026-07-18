@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -171,6 +172,19 @@ def _hit_score(hit: dict[str, Any]) -> float | None:
 # --------------------------------------------------------------------------- #
 # Public API                                                                   #
 # --------------------------------------------------------------------------- #
+
+
+def indexed_available() -> bool:
+    """Whether the ``indexed`` executable is on ``PATH`` — never runs it.
+
+    A cheap, side-effect-free probe for :func:`~shards.core.search.search_health`:
+    knowing *for certain* that ``indexed`` works still requires actually shelling
+    a query (and eating that latency + a potential subprocess failure), which is
+    disproportionate for a status check. This answers the narrower, still useful
+    question — "is there even a binary to try?" — the gate that's silently true
+    or false whether or not ``[search].hybrid``/``.collection``/the daemon line up.
+    """
+    return shutil.which(_INDEXED_BIN) is not None
 
 
 def search(
@@ -304,6 +318,7 @@ def register_hook(config: Config, hooks: ChangeHooks) -> None:
 __all__ = [
     "full_rebuild",
     "incremental_update",
+    "indexed_available",
     "register_hook",
     "reindex",
     "search",
