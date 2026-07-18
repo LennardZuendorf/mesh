@@ -55,7 +55,13 @@ def test_note_type_enum_includes_project() -> None:
 
 def test_note_model_validates_project_type() -> None:
     note = Note.model_validate(
-        {"id": "n-proj", "type": "project", "title": "Q3 Launch", "created": _now(), "updated": _now()}
+        {
+            "id": "n-proj",
+            "type": "project",
+            "title": "Q3 Launch",
+            "created": _now(),
+            "updated": _now(),
+        }
     )
     assert note.type == "project"
 

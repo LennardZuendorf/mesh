@@ -117,7 +117,13 @@ def test_task_with_project_roundtrips_value() -> None:
 def test_task_project_is_soft_link_any_string_accepted() -> None:
     """No strict validation: any string is accepted (soft link, like a wikilink)."""
     task = Task.model_validate(
-        {"id": "t-1", "title": "x", "created": _now(), "updated": _now(), "project": "anything-goes"}
+        {
+            "id": "t-1",
+            "title": "x",
+            "created": _now(),
+            "updated": _now(),
+            "project": "anything-goes",
+        }
     )
     assert task.project == "anything-goes"
 

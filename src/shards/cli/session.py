@@ -273,10 +273,6 @@ def project_command(
             typer.echo(str(task.get("id", "")))
         return
     project = result.project
-    typer.echo(
-        f"{project.get('id', '')}\t{project.get('type', '')}\t{project.get('title', '')}"
-    )
+    typer.echo(f"{project.get('id', '')}\t{project.get('type', '')}\t{project.get('title', '')}")
     for task in result.tasks:
-        typer.echo(
-            f"  {task.get('id', '')}\t{task.get('status', '')}\t{task.get('title', '')}"
-        )
+        typer.echo(f"  {task.get('id', '')}\t{task.get('status', '')}\t{task.get('title', '')}")

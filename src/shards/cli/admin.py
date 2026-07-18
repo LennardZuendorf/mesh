@@ -250,7 +250,9 @@ def daemon_stop_command(ctx: typer.Context) -> None:
     terminate_process(running)
     _remove(default_socket_path())
     _remove(pid_path)
-    _emit(ctx, {"running": False, "stopped": True, "pid": running}, f"daemon stopped (pid {running})")
+    _emit(
+        ctx, {"running": False, "stopped": True, "pid": running}, f"daemon stopped (pid {running})"
+    )
 
 
 @daemon_app.command("status")

@@ -368,9 +368,7 @@ def finish_task(config: Config, task_id: str, outcome: str | None = None) -> Tas
     :class:`TaskNotFoundError` when the id resolves to no file. See
     :func:`_terminate_task` for the shared lock/write/move mechanics.
     """
-    return _terminate_task(
-        config, task_id, heading=_OUTCOME_HEADING, status="done", text=outcome
-    )
+    return _terminate_task(config, task_id, heading=_OUTCOME_HEADING, status="done", text=outcome)
 
 
 def cancel_task(config: Config, task_id: str, reason: str | None = None) -> Task:

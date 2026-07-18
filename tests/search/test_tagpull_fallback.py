@@ -267,8 +267,12 @@ def test_fallback_body_substring_score(cfg: Config, vault: Path) -> None:
 def test_fallback_sort_score_then_updated(cfg: Config, vault: Path) -> None:
     # Two title-substring hits (0.8) — newer 'updated' wins the tie; one exact (1.0) leads.
     _seed(vault, "notes", entry_id="n-exact", title="Report", updated=_NOW - timedelta(days=9))
-    _seed(vault, "notes", entry_id="n-old", title="Old Report Draft", updated=_NOW - timedelta(days=5))
-    _seed(vault, "notes", entry_id="n-new", title="New Report Draft", updated=_NOW - timedelta(days=1))
+    _seed(
+        vault, "notes", entry_id="n-old", title="Old Report Draft", updated=_NOW - timedelta(days=5)
+    )
+    _seed(
+        vault, "notes", entry_id="n-new", title="New Report Draft", updated=_NOW - timedelta(days=1)
+    )
     results = search_fallback(cfg, "Report", threshold=0.1)
     assert [r.id for r in results] == ["n-exact", "n-new", "n-old"]
 
@@ -291,18 +295,36 @@ def test_fallback_foreign_file_id_none(cfg: Config, vault: Path) -> None:
 
 def test_fallback_type_and_owner_and_status_filters(cfg: Config, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-note", title="Shared Report", owner="me")
-    _seed(vault, "tasks/open", entry_id="t-mine", entry_type="task", status="open",
-          title="Shared Report", owner="me")
-    _seed(vault, "tasks/done", entry_id="t-done", entry_type="task", status="done",
-          title="Shared Report", owner="me")
-    assert {r.id for r in search_fallback(cfg, "Shared Report", type_filter="task", threshold=0.1)} == {
+    _seed(
+        vault,
+        "tasks/open",
+        entry_id="t-mine",
+        entry_type="task",
+        status="open",
+        title="Shared Report",
+        owner="me",
+    )
+    _seed(
+        vault,
+        "tasks/done",
+        entry_id="t-done",
+        entry_type="task",
+        status="done",
+        title="Shared Report",
+        owner="me",
+    )
+    assert {
+        r.id for r in search_fallback(cfg, "Shared Report", type_filter="task", threshold=0.1)
+    } == {
         "t-mine",
         "t-done",
     }
     assert {r.id for r in search_fallback(cfg, "Shared Report", status="open", threshold=0.1)} == {
         "t-mine",
     }
-    assert {r.id for r in search_fallback(cfg, "Shared Report", owner="nobody", threshold=0.1)} == set()
+    assert {
+        r.id for r in search_fallback(cfg, "Shared Report", owner="nobody", threshold=0.1)
+    } == set()
 
 
 def test_fallback_tags_and_filter(cfg: Config, vault: Path) -> None:

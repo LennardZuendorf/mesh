@@ -235,9 +235,7 @@ def shards_note_new(
 ) -> dict[str, Any]:
     """Create a note (routed by type) and return its frontmatter."""
     config = load_config()
-    note = create_note(
-        config, title, note_type=note_type, tags=tags, owner=owner, body=body
-    )
+    note = create_note(config, title, note_type=note_type, tags=tags, owner=owner, body=body)
     return note.model_dump(mode="json")
 
 
