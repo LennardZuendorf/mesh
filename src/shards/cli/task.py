@@ -85,11 +85,11 @@ def new_command(
             blocks=_csv(blocks),
             blocked_by=_csv(blocked_by),
         )
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from None
     except ValidationError:
         typer.echo("invalid task", err=True)
+        raise typer.Exit(2) from None
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(2) from None
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="created", fields={"status": task.status}
