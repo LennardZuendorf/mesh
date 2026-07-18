@@ -1,4 +1,4 @@
-"""daemon/2 — watcher + hook: warm index, folder reconcile, ``on_vault_change``.
+"""daemon/2 — watcher + hook: warm index, folder reconcile, change hooks.
 
 Coverage maps 1:1 to the unit's acceptance criteria:
 
@@ -10,9 +10,9 @@ Coverage maps 1:1 to the unit's acceptance criteria:
   the on-disk ``updated`` field is **not** bumped (byte-identical move), which is
   what distinguishes a watcher move from a user edit.
 * **Handler** — the four watchdog event kinds (created/modified/moved/deleted)
-  drive reparse / evict / reconcile, and every cycle ends by calling
-  ``on_vault_change(final_path)`` which fans out to a module-level hook registry
-  (so search's ``indexed_client`` can append without editing ``watch.py``).
+  drive reparse / evict / reconcile, and every cycle ends by firing the watcher's
+  ``ChangeHooks`` registry (so search's ``indexed_client`` can subscribe without
+  editing the watcher).
 * **activity.recent** — served from the warm in-process index over the real
   socket (JSON-serializable), and falling back to an mtime-sorted dir scan when
   the daemon is down.
@@ -49,16 +49,9 @@ from watchdog.events import (
 
 from shards.daemon.client import DaemonClient, DaemonError
 from shards.daemon.server import DaemonServer
-from shards.index.watch import (
-    DEFAULT_RECENT_LIMIT,
-    VaultIndex,
-    Watcher,
-    clear_change_hooks,
-    on_vault_change,
-    reconcile_path,
-    register_change_hook,
-    scan_recent,
-)
+from shards.index.reconcile import reconcile_path
+from shards.index.warm import DEFAULT_RECENT_LIMIT, VaultIndex, scan_recent
+from shards.index.watcher import ChangeHooks, Watcher
 from shards.schemas.config import Config, load_config
 from shards.storage.sandbox import safe_resolve
 
@@ -70,16 +63,6 @@ from shards.storage.sandbox import safe_resolve
 @pytest.fixture
 def cfg(shards_config: Path) -> Config:
     return load_config()
-
-
-@pytest.fixture(autouse=True)
-def _reset_change_hooks() -> Iterator[None]:
-    """The change-hook registry is module-level; isolate every test from leaks."""
-    clear_change_hooks()
-    try:
-        yield
-    finally:
-        clear_change_hooks()
 
 
 @pytest.fixture
@@ -351,7 +334,7 @@ def test_reconcile_returns_unmoved_when_source_races_away(
     def _vanish(_src: object, _dst: object) -> None:
         raise FileNotFoundError
 
-    monkeypatch.setattr("shards.index.watch.os.replace", _vanish)
+    monkeypatch.setattr("shards.index.reconcile.os.replace", _vanish)
     result = reconcile_path(cfg, path)  # must not raise
     # Left in place (move failed); the resolved original path is returned so a
     # later event can reconcile it.
@@ -419,45 +402,59 @@ def test_event_handler_routes_created(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# on_vault_change — module-level, multi-consumer hook registry                 #
+# ChangeHooks — the watcher's owned, multi-consumer hook registry              #
 # --------------------------------------------------------------------------- #
 
 
-def test_on_vault_change_fires_registered_hook(cfg: Config, vault: Path) -> None:
+def test_watcher_fires_registered_hook(cfg: Config, vault: Path) -> None:
     seen: list[Path] = []
-    register_change_hook(seen.append)
+    watcher = Watcher(cfg, VaultIndex())
+    watcher.hooks.register(seen.append)
     path = _write_note(vault, note_id="n-hook", title="Hook")
-    Watcher(cfg, VaultIndex()).handle_event(FileModifiedEvent(str(path)))
+    watcher.handle_event(FileModifiedEvent(str(path)))
     assert seen and seen[-1].resolve() == path.resolve()
 
 
 def test_multiple_hooks_all_fire(cfg: Config, vault: Path) -> None:
     a: list[Path] = []
     b: list[Path] = []
-    register_change_hook(a.append)
-    register_change_hook(b.append)
+    watcher = Watcher(cfg, VaultIndex())
+    watcher.hooks.register(a.append)
+    watcher.hooks.register(b.append)
     path = _write_note(vault, note_id="n-multi", title="Multi")
-    Watcher(cfg, VaultIndex()).handle_event(FileCreatedEvent(str(path)))
+    watcher.handle_event(FileCreatedEvent(str(path)))
     assert a and b
 
 
-def test_change_hook_registry_is_module_level(tmp_path: Path) -> None:
-    """A consumer appends via register_change_hook, without touching watch.py."""
+def test_change_hooks_fire_all_registered(tmp_path: Path) -> None:
+    """A consumer subscribes via ``ChangeHooks.register`` and ``fire`` fans out."""
     seen: list[Path] = []
-    register_change_hook(seen.append)
+    hooks = ChangeHooks()
+    hooks.register(seen.append)
     target = tmp_path / "anything.md"
-    on_vault_change(target)
+    hooks.fire(target)
     assert seen == [target]
+
+
+def test_change_hooks_clear_drops_subscribers(tmp_path: Path) -> None:
+    """``clear`` empties the registry so a later ``fire`` reaches no one."""
+    seen: list[Path] = []
+    hooks = ChangeHooks()
+    hooks.register(seen.append)
+    hooks.clear()
+    hooks.fire(tmp_path / "anything.md")
+    assert seen == []
 
 
 def test_hook_fires_on_delete(cfg: Config, vault: Path) -> None:
     seen: list[Path] = []
-    register_change_hook(seen.append)
     path = _write_note(vault, note_id="n-dh", title="DelHook")
     index = VaultIndex()
     index.reparse(path)
     path.unlink()
-    Watcher(cfg, index).handle_event(FileDeletedEvent(str(path)))
+    watcher = Watcher(cfg, index)
+    watcher.hooks.register(seen.append)
+    watcher.handle_event(FileDeletedEvent(str(path)))
     assert seen and seen[-1].resolve() == path.resolve()
 
 
@@ -610,28 +607,28 @@ def test_real_observer_picks_up_new_file(cfg: Config, vault: Path, _run: int) ->
 # --------------------------------------------------------------------------- #
 
 
-def test_daemon_start_clears_leftover_change_hooks(
+def test_daemon_owns_change_hooks_and_stop_clears(
     cfg: Config, vault: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A hook left over from a crashed prior run must not stack: ``start`` clears the
-    registry before registering its own, so each vault change re-indexes exactly once
-    — and ``stop`` drops the hook so it can't outlive the index it fed."""
+    """The daemon owns its ``ChangeHooks``: a fresh registry per start can't stack a
+    stale hook, so each vault change re-indexes exactly once — and ``stop`` clears the
+    registry so it can't outlive the index it fed."""
     calls: list[Path] = []
     # The daemon's own hook is ``lambda p: incremental_update(config, p)``; patch the
     # target it resolves so a fired hook is observable.
     monkeypatch.setattr(
         "shards.daemon.server.incremental_update", lambda config, path: calls.append(path)
     )
-    # Simulate a leftover hook a clean stop never removed (e.g. a crashed run).
-    register_change_hook(lambda p: calls.append(p))
 
-    with running_daemon(socket_path, config=cfg):
-        on_vault_change(Path("x.md"))
-        assert len(calls) == 1  # leftover cleared → only the daemon's hook fired
+    with running_daemon(socket_path, config=cfg) as server:
+        hooks = server._hooks
+        assert hooks is not None
+        hooks.fire(Path("x.md"))
+        assert len(calls) == 1  # only the daemon's own hook fired
 
     calls.clear()
-    on_vault_change(Path("y.md"))
-    assert calls == []  # stop() cleared the hook — nothing fires after shutdown
+    hooks.fire(Path("y.md"))
+    assert calls == []  # stop() cleared the registry — nothing fires after shutdown
 
 
 def test_daemon_client_is_up_reflects_liveness(
@@ -643,10 +640,15 @@ def test_daemon_client_is_up_reflects_liveness(
         assert DaemonClient(socket_path=socket_path).is_up() is True
 
 
-def test_watch_module_does_not_eagerly_bind_observer_backend() -> None:
-    """The heavy platform observer backend is imported lazily inside ``Watcher.start``,
-    so a daemon-less CLI importing ``watch`` (for ``scan_recent``) never binds it."""
-    import shards.index.watch as watch_mod
+def test_watcher_module_does_not_eagerly_bind_observer_backend() -> None:
+    """The heavy platform observer backend is imported lazily inside ``Watcher.start``.
 
-    assert not hasattr(watch_mod, "Observer")
-    assert not hasattr(watch_mod, "BaseObserver")
+    The warm index (which a daemon-less CLI imports for ``scan_recent``) never touches
+    ``watchdog`` at all, and the watcher module defers the platform backend, so neither
+    binds ``Observer`` at import time."""
+    import shards.index.warm as warm_mod
+    import shards.index.watcher as watcher_mod
+
+    assert not hasattr(warm_mod, "Observer")
+    assert not hasattr(watcher_mod, "Observer")
+    assert not hasattr(watcher_mod, "BaseObserver")

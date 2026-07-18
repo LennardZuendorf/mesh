@@ -32,7 +32,6 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from shards.cli.search import _hit_dict, _query_search
 from shards.core.activity import recent_activity
 from shards.core.context import build_context
 from shards.core.notes import (
@@ -43,6 +42,7 @@ from shards.core.notes import (
     list_notes,
     update_note,
 )
+from shards.core.search import hit_dict, query_search
 from shards.core.tasks import (
     TaskView,
     cancel_task,
@@ -54,7 +54,7 @@ from shards.core.tasks import (
     update_task,
 )
 from shards.index.tagpull import tagpull
-from shards.index.watch import DEFAULT_RECENT_LIMIT
+from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.schemas.config import load_config
 from shards.schemas.note import Note
 
@@ -174,7 +174,7 @@ def shards_search(
         )
     else:
         effective_threshold = threshold if threshold is not None else config.search.threshold
-        results = _query_search(
+        results = query_search(
             config,
             query,
             type_filter=type_filter,
@@ -185,7 +185,7 @@ def shards_search(
             threshold=effective_threshold,
             quiet=True,
         )
-    return [_hit_dict(result, meta_only=meta_only, full=full) for result in results]
+    return [hit_dict(result, meta_only=meta_only, full=full) for result in results]
 
 
 def shards_recent_activity(

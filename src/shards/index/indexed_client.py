@@ -23,9 +23,9 @@ shape. Three responsibilities, all daemon-optional:
   thread and let failures propagate. ``reindex`` is the delegate ``shards reindex``
   calls.
 
-* **:func:`register_hook`** — subscribe :func:`incremental_update` to the daemon's
-  watcher change-hook registry (:func:`shards.index.watch.register_change_hook`) so a
-  vault edit re-indexes just that file. The mechanism lives here; the daemon wires
+* **:func:`register_hook`** — subscribe :func:`incremental_update` to a daemon-owned
+  :class:`~shards.index.watcher.ChangeHooks` registry so a vault edit re-indexes
+  just that file. The mechanism lives here; the daemon owns the registry and wires
   it up.
 
 The subprocess calls live behind the small ``_run_indexed_*`` seams so the real
@@ -43,7 +43,7 @@ import functools
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from shards.index.fallback import search_fallback
 from shards.index.tagpull import (
@@ -53,10 +53,14 @@ from shards.index.tagpull import (
     to_result,
     updated_key,
 )
-from shards.index.watch import register_change_hook
 from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
 from shards.storage.sandbox import safe_resolve
+
+if TYPE_CHECKING:
+    # Typing-only import: keep the watcher (and its ``watchdog`` dependency) off
+    # this module's runtime import graph so the CLI search path stays cheap.
+    from shards.index.watcher import ChangeHooks
 
 _INDEXED_BIN = "indexed"
 _DEFAULT_LIMIT = 10
@@ -288,13 +292,13 @@ def reindex(config: Config) -> None:
     full_rebuild(config)
 
 
-def register_hook(config: Config) -> None:
-    """Subscribe :func:`incremental_update` to the watcher change-hook registry."""
+def register_hook(config: Config, hooks: ChangeHooks) -> None:
+    """Subscribe :func:`incremental_update` to a daemon-owned change-hook registry."""
 
     def _hook(path: Path) -> None:
         incremental_update(config, path)
 
-    register_change_hook(_hook)
+    hooks.register(_hook)
 
 
 __all__ = [

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -36,7 +35,7 @@ from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
 from shards.index import indexed_client
-from shards.index.watch import clear_change_hooks, on_vault_change
+from shards.index.watcher import ChangeHooks
 from shards.schemas.config import Config, load_config
 from shards.schemas.search import SearchResult
 
@@ -52,14 +51,6 @@ _FALLBACK_NOTICE = "search: using substring fallback (indexed unavailable)"
 @pytest.fixture
 def cfg(shards_config: Path) -> Config:
     return load_config()
-
-
-@pytest.fixture(autouse=True)
-def _clean_hooks() -> Iterator[None]:
-    """Keep the module-level watcher hook registry from leaking across tests."""
-    clear_change_hooks()
-    yield
-    clear_change_hooks()
 
 
 def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
@@ -496,9 +487,10 @@ def test_register_hook_drives_incremental_update(
         calls.append((config, path))
 
     monkeypatch.setattr(indexed_client, "incremental_update", _record)
-    indexed_client.register_hook(cfg)
+    hooks = ChangeHooks()
+    indexed_client.register_hook(cfg, hooks)
     changed = vault / "notes" / "n-x.md"
-    on_vault_change(changed)  # the watcher fans out to registered hooks
+    hooks.fire(changed)  # the watcher fans out to registered hooks
     assert calls == [(cfg, changed)]
 
 
@@ -511,7 +503,7 @@ def test_cli_hybrid_uses_indexed_when_daemon_up(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hit = _seed(vault, "notes", entry_id="n-hit", title="Hybrid Note")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
     _patch_search(
         monkeypatch, _ndjson({"path": str(hit), "score": 0.91, "snippet": "indexed snip"})
     )
@@ -528,7 +520,7 @@ def test_cli_hybrid_falls_back_on_called_process_error(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
 
     def _raise(*_a: object, **_k: object) -> str:
         raise subprocess.CalledProcessError(1, ["indexed"])
@@ -546,7 +538,7 @@ def test_cli_hybrid_falls_back_on_missing_binary(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
 
     def _raise(*_a: object, **_k: object) -> str:
         raise FileNotFoundError("indexed")
@@ -561,7 +553,7 @@ def test_cli_substring_when_daemon_down(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: False)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: False)
 
     def _boom(*_a: object, **_k: object) -> str:
         raise AssertionError("indexed must not be shelled when the daemon is down")
@@ -585,7 +577,7 @@ def test_cli_hybrid_honours_status_filter(
     done_task = _seed(
         vault, "tasks/done", entry_id="t-done", entry_type="task", status="done", title="Shared"
     )
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
     _patch_search(
         monkeypatch,
         _ndjson(

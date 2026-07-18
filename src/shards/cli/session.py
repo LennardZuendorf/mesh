@@ -32,23 +32,21 @@ agent session.
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from typing import Any
 
 import typer
 
-from shards.core.activity import recent_activity
-from shards.core.context import SeedNotFoundError, build_context
+from shards.core.lenses import (
+    SeedNotFoundError,
+    build_context,
+    recent_activity,
+    session_start_entries,
+)
 from shards.core.tasks import list_tasks
 from shards.daemon.client import DaemonClient
-from shards.index.watch import DEFAULT_RECENT_LIMIT
+from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.schemas.config import load_config
 
 _DAEMON_DOWN_NOTICE = "recent-activity: daemon down, scanning the folder directly"
-
-# session-start only surfaces the caller's *live* queue — the non-terminal
-# statuses. Terminal (done/cancelled) tasks are dropped from the task section.
-_OPEN_STATUSES: frozenset[str] = frozenset({"open", "claimed"})
 _SESSION_SINCE = "7d"
 
 
@@ -105,27 +103,6 @@ def recent_activity_command(
         )
 
 
-def _updated_key(entry: dict[str, Any]) -> float:
-    """Descending-sort key for the activity remainder: ``updated`` then ``mtime``.
-
-    Remaining entries come from :func:`recent_activity`, whose rows carry
-    ``mtime`` (the on-disk ``updated`` proxy) rather than a parsed ``updated``
-    field — so ``mtime`` is the effective sort. A parsed ``updated`` ISO string
-    is honoured first for robustness; a missing/unparseable value → ``0.0``
-    (sorts oldest).
-    """
-    updated = entry.get("updated")
-    if isinstance(updated, str):
-        try:
-            return datetime.fromisoformat(updated.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            pass
-    mtime = entry.get("mtime")
-    if isinstance(mtime, (int, float)):
-        return float(mtime)
-    return 0.0
-
-
 def session_start_command(
     ctx: typer.Context,
     meta_only: bool = typer.Option(
@@ -153,29 +130,14 @@ def session_start_command(
     quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
 
     # Source A — my live queue: every open/claimed task I own or have claimed.
-    task_views = [
-        view
-        for view in list_tasks(config, mine=True, limit=None)
-        if view.task.status in _OPEN_STATUSES
-    ]
-    task_ids = {view.task.id for view in task_views}
-    task_entries: list[dict[str, Any]] = []
-    for view in task_views:
-        entry = view.task.model_dump(mode="json")
-        entry["path"] = str(view.path)
-        if not meta_only:
-            entry["body"] = view.body
-        task_entries.append(entry)
-
-    # Source B — my recent changes. Dedup is by *id* (not type): a task already
-    # in the queue above is dropped here, so it is listed exactly once.
+    task_views = list_tasks(config, mine=True, limit=None)
+    # Source B — my recent changes (dedup by id happens in the compose step below).
     activity = recent_activity(
         config, since=_SESSION_SINCE, owner=None, mine=True, limit=DEFAULT_RECENT_LIMIT
     )
-    remaining = [entry for entry in activity if entry.get("id") not in task_ids]
-    remaining.sort(key=_updated_key, reverse=True)
-
-    entries = task_entries + remaining
+    # Compose the warm-start payload: open/claimed tasks first (deduped by id),
+    # then the remaining activity newest-first.
+    entries = session_start_entries(task_views, activity, meta_only=meta_only)
 
     if json_out:
         typer.echo(json.dumps(entries))

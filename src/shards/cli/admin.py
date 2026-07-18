@@ -44,7 +44,7 @@ from shards.core.notes import list_notes
 from shards.core.tasks import list_tasks
 from shards.core.wikilinks import find_dangling
 from shards.daemon.client import default_socket_path
-from shards.index.watch import scan_recent
+from shards.index.warm import scan_recent
 from shards.schemas.config import Config, load_config
 from shards.storage.files import atomic_write
 

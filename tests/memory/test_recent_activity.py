@@ -6,7 +6,7 @@ Acceptance coverage:
   :meth:`DaemonClient.activity_recent` (mocked here) and passes its entries
   through untouched (no filter → no frontmatter re-read).
 * **Daemon-down fallback** — with no daemon reachable, the same call degrades to
-  :func:`shards.index.watch.scan_recent` (asserted both behaviourally over a seeded
+  :func:`shards.index.warm.scan_recent` (asserted both behaviourally over a seeded
   vault and by spying on the fallback seam).
 * **``--since`` window** — applied as an *mtime* cutoff on the returned entries;
   an unparseable value raises ``ValueError`` (mapped to CLI exit 2).
@@ -37,7 +37,7 @@ import shards.daemon.client as daemon_client
 from shards.cli.__main__ import app
 from shards.core.activity import recent_activity
 from shards.daemon.client import DaemonClient, DaemonError
-from shards.index.watch import DEFAULT_RECENT_LIMIT
+from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.schemas.config import Config, load_config
 from shards.storage.files import note_folder, task_folder
 
@@ -186,7 +186,7 @@ def test_recent_activity_scans_when_daemon_down(cfg: Config, vault: Path) -> Non
 def test_recent_activity_fallback_is_scan_recent(
     cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The daemon-down path routes through ``shards.index.watch.scan_recent``."""
+    """The daemon-down path routes through ``shards.index.warm.scan_recent``."""
     sentinel = [{"id": "n-z", "type": "note", "title": "Z", "path": "/z.md", "mtime": _NOW}]
     seen: dict[str, object] = {}
 

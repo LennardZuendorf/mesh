@@ -9,7 +9,7 @@ a gate.
 
 The delegation is deliberately thin: it calls
 :meth:`shards.daemon.client.DaemonClient.activity_recent`, whose own fallback
-contract already routes to :func:`shards.index.watch.scan_recent` on a socket-down
+contract already routes to :func:`shards.index.warm.scan_recent` on a socket-down
 error. So this module inherits the daemon-up/daemon-down behaviour for free and
 never speaks to the socket itself.
 
@@ -29,7 +29,7 @@ from typing import Any
 
 from shards.core.notes import _parse_since
 from shards.daemon.client import DaemonClient, DaemonError
-from shards.index.watch import scan_recent
+from shards.index.warm import scan_recent
 from shards.schemas.config import Config
 from shards.storage.files import read_post
 
