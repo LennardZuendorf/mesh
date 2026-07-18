@@ -4,7 +4,7 @@
 primitive, shared by the ``shards build-context`` CLI command and the
 ``shards_build_context`` MCP tool. :func:`graph_query` (cli-toolset-rework/3)
 promotes that same traversal to a first-class "what's connected to X" query,
-returning a :class:`GraphResult` machine JSON and a readable tree are both
+returning a :class:`GraphResult` that machine JSON and a readable tree are both
 derived from. Starting at a seed id, both walk the ``related`` frontmatter
 lists breadth-first, expanding one hop at each level until reaching ``depth``
 hops from the seed (``depth=1`` = the seed plus its direct ``related`` entries;
