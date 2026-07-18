@@ -94,7 +94,7 @@ uv run shards --help               # CLI help
 uv run shards daemon start         # Start the local daemon
 ```
 
-> Phase 1–2 is **delivered** — all five features implemented and tested (578 tests, ty clean,
+> Phase 1–2 is **delivered** — all five features implemented and tested (678 tests, ty clean,
 > ruff clean). Phase 3 (tasks-graph) is deferred; the commands above are live.
 
 ### Git commit standards

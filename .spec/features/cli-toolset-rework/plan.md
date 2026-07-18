@@ -3,32 +3,34 @@ type: feature-plan
 feature: cli-toolset-rework
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-07-17
+updated: 2026-07-18
 ---
 
 # Feature: CLI Toolset Rework — Implementation Plan
 
-Scoping only on this branch — no `src/` changes yet. Five units: internal tidying, the
-performance push, the two additive capabilities, the gaps punch list, and the deferred
-task-graph design — sequenced so the additive capabilities and gaps build on tidied ground,
-with the task graph gated last.
+Six units: internal tidying, the performance push, the two additive capabilities, the gaps
+punch list, and the deferred task-graph design — sequenced so the additive capabilities and gaps
+build on tidied ground, with the task graph gated last. Units 1–5 are **shipped** on this branch
+(implemented, reviewed, end-to-end verified — see § Progress); unit 6 stays deferred by product
+decision.
 
 **Parent:** [../../plan.md](../../plan.md)
 **Requirements:** [product.md](product.md)
 **Architecture:** [tech.md](tech.md)
 
-**Feature gate:** Independent of the deferred root `tasks-graph` row except for unit 5 below,
-which **is** that row's design — root `plan.md` should treat `tasks-graph` as gated on
-`cli-toolset-rework/1`–`4` DONE, not on any other feature.
+**Feature gate:** Independent of the deferred root `tasks-graph` row except for unit 6 below,
+which **is** that row's design — root `plan.md` treats `tasks-graph` as gated on
+`cli-toolset-rework/1`–`5` DONE, not on any other feature. That gate is now satisfied (see §
+Progress); unit 6 stays deferred by product decision, not by the gate.
 
 ---
 
 ## Requirements Trace
 
-| ID | Requirement | Units |
-|---|---|---|
-| R1 | [Graph-query output](product.md#requirement-graph-query-output) | cli-toolset-rework/3 |
-| R2 | [Projects as a supported convention](product.md#requirement-projects-as-a-supported-convention) | cli-toolset-rework/4 |
+| ID | Requirement | Units | Status |
+|---|---|---|---|
+| R1 | [Graph-query output](product.md#requirement-graph-query-output) | cli-toolset-rework/3 | ✅ DONE |
+| R2 | [Projects as a supported convention](product.md#requirement-projects-as-a-supported-convention) | cli-toolset-rework/4 | ✅ DONE |
 
 ---
 
@@ -247,12 +249,17 @@ src/shards/storage/files.py     # soft-delete evaluation (may land as a follow-u
 
 ## Progress
 
-| Unit | Status |
-|---|---|
-| cli-toolset-rework/1 | NOT STARTED |
-| cli-toolset-rework/2 | NOT STARTED |
-| cli-toolset-rework/3 | NOT STARTED |
-| cli-toolset-rework/4 | NOT STARTED |
-| cli-toolset-rework/5 | NOT STARTED |
-| cli-toolset-rework/6 | NOT STARTED (gated, deferred) |
+All of 1–5 are implemented, reviewed, and end-to-end verified on branch
+`claude/cli-toolset-rework-xys6hl` — full suite green (678 tests), `ty check src/` clean, `ruff
+check`/`ruff format --check` clean. Unit 6 stays deferred by product decision (§ above), not by
+any unmet dependency.
+
+| Unit | Status | Evidence |
+|---|---|---|
+| cli-toolset-rework/1 | ✅ DONE | Internal tidying landed — `5b172bc`; `core/search.py`, `index/{warm,watcher,reconcile}.py`, daemon-owned `ChangeHooks`, `core/lenses.py` all on this branch. |
+| cli-toolset-rework/2 | ✅ DONE | Performance push landed — `c9fc813`, `e7d47ba`, `af1b3f6`, `a130cb8`. Round-trip-fidelity spike **passed**; msgspec swap shipped (not reverted). CI startup guard live (`tests/test_startup_guard.py`, `.github/workflows/ci.yml`). |
+| cli-toolset-rework/3 | ✅ DONE | Graph-query landed — `91184c2`, `ca6d0c4`, `9bcd27b`. `shards graph <id>` CLI (`cli/session.py`) + `shards_graph` MCP tool (`mcp/server.py`, read-only), JSON + tree from one BFS. |
+| cli-toolset-rework/4 | ✅ DONE | Projects convention landed — `f2ba754`, `2d1f0a4`. `type: project` note → `notes/projects/`; optional `project` task field; `--project` on `task new`/`update`/`list`; `shards project <id>` CLI + `shards_project` MCP tool. No new verb. |
+| cli-toolset-rework/5 | ✅ DONE | Gaps closed — `e93d375`, `c546183`, `d2056ab`, `992db81`. `.github/workflows/ci.yml` (uv · ruff · ruff format · ty · pytest · startup guard); `indexed` NDJSON contract pinned (msgspec schema, `index/indexed_client.py`); `search --health`; owner-identity trust-boundary + delete-stance doc in `AGENTS.md` § 6. Soft-delete stays evaluated-and-deferred (see `AGENTS.md` § 6). |
+| cli-toolset-rework/6 | NOT STARTED (gated, deferred) | Dependency gate (1–5 DONE) is now satisfied; build stays **deferred by product decision** — design final in tech.md § Workstream D, not scheduled. |
 

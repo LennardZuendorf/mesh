@@ -3,7 +3,7 @@ type: feature-product
 feature: cli-toolset-rework
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-07-17
+updated: 2026-07-18
 ---
 
 # Feature: CLI Toolset Rework — Product

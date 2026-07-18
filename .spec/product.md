@@ -5,7 +5,7 @@ children:
   - tech.md
   - design.md
   - plan.md
-updated: 2026-07-17
+updated: 2026-07-18
 ---
 
 # Shards — Product
@@ -20,7 +20,7 @@ A mesh for multi-agent collaboration over one Tolaria Markdown folder. Three ver
 
 ## Requirements
 
-1. **Three verbs.** `note`, `task`, `search` cover capture, coordination, recall. Phase 2 adjuncts (signed off): `recent-activity`, `build-context`, `session-start` — read-only lenses, not a fourth verb. Admin (`daemon`, `status`, `reindex`) is human-only. Scoped, not yet signed off: a graph-query lens and **projects** as a convention (note type + task field + scoped view) — explicitly not a fourth verb. → [features/cli-toolset-rework/](features/cli-toolset-rework/product.md)
+1. **Three verbs.** `note`, `task`, `search` cover capture, coordination, recall. Read-only lenses, not a fourth verb — all shipped: `recent-activity`, `build-context`, `session-start` (Phase 2); `graph` (`shards graph <id>` / `shards_graph`) and **projects** as a convention (`type: project` note, `project` task field, `shards project <id>` / `shards_project` scoped view), shipped in `cli-toolset-rework` units 1–5. Admin (`daemon`, `status`, `reindex`) is human-only. → [features/cli-toolset-rework/](features/cli-toolset-rework/product.md), [tech.md](tech.md) § Implemented surfaces
 2. **Markdown is truth.** Schema-valid frontmatter; Shards owns the interface, Tolaria owns the vault/Git.
 3. **Tasks are handoff.** Model: `owner`, `claimed_by`, `claim`/`finish`/`cancel`, later `blocks`/`blocked_by`. **v1:** claim/finish/cancel/list; graph edges recordable but inert until Phase 3.
 4. **Hybrid recall via `indexed`.** Ranked search over `notes/` + `tasks/`; JSON with `path`; substring fallback when `indexed`/daemon unavailable or `[search].hybrid=false`.

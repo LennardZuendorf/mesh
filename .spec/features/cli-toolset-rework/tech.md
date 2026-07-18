@@ -3,7 +3,7 @@ type: feature-tech
 feature: cli-toolset-rework
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-07-17
+updated: 2026-07-18
 ---
 
 # Feature: CLI Toolset Rework — Architecture
@@ -39,7 +39,7 @@ opportunistically.
 No rewrite; runtime stays Python 3.11+, optimized (Workstream B below). Parallel performance
 research measured Rust's cold start at ~2–10ms vs Python's measured ~260–300ms today — a real
 gap, but below human-perceptibility for how shards is actually invoked (agent tool calls + human
-CLI, not a hot loop). Cost side: re-implementing ~5.4k LOC + 591 tests, losing
+CLI, not a hot loop). Cost side: re-implementing ~5.4k LOC + 678 tests, losing
 `pydantic`/`FastMCP`/`python-frontmatter`, and betting the MCP surface on `rmcp` (the official
 Rust MCP SDK, **pre-1.0**). Not worth it.
 
@@ -47,15 +47,16 @@ Rust MCP SDK, **pre-1.0**). Not worth it.
 daemon NDJSON socket protocol, if a genuine high-frequency/hot-loop use ever emerges. → root
 `tech.md` § Risks.
 
-### pydantic v2 → msgspec — ADOPTED
+### pydantic v2 → msgspec — ADOPTED, SHIPPED
 
-**GATING RISK (read first):** root `tech.md` Invariant 3 — "unknown frontmatter keys round-trip"
-— is load-bearing (also see `lessons.md` § "Foreign-file tolerance must be symmetric across every
-reader"). msgspec `Struct`s reject unknown fields by default; pydantic's `extra="allow"` does not.
-The migration MUST preserve byte-for-byte round-trip fidelity of unknown/foreign keys. Proving
-this is a **gating spike**, folded into unit `cli-toolset-rework/2`, that must pass **before** the
-full swap proceeds. If msgspec cannot preserve the invariant cleanly, the swap is reverted and
-Python stays at the pre-swap ~230–250ms floor.
+**Gating spike — passed (read first):** root `tech.md` Invariant 3 — "unknown frontmatter keys
+round-trip" — is load-bearing (also see `lessons.md` § "Foreign-file tolerance must be symmetric
+across every reader"). msgspec `Struct`s reject unknown fields by default; pydantic's
+`extra="allow"` does not. The migration had to preserve byte-for-byte round-trip fidelity of
+unknown/foreign keys. That round-trip-fidelity spike (unit `cli-toolset-rework/2`) **passed** —
+proved via a `_Frontmatter` stash on each `Struct` that round-trips unknown keys, locked by
+`tests/schemas/` (including a foreign-temporal round-trip regression test) — so the full swap
+proceeded and shipped; it was not reverted.
 
 **Why:** pydantic v2 pays a one-time ~78–110ms schema-compile tax the moment the first
 `BaseModel` subclass (`schemas/config.py`'s `CoreConfig`) is defined — unavoidable on any real
@@ -170,9 +171,9 @@ round-tripped annotations (inert data), never machinery, unless a future spec re
 
 | Gap | Detail |
 |---|---|
-| No CI | Add `.github/workflows` (none exists today) running `pytest` + `ruff` + `ty` + the workstream-B startup-time guard + a check that the spec's stated test count matches actual. |
-| Spec drift | Root spec said 578 tests; actual is 591 — fixed as part of this branch (root `tech.md`, `plan.md`). |
-| `indexed` contract unpinned | Pin the `indexed` NDJSON contract with a shared schema; add a `search --health` / status signal so silent degradation (root `tech.md` § Risks — "`indexed` drift") is visible instead of silent. |
-| Positioning review outstanding | Root `plan.md` § Open reviews already queues an adversarial audit of the "mesh" framing (self-flagged, not yet run). This feature does not resolve it — flagged again here so it isn't lost among the rework. |
-| Owner-identity trust boundary undocumented | `$SHARDS_AGENT` / `--owner` is currently trusted input with no documented boundary — write down what is and isn't verified. |
-| Hard delete, no soft-delete | `note`/`task` delete is a hard `unlink` today; consider an optional soft-delete (trash) instead. |
+| No CI | **Resolved.** `.github/workflows/ci.yml` runs `ruff check` + `ruff format --check` + `ty check src/` + `pytest -q` + the startup-time guard on push/PR. The automated spec-test-count drift check was deliberately left out of CI (see the workflow file's own header comment) — the count is synced manually in the spec at each branch's finishing phase, as this doc sync does. |
+| Spec drift | Root spec said 578, then 591, tests; actual is now 678 — synced here (root `tech.md`, `plan.md`, `AGENTS.md` § 4). |
+| `indexed` contract unpinned | **Resolved.** NDJSON hit contract pinned with a shared msgspec schema (`index/indexed_client.py`); `search --health` reports `indexed`-reachable vs. substring-fallback distinctly (root `tech.md` § Risks — "`indexed` drift" now resolved). |
+| Positioning review outstanding | Still outstanding — unchanged by this branch. Root `plan.md` § Open reviews still queues the adversarial audit of the "mesh" framing (self-flagged, not yet run). |
+| Owner-identity trust boundary undocumented | **Resolved.** Documented in `AGENTS.md` § 6 ("Owner identity is trusted local input, not an authorization boundary"). |
+| Hard delete, no soft-delete | **Evaluated, deferred — not built.** `note`/`task` delete stays a hard `unlink` by design; recorded in `AGENTS.md` § 6. |
