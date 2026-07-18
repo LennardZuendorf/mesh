@@ -39,6 +39,7 @@ degradation notice.
 from __future__ import annotations
 
 import json
+from typing import NoReturn
 
 import typer
 
@@ -68,6 +69,26 @@ def _daemon_up() -> bool:
     return DaemonClient().is_up()
 
 
+def _coalesce(ctx: typer.Context, json_out: bool, quiet: bool) -> tuple[bool, bool]:
+    """Coalesce the leaf ``--json``/``--quiet`` flags with the root callback's globals.
+
+    A flag given on either side of the command name takes effect — shared by
+    every lens command below.
+    """
+    return (
+        json_out or bool(getattr(ctx.obj, "json", False)),
+        quiet or bool(getattr(ctx.obj, "quiet", False)),
+    )
+
+
+def _lens_not_found(quiet: bool, message: str) -> NoReturn:
+    """Emit ``message`` to stderr (unless ``--quiet``) and exit 3 — the shared
+    not-found skeleton for the seed/project lenses."""
+    if not quiet:
+        typer.echo(message, err=True)
+    raise typer.Exit(3) from None
+
+
 def recent_activity_command(
     ctx: typer.Context,
     since: str | None = typer.Option(None, "--since", help="Recency window: 7d, 12h, or ISO."),
@@ -82,8 +103,7 @@ def recent_activity_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
     owner = owner if owner is not None else getattr(ctx.obj, "owner", None)
     mine = mine or bool(getattr(ctx.obj, "mine", False))
 
@@ -136,8 +156,7 @@ def session_start_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag on
     # either side of the command name takes effect.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
 
     # Source A — my live queue: every open/claimed task I own or have claimed.
     task_views = list_tasks(config, mine=True, limit=None)
@@ -176,15 +195,12 @@ def build_context_command(
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect. This lens is daemon-free —
     # every node is read off disk — so there is no degradation notice.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
 
     try:
         entries = build_context(config, seed_id, depth=depth)
     except SeedNotFoundError:
-        if not quiet:
-            typer.echo(f"build-context: seed not found: {seed_id}", err=True)
-        raise typer.Exit(3) from None
+        _lens_not_found(quiet, f"build-context: seed not found: {seed_id}")
 
     if json_out:
         typer.echo(json.dumps(entries))
@@ -213,15 +229,12 @@ def graph_command(
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect. Same daemon-free traversal
     # as build-context, so there is no degradation notice.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
 
     try:
         result = graph_query(config, seed_id, depth=depth)
     except SeedNotFoundError:
-        if not quiet:
-            typer.echo(f"graph: seed not found: {seed_id}", err=True)
-        raise typer.Exit(3) from None
+        _lens_not_found(quiet, f"graph: seed not found: {seed_id}")
 
     # Both branches below render the one already-computed `result` — no second
     # traversal for JSON vs. tree output.
@@ -254,15 +267,12 @@ def project_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
 
     try:
         result = project_view(config, project_id)
     except ProjectNotFoundError:
-        if not quiet:
-            typer.echo(f"project: not found: {project_id}", err=True)
-        raise typer.Exit(3) from None
+        _lens_not_found(quiet, f"project: not found: {project_id}")
 
     if json_out:
         typer.echo(json.dumps(result.to_dict()))

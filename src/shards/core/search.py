@@ -25,14 +25,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import frontmatter
-import yaml
-
 from shards.daemon.client import DaemonClient
 from shards.index import indexed_client
 from shards.index.fallback import search_fallback
 from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
+from shards.storage.files import read_post
 
 __all__ = ["hit_dict", "query_search", "search_health"]
 
@@ -140,10 +138,8 @@ def search_health(config: Config) -> dict[str, Any]:
 
 def _read_body(path: str) -> str:
     """Return the Markdown body at ``path`` (empty on a read/parse failure)."""
-    try:
-        return frontmatter.loads(Path(path).read_text(encoding="utf-8")).content
-    except (OSError, yaml.YAMLError):
-        return ""
+    post = read_post(Path(path))
+    return post.content if post is not None else ""
 
 
 def hit_dict(result: SearchResult, *, meta_only: bool, full: bool) -> dict[str, Any]:

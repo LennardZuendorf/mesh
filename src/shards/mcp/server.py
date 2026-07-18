@@ -33,9 +33,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from shards.core.activity import recent_activity
-from shards.core.context import build_context, graph_query
-from shards.core.lenses import project_view
+from shards.core.lenses import build_context, graph_query, project_view, recent_activity
 from shards.core.notes import (
     NoteView,
     append_note,

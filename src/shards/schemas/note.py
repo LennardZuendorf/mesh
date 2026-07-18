@@ -16,6 +16,7 @@ with ``type: task`` plus lifecycle fields.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any, Literal, Self
@@ -34,6 +35,17 @@ def _iso_z(value: datetime) -> str:
     """Render a datetime the way pydantic v2's JSON mode did: UTC as a ``Z`` suffix."""
     text = value.isoformat()
     return f"{text[:-6]}Z" if text.endswith("+00:00") else text
+
+
+@functools.cache
+def _schema_fields(cls: type[_Frontmatter]) -> frozenset[str]:
+    """The known-field set for ``cls`` (excludes the stash field) — cached per class.
+
+    ``__struct_fields__`` is fixed once a msgspec ``Struct`` subclass is defined,
+    so this is safe to compute once and reuse for every :meth:`_Frontmatter.model_validate`
+    call on that class rather than rebuilding the ``frozenset`` on every call.
+    """
+    return frozenset(cls.__struct_fields__) - {_STASH}
 
 
 class _Frontmatter(msgspec.Struct, kw_only=True):
@@ -55,7 +67,7 @@ class _Frontmatter(msgspec.Struct, kw_only=True):
         value raises :class:`msgspec.ValidationError`. Every other key, including
         one named ``extra``, is preserved verbatim for a lossless round-trip.
         """
-        schema_fields = frozenset(cls.__struct_fields__) - {_STASH}
+        schema_fields = _schema_fields(cls)
         known: dict[str, Any] = {}
         stash: dict[str, Any] = {}
         for key, value in data.items():

@@ -76,20 +76,9 @@ _LEAVES: dict[str, tuple[str, str, str]] = {
         "Warm-start payload: my recent activity (7d) + my open/claimed tasks.",
     ),
 }
-# Display order in ``shards --help`` (matches the pre-decomposition wiring).
-_ORDER: tuple[str, ...] = (
-    "note",
-    "task",
-    "search",
-    "daemon",
-    "status",
-    "reindex",
-    "recent-activity",
-    "build-context",
-    "graph",
-    "project",
-    "session-start",
-)
+# Display order in ``shards --help`` (matches the pre-decomposition wiring):
+# sub-apps first, then leaf commands, each in their dict's declaration order.
+_ORDER: tuple[str, ...] = (*_SUBAPPS, *_LEAVES)
 
 
 class _LazyCommandGroup(TyperGroup):

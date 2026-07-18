@@ -20,12 +20,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-import frontmatter
-import yaml
-
 from shards.index.warm import _is_shards_id
 from shards.schemas.config import Config
-from shards.storage.files import note_folder, task_folder
+from shards.storage.files import note_folder, read_post, task_folder
 from shards.storage.sandbox import safe_resolve
 
 __all__ = ["reconcile_path"]
@@ -54,14 +51,10 @@ def reconcile_path(config: Config, path: Path) -> Path:
     p = Path(path)
     if p.suffix != ".md":
         return p
-    try:
-        text = p.read_text(encoding="utf-8")
-    except OSError:
+    post = read_post(p)
+    if post is None:
         return p
-    try:
-        meta = frontmatter.loads(text).metadata
-    except yaml.YAMLError:
-        return p
+    meta = post.metadata
     if not _is_shards_id(meta.get("id")):
         return p
     folder = _correct_folder(config, meta)
