@@ -150,7 +150,7 @@ def build_context(config: Config, seed_id: str, depth: int = 1) -> list[dict[str
     return entries
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class GraphResult:
     """One :func:`graph_query` result — ready to render as JSON or a tree.
 

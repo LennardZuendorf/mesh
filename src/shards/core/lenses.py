@@ -127,7 +127,7 @@ class ProjectNotFoundError(Exception):
         super().__init__(f"project not found: {project_id}")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ProjectResult:
     """One :func:`project_view` result — the project note and its scoped tasks.
 
