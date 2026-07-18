@@ -43,9 +43,11 @@ import json
 import typer
 
 from shards.core.lenses import (
+    ProjectNotFoundError,
     SeedNotFoundError,
     build_context,
     graph_query,
+    project_view,
     recent_activity,
     session_start_entries,
 )
@@ -232,3 +234,49 @@ def graph_command(
         return
     for line in result.tree_lines():
         typer.echo(line)
+
+
+def project_command(
+    ctx: typer.Context,
+    project_id: str = typer.Argument(..., help="Project note id (n-…) to scope to."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable {project, tasks}."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only (project then tasks)."),
+) -> None:
+    """Show a project note and the tasks scoped to it — a read-only lens, not a verb.
+
+    Delegates to :func:`shards.core.lenses.project_view`: the project note plus
+    every task whose ``project`` soft link matches. ``--json`` emits
+    ``{project, tasks}``; the default text is the project row then its task rows;
+    ``--quiet`` is ids only (project id first). Daemon-free — every node is read
+    off disk — so there is no degradation notice; an unresolvable project exits 3.
+    """
+    config = load_config()
+
+    # Coalesce the leaf flags with the root callback's global flags so a flag given
+    # on either side of the command name takes effect.
+    json_out = json_out or bool(getattr(ctx.obj, "json", False))
+    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+
+    try:
+        result = project_view(config, project_id)
+    except ProjectNotFoundError:
+        if not quiet:
+            typer.echo(f"project: not found: {project_id}", err=True)
+        raise typer.Exit(3) from None
+
+    if json_out:
+        typer.echo(json.dumps(result.to_dict()))
+        return
+    if quiet:
+        typer.echo(str(result.project.get("id", "")))
+        for task in result.tasks:
+            typer.echo(str(task.get("id", "")))
+        return
+    project = result.project
+    typer.echo(
+        f"{project.get('id', '')}\t{project.get('type', '')}\t{project.get('title', '')}"
+    )
+    for task in result.tasks:
+        typer.echo(
+            f"  {task.get('id', '')}\t{task.get('status', '')}\t{task.get('title', '')}"
+        )

@@ -11,7 +11,8 @@ takes ``id: str``, not ``--id <id>``. Each tool carries an MCP annotation
 declaring its effect, so an agent runtime can reason about safety before calling:
 
 * **read-only** (``readOnlyHint``) — ``note_get`` / ``note_list`` / ``task_get`` /
-  ``task_list`` / ``search`` / ``recent_activity`` / ``build_context`` / ``graph``;
+  ``task_list`` / ``search`` / ``recent_activity`` / ``build_context`` / ``graph`` /
+  ``project``;
 * **idempotent** (``idempotentHint``) — ``note_update`` / ``task_claim`` /
   ``task_finish`` / ``task_update`` (re-running lands the same state);
 * **write** (no special hint) — ``note_new`` / ``note_append`` / ``task_new``;
@@ -34,6 +35,7 @@ from fastmcp import FastMCP
 
 from shards.core.activity import recent_activity
 from shards.core.context import build_context, graph_query
+from shards.core.lenses import project_view
 from shards.core.notes import (
     NoteView,
     append_note,
@@ -130,11 +132,12 @@ def shards_task_list(
     mine: bool = False,
     tags: list[str] | None = None,
     any_tag: bool = False,
+    project: str | None = None,
     since: str | None = None,
     sort: str = "updated",
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """List shards tasks (open and done) with status/owner/mine filters, sorted."""
+    """List shards tasks (open and done) with status/owner/mine/project filters, sorted."""
     config = load_config()
     views = list_tasks(
         config,
@@ -143,6 +146,7 @@ def shards_task_list(
         mine=mine,
         tags=tags,
         any_tag=any_tag,
+        project=project,
         since=since,
         sort=sort,
         limit=limit,
@@ -211,6 +215,12 @@ def shards_graph(seed_id: str, depth: int = 1) -> dict[str, Any]:
     return graph_query(config, seed_id, depth=depth).to_dict()
 
 
+def shards_project(project_id: str) -> dict[str, Any]:
+    """Show a project note and the tasks scoped to it: ``{project, tasks}``."""
+    config = load_config()
+    return project_view(config, project_id).to_dict()
+
+
 # --------------------------------------------------------------------------- #
 # Write tools (no special hint)                                               #
 # --------------------------------------------------------------------------- #
@@ -249,6 +259,7 @@ def shards_task_new(
     tags: list[str] | None = None,
     owner: str | None = None,
     body: str = "",
+    project: str | None = None,
     blocks: list[str] | None = None,
     blocked_by: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -261,6 +272,7 @@ def shards_task_new(
         tags=tags,
         owner=owner,
         body=body,
+        project=project,
         blocks=blocks,
         blocked_by=blocked_by,
     )
@@ -305,10 +317,11 @@ def shards_task_update(
     priority: str | None = None,
     tags: str | None = None,
     title: str | None = None,
+    project: str | None = None,
     blocks: list[str] | None = None,
     blocked_by: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Update a task's fields (priority, tags, title, blocks/blocked_by) in place."""
+    """Update a task's fields (priority, tags, title, project, blocks/blocked_by) in place."""
     config = load_config()
     task = update_task(
         config,
@@ -316,6 +329,7 @@ def shards_task_update(
         priority=priority,
         tags=tags,
         title=title,
+        project=project,
         blocks=blocks,
         blocked_by=blocked_by,
     )
@@ -354,6 +368,7 @@ def _register() -> None:
     app.tool(shards_recent_activity, annotations=_READ_ONLY)
     app.tool(shards_build_context, annotations=_READ_ONLY)
     app.tool(shards_graph, annotations=_READ_ONLY)
+    app.tool(shards_project, annotations=_READ_ONLY)
     # Write (no special hint).
     app.tool(shards_note_new)
     app.tool(shards_note_append)

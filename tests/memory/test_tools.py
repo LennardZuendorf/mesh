@@ -52,6 +52,7 @@ _EXPECTED_TOOLS: frozenset[str] = frozenset(
         "shards_recent_activity",
         "shards_build_context",
         "shards_graph",
+        "shards_project",
     }
 )
 

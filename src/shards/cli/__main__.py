@@ -65,6 +65,11 @@ _LEAVES: dict[str, tuple[str, str, str]] = {
         "graph_command",
         "Query what's connected to a seed id (tree, or JSON nodes+edges).",
     ),
+    "project": (
+        "shards.cli.session",
+        "project_command",
+        "Show a project note and the tasks scoped to it (read-only lens).",
+    ),
     "session-start": (
         "shards.cli.session",
         "session_start_command",
@@ -82,6 +87,7 @@ _ORDER: tuple[str, ...] = (
     "recent-activity",
     "build-context",
     "graph",
+    "project",
     "session-start",
 )
 
