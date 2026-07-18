@@ -435,12 +435,12 @@ def test_mcp_tool_registered_read_only(cfg: Config) -> None:
     assert tools["shards_graph"].annotations.readOnlyHint is True
 
 
-def test_mcp_tool_delegates_to_graph_query(
-    cfg: Config, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_mcp_tool_delegates_to_graph_query(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     import shards.mcp.server as server
 
-    sentinel = GraphResult(entries=[{"id": "n-seed", "type": "note", "title": "Seed", "path": "/p"}], edges=[])
+    sentinel = GraphResult(
+        entries=[{"id": "n-seed", "type": "note", "title": "Seed", "path": "/p"}], edges=[]
+    )
     seen: dict[str, Any] = {}
 
     def _spy(config: Config, seed_id: str, depth: int = 1) -> GraphResult:

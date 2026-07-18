@@ -202,9 +202,7 @@ def graph_command(
     ctx: typer.Context,
     seed_id: str = typer.Argument(..., help="Seed note/task id (n-… or t-…) to expand from."),
     depth: int = typer.Option(1, "--depth", help="Hops to walk (0 = seed only; 1 = direct)."),
-    json_out: bool = typer.Option(
-        False, "--json", help="Machine-readable {seed, nodes, edges}."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable {seed, nodes, edges}."),
     quiet: bool = typer.Option(False, "--quiet", help="IDs only, one per line."),
 ) -> None:
     """Query what's connected to a seed id: readable tree, or JSON nodes+edges."""

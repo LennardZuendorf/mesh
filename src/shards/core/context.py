@@ -203,7 +203,9 @@ class GraphResult:
         def _walk(node_id: str, hop: int) -> None:
             entry = by_id[node_id]
             indent = "  " * hop
-            lines.append(f"{indent}{entry.get('id', '')}\t{entry.get('type', '')}\t{entry.get('title', '')}")
+            lines.append(
+                f"{indent}{entry.get('id', '')}\t{entry.get('type', '')}\t{entry.get('title', '')}"
+            )
             for child_id in children.get(node_id, []):
                 _walk(child_id, hop + 1)
 
