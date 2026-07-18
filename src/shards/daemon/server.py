@@ -20,13 +20,14 @@ not yet present (``note.*`` / ``task.*`` reads, ``search.*``, ``activity.recent`
 ``404``. A ``503`` (reserved-but-unwired) lets the client degrade to its file-op
 fallback, whereas a ``404`` (truly unknown) propagates. When the
 server is constructed **with a vault ``config``**, daemon/2 warms a
-:class:`~shards.index.watch.VaultIndex` (via a :class:`~shards.index.watch.Watcher`)
+:class:`~shards.index.warm.VaultIndex` (via a :class:`~shards.index.watcher.Watcher`)
 *before* the socket accepts connections and swaps the ``activity.recent`` stub for
 a real handler served from that warm index. That same config-ful startup also
 registers the search feature's :func:`~shards.index.indexed_client.incremental_update`
-on the watcher change-hook, so every vault edit re-indexes that file in ``indexed``.
-A config-less server (used by the transport tests) keeps the ``503`` stub and
-registers no hook, so the watcher is never a hard dependency.
+on the server-owned :class:`~shards.index.watcher.ChangeHooks` registry, so every
+vault edit re-indexes that file in ``indexed``. A config-less server (used by the
+transport tests) keeps the ``503`` stub and registers no hook, so the watcher is
+never a hard dependency.
 """
 
 from __future__ import annotations
@@ -41,13 +42,8 @@ from typing import Any
 
 from shards.daemon.client import default_socket_path
 from shards.index.indexed_client import incremental_update
-from shards.index.watch import (
-    DEFAULT_RECENT_LIMIT,
-    VaultIndex,
-    Watcher,
-    clear_change_hooks,
-    register_change_hook,
-)
+from shards.index.warm import DEFAULT_RECENT_LIMIT, VaultIndex
+from shards.index.watcher import ChangeHooks, Watcher
 from shards.schemas.config import Config, load_config
 
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -114,6 +110,7 @@ class DaemonServer:
         self._server: asyncio.AbstractServer | None = None
         self._index: VaultIndex | None = None
         self._watcher: Watcher | None = None
+        self._hooks: ChangeHooks | None = None
 
     async def start(self) -> None:
         """Bind the unix socket and lock it down to owner-only (``0600``).
@@ -126,17 +123,18 @@ class DaemonServer:
         # between bind and chmod, the enclosing dir already blocks other users.
         self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=_RUN_DIR_MODE)
         if self._config is not None and self._watcher is None:
-            config = self._config  # local binding: mypy narrows it to Config for the closure
+            config = self._config  # local binding: ty narrows it to Config for the closure
             self._index = VaultIndex()
-            self._watcher = Watcher(config, self._index)
+            # The daemon owns the change-hook registry; a fresh instance per start
+            # means a restart (stop→start) can never stack a second hook that would
+            # double-index every edit.
+            self._hooks = ChangeHooks()
+            self._watcher = Watcher(config, self._index, self._hooks)
             self._watcher.start()  # warm scan + observer, before we bind the socket
             # Freshness: every watcher-driven vault change re-indexes that one path in
             # ``indexed``. ``incremental_update`` swallows its own failures, so a dead
             # ``indexed`` never crashes the observer thread this hook runs on.
-            # Clear first so a restart (stop→start) in one process never stacks a
-            # second hook that would double-index every edit.
-            clear_change_hooks()
-            register_change_hook(lambda p: incremental_update(config, p))
+            self._hooks.register(lambda p: incremental_update(config, p))
             self._handlers = {**self._handlers, "activity.recent": self._activity_handler()}
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()  # clear a stale socket from a prior run
@@ -191,7 +189,9 @@ class DaemonServer:
             self._watcher.stop()  # stop+join the observer thread, then clear the index
             self._watcher = None
             # Drop our change-hook so it can't outlive the index it re-indexed into.
-            clear_change_hooks()
+            if self._hooks is not None:
+                self._hooks.clear()
+                self._hooks = None
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()
 

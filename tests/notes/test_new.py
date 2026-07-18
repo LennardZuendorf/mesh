@@ -225,9 +225,7 @@ def test_cli_new_body_wins_over_file(cfg: Config, vault: Path, tmp_path: Path) -
     """Body precedence: --body overrides --file when both are supplied."""
     src = tmp_path / "body.md"
     src.write_text("FROM-FILE", encoding="utf-8")
-    result = _invoke(
-        ["--quiet", "note", "new", "Both", "--body", "FROM-BODY", "--file", str(src)]
-    )
+    result = _invoke(["--quiet", "note", "new", "Both", "--body", "FROM-BODY", "--file", str(src)])
     assert result.exit_code == 0, result.output
     note_id = result.output.strip()
     content = (note_folder("note", vault) / f"{note_id}.md").read_text(encoding="utf-8")

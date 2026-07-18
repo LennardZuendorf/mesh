@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import get_args
 
 import typer
-from pydantic import ValidationError
+from msgspec import ValidationError
 
 from shards.cli import _output
 from shards.core.notes import (
@@ -107,7 +107,9 @@ def new_command(
         # Owner outside [tasks].collections (enforced once in core, before any write).
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from None
-    _output.emit_mutation(ctx, obj_id=note.id, updated=note.updated, verb="created", fields={"type": note.type})
+    _output.emit_mutation(
+        ctx, obj_id=note.id, updated=note.updated, verb="created", fields={"type": note.type}
+    )
 
 
 @note_app.command("append")
@@ -132,7 +134,9 @@ def append_command(
     except AmbiguousSlugError:
         typer.echo(f"ambiguous slug: {target}", err=True)
         raise typer.Exit(2) from None
-    _output.emit_mutation(ctx, obj_id=note.id, updated=note.updated, verb="appended", fields={"type": note.type})
+    _output.emit_mutation(
+        ctx, obj_id=note.id, updated=note.updated, verb="appended", fields={"type": note.type}
+    )
 
 
 @note_app.command("update")
@@ -159,7 +163,9 @@ def update_command(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from None
-    _output.emit_mutation(ctx, obj_id=note.id, updated=note.updated, verb="updated", fields={"type": note.type})
+    _output.emit_mutation(
+        ctx, obj_id=note.id, updated=note.updated, verb="updated", fields={"type": note.type}
+    )
 
 
 def _meta_lines(note: Note) -> list[str]:

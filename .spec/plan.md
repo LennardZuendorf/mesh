@@ -2,14 +2,17 @@
 type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
-updated: 2026-07-06
+children:
+  - features/shards-rebrand/plan.md
+  - features/cli-toolset-rework/plan.md
+updated: 2026-07-18
 ---
 
 # Shards — Plan
 
-**Status:** Phase 1–2 **delivered** — all five features implemented and tested (578 tests, mypy strict, ruff clean) on branch `feat/phase-1-mvp`. Built bottom-up behind binary whole-feature gates.
+**Status:** Phase 1–2 **delivered** — all five features implemented and tested (678 tests, ty clean, ruff clean) on branch `feat/phase-1-mvp` (test count since grown on `cli-toolset-rework`). Built bottom-up behind binary whole-feature gates.
 
-**Focus:** Phase 3 (tasks-graph) — `ready` / `release`, strict `--strict` gate, unblock-cascade. **Deferred, not started.**
+**Focus:** [cli-toolset-rework](features/cli-toolset-rework/plan.md) units 1–5 — keep-and-rework decision (GBrain/Beads rejected), internal tidying, performance push (msgspec, lazy imports), graph-query output, projects convention, CI + gaps — **shipped, reviewed, and end-to-end verified** on branch `claude/cli-toolset-rework-xys6hl`. Phase 3 (tasks-graph) — `ready` / `release`, `blocks`/`blocked_by`, cycle-check, no parent-child hierarchy — is designed inside that feature (unit `cli-toolset-rework/6`, tech.md § Workstream D); its dependency gate (`cli-toolset-rework/1`–`5` DONE) is now satisfied, but the unit itself **stays deferred by product decision** — not yet scheduled to build.
 
 ---
 
@@ -22,8 +25,9 @@ updated: 2026-07-06
 | 3 | daemon | ✅ DONE | `tests/daemon/` | `feat(daemon)` |
 | 4 | search | ✅ DONE | `tests/search/` | `feat(search)` |
 | 5 | memory | ✅ DONE | `tests/memory/` | `feat(memory)` |
-| 6 | tasks-graph | ⏳ deferred (Phase 3) | `tests/tasks/` | — |
+| 6 | tasks-graph | ⏳ deferred (Phase 3; design in `cli-toolset-rework/6`) | `tests/tasks/` | — |
 | 7 | [shards-rebrand](features/shards-rebrand/plan.md) | 🛠 in progress | full suite | `chore(rebrand)` |
+| 8 | [cli-toolset-rework](features/cli-toolset-rework/plan.md) | ✅ units 1–5 DONE (6 deferred) | full suite (678) | see [plan.md](features/cli-toolset-rework/plan.md) § Progress |
 
 ---
 
@@ -33,7 +37,7 @@ updated: 2026-07-06
 |---|---|
 | **notes** | schema, writes, wikilinks, config, global CLI |
 | **tasks** | lifecycle, `O_EXCL` claim (v1) |
-| **daemon** | socket, watcher, warm index, admin, `on_vault_change` hook |
+| **daemon** | socket, watcher, warm index, admin, `ChangeHooks` (daemon-owned hook registry; watcher fires the registered hook → search's `indexed_client.incremental_update`) |
 | **search** | `indexed_client`, tag-pull, fallback, `shards search` |
 | **memory** | MCP, `recent-activity`, `build-context`, `session-start` |
 
@@ -54,3 +58,11 @@ Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature
   `file:line` + concrete fix. (Rebrand-correctness audit lives in
   [features/shards-rebrand/plan.md](features/shards-rebrand/plan.md) § Follow-ups — that one is the
   feature's own pre-merge gate.)
+
+---
+
+## Resolved
+
+- **Rust rewrite for CLI startup performance** — evaluated and shelved; runtime stays Python
+  3.11+, optimized via the pydantic→msgspec swap (~150–180ms floor). →
+  [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Decisions

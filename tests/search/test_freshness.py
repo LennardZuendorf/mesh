@@ -10,14 +10,15 @@ This unit wires the ``indexed`` client's re-index calls to the vault's lifecycle
   <vault> --collection <c>``; :func:`~shards.index.indexed_client.reindex` is its
   alias and the delegate ``shards reindex`` calls.
 * :class:`~shards.daemon.server.DaemonServer`, when started with a vault config,
-  registers ``incremental_update`` on the module-level watcher change-hook so
-  *every* create/modify/move/delete re-indexes just that file. Registration is
-  explicit and config-bound — never a module-import side-effect.
+  registers ``incremental_update`` on its owned :class:`~shards.index.watcher.ChangeHooks`
+  registry so *every* create/modify/move/delete re-indexes just that file.
+  Registration is explicit and config-bound — never a module-import side-effect.
 
 The real ``indexed`` binary is **never** shelled here: every subprocess is faked
 at ``indexed_client.subprocess.run`` (or the ``incremental_update`` name in the
-daemon namespace). The change-hook registry is module-level, so an autouse
-fixture clears it before and after each test to prevent leakage.
+daemon namespace). The change-hook registry is a daemon-owned object, so each test
+constructs its own :class:`~shards.index.watcher.ChangeHooks` rather than sharing
+module state.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from typer.testing import CliRunner
 from shards.cli.__main__ import app
 from shards.daemon import server as server_mod
 from shards.index import indexed_client
-from shards.index.watch import clear_change_hooks, on_vault_change
+from shards.index.watcher import ChangeHooks
 from shards.schemas.config import Config, load_config
 
 # --------------------------------------------------------------------------- #
@@ -46,16 +47,6 @@ from shards.schemas.config import Config, load_config
 @pytest.fixture
 def cfg(shards_config: Path) -> Config:
     return load_config()
-
-
-@pytest.fixture(autouse=True)
-def _clean_hooks() -> Iterator[None]:
-    """Isolate every test from the module-level change-hook registry (no leakage)."""
-    clear_change_hooks()
-    try:
-        yield
-    finally:
-        clear_change_hooks()
 
 
 @pytest.fixture
@@ -185,13 +176,13 @@ def test_no_hook_registered_at_import(
 ) -> None:
     """Importing ``indexed_client`` must not have registered any change hook.
 
-    The registry is cleared by the autouse fixture; firing a vault change now must
-    reach ``incremental_update`` zero times, proving registration is an explicit
-    step (not an import-time side-effect).
+    A fresh registry fired without an explicit ``register_hook`` must reach
+    ``incremental_update`` zero times, proving registration is an explicit step
+    (not an import-time side-effect).
     """
     calls: list[Path] = []
     monkeypatch.setattr(indexed_client, "incremental_update", lambda c, p: calls.append(p))
-    on_vault_change(vault / "notes" / "n-x.md")
+    ChangeHooks().fire(vault / "notes" / "n-x.md")
     assert calls == []
 
 
@@ -203,9 +194,10 @@ def test_register_hook_is_explicit_and_config_bound(
     monkeypatch.setattr(
         indexed_client, "incremental_update", lambda config, path: calls.append((config, path))
     )
-    indexed_client.register_hook(cfg)
+    hooks = ChangeHooks()
+    indexed_client.register_hook(cfg, hooks)
     changed = vault / "notes" / "n-x.md"
-    on_vault_change(changed)
+    hooks.fire(changed)
     assert calls == [(cfg, changed)]
 
 
@@ -221,12 +213,12 @@ def _run(loop: asyncio.AbstractEventLoop, coro: Any) -> Any:
 def test_daemon_start_registers_incremental_update_hook(
     cfg: Config, vault: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A config-ful ``DaemonServer.start`` wires ``incremental_update`` to the hook.
+    """A config-ful ``DaemonServer.start`` wires ``incremental_update`` to its hooks.
 
     The lambda resolves ``incremental_update`` in the ``shards.daemon.server``
-    namespace, so patch it there (``raising=False`` keeps the RED clean before the
-    wiring exists). Firing ``on_vault_change`` then reaches the recorder with the
-    startup config, proving every watcher event re-indexes that path.
+    namespace, so patch it there. Firing the server's owned ``ChangeHooks`` then
+    reaches the recorder with the startup config, proving every watcher event
+    re-indexes that path.
     """
     calls: list[tuple[Config, Path]] = []
     monkeypatch.setattr(
@@ -240,7 +232,8 @@ def test_daemon_start_registers_incremental_update_hook(
     try:
         _run(loop, server.start())
         changed = vault / "notes" / "n-daemon.md"
-        on_vault_change(changed)  # what the watchdog thread calls after each event
+        assert server._hooks is not None
+        server._hooks.fire(changed)  # what the watchdog thread triggers after each event
         assert (cfg, changed) in calls
     finally:
         _run(loop, server.stop())
@@ -248,22 +241,15 @@ def test_daemon_start_registers_incremental_update_hook(
 
 
 def test_daemon_without_config_registers_no_hook(
-    cfg: Config, vault: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
+    cfg: Config, vault: Path, socket_path: Path
 ) -> None:
-    """A config-less daemon (transport-only) must not register the freshness hook."""
-    calls: list[Path] = []
-    monkeypatch.setattr(
-        server_mod,
-        "incremental_update",
-        lambda config, path: calls.append(path),
-        raising=False,
-    )
+    """A config-less daemon (transport-only) must not create a watcher or hook registry."""
     server = server_mod.DaemonServer(socket_path, config=None)
     loop = asyncio.new_event_loop()
     try:
         _run(loop, server.start())
-        on_vault_change(vault / "notes" / "n-x.md")
-        assert calls == []
+        assert server._watcher is None
+        assert server._hooks is None
     finally:
         _run(loop, server.stop())
         loop.close()

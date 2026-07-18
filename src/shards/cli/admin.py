@@ -44,7 +44,7 @@ from shards.core.notes import list_notes
 from shards.core.tasks import list_tasks
 from shards.core.wikilinks import find_dangling
 from shards.daemon.client import default_socket_path
-from shards.index.watch import scan_recent
+from shards.index.warm import scan_recent
 from shards.schemas.config import Config, load_config
 from shards.storage.files import atomic_write
 
@@ -250,7 +250,9 @@ def daemon_stop_command(ctx: typer.Context) -> None:
     terminate_process(running)
     _remove(default_socket_path())
     _remove(pid_path)
-    _emit(ctx, {"running": False, "stopped": True, "pid": running}, f"daemon stopped (pid {running})")
+    _emit(
+        ctx, {"running": False, "stopped": True, "pid": running}, f"daemon stopped (pid {running})"
+    )
 
 
 @daemon_app.command("status")

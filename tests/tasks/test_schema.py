@@ -1,7 +1,7 @@
 """tasks/1 — Task schema and status-driven folder routing.
 
 A task is a note (``type: task``) plus lifecycle fields. This unit pins the
-pydantic model (defaults, unknown-key round-trip, status enum) and the
+msgspec model (defaults, unknown-key round-trip, status enum) and the
 ``task_folder`` router that maps a status to ``tasks/open/`` or ``tasks/done/``.
 """
 
@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from msgspec import ValidationError
 
 from shards.core.ids import generate_task_id
 from shards.schemas.task import Task
@@ -66,25 +66,25 @@ def test_task_accepts_full_lifecycle_payload() -> None:
 
 
 def test_task_type_is_pinned_to_task() -> None:
-    # ``type`` must be the literal "task"; any other value is rejected.
+    # ``type`` must be the literal "task"; any other value is rejected. msgspec
+    # validates on ``model_validate`` (the frontmatter entry point), not on
+    # direct construction — mirroring how production reads tasks.
     with pytest.raises(ValidationError):
-        Task(
-            id="t-c7d1",
-            type="note",  # type: ignore[arg-type]
-            title="x",
-            created=_now(),
-            updated=_now(),
+        Task.model_validate(
+            {"id": "t-c7d1", "type": "note", "title": "x", "created": _now(), "updated": _now()}
         )
 
 
 def test_task_status_rejects_unknown_value() -> None:
     with pytest.raises(ValidationError):
-        Task(
-            id="t-c7d1",
-            title="x",
-            created=_now(),
-            updated=_now(),
-            status="in-progress",  # type: ignore[arg-type]
+        Task.model_validate(
+            {
+                "id": "t-c7d1",
+                "title": "x",
+                "created": _now(),
+                "updated": _now(),
+                "status": "in-progress",
+            }
         )
 
 

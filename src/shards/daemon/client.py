@@ -37,7 +37,7 @@ from typing import Any
 
 from shards.core.notes import get_note, list_notes
 from shards.core.tasks import get_task, list_tasks
-from shards.index.watch import DEFAULT_RECENT_LIMIT, scan_recent
+from shards.index.warm import DEFAULT_RECENT_LIMIT, scan_recent
 from shards.schemas.config import Config
 from shards.schemas.note import Note
 
@@ -206,7 +206,7 @@ class DaemonClient:
         """Most-recently-modified entries; falls back to a dir scan when down.
 
         A live daemon answers from its warm in-process index; when the socket is
-        unreachable the fallback runs :func:`shards.index.watch.scan_recent`, an
+        unreachable the fallback runs :func:`shards.index.warm.scan_recent`, an
         mtime-sorted scan of ``notes/`` and ``tasks/``. Both return the same
         ``{"entries": [...]}`` shape.
 

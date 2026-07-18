@@ -9,7 +9,7 @@ authors = [{ name = "Lennard Zundorf" }]
 dependencies = [
     "typer>=0.12",
     "python-frontmatter>=1.1",
-    "pydantic>=2.7",
+    "msgspec>=0.18",
     "watchdog>=4.0",
     "fastmcp>=2.0",
 ]
@@ -21,7 +21,7 @@ shards-mcp = "shards.mcp.server:main"
 [dependency-groups]
 dev = [
     "ruff>=0.6",
-    "mypy>=1.11",
+    "ty>=0.0.60",
     "pytest>=8.2",
     "pytest-cov>=5.0",
     "pre-commit>=3.7",
@@ -44,13 +44,9 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM", "TID"]
 ignore = ["E501"]
 
-[tool.mypy]
-python_version = "3.11"
-strict = true
-files = ["src"]
-mypy_path = "src"
-namespace_packages = true
-explicit_package_bases = true
+[tool.ty.environment]
+python-version = "3.11"
+root = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

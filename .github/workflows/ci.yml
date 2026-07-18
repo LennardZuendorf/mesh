@@ -1,0 +1,43 @@
+name: CI
+
+# Minimal gate for cli-toolset-rework/2, extended by cli-toolset-rework/5 with
+# a `ruff format --check` gate. The spec-test-count drift check listed in the
+# gaps table is deliberately NOT added here — the count is still settling and
+# the controller syncs it in the spec during the branch's finishing phase.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format (ruff format --check)
+        run: uv run ruff format --check .
+
+      - name: Type-check (ty)
+        run: uv run ty check src/
+
+      - name: Test (pytest)
+        run: uv run pytest -q
+
+      - name: Startup guard (heavy deps off the CLI fast path)
+        run: uv run pytest tests/test_startup_guard.py -q

@@ -23,6 +23,7 @@ _NOTE_SUBDIRS: dict[str, tuple[str, ...]] = {
     "log": ("notes", "logs"),
     "decision": ("notes", "decisions"),
     "reference": ("notes", "references"),
+    "project": ("notes", "projects"),
 }
 
 # task status -> path relative to the vault root. Live work (open/claimed) sits

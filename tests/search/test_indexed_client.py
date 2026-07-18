@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -36,7 +35,7 @@ from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
 from shards.index import indexed_client
-from shards.index.watch import clear_change_hooks, on_vault_change
+from shards.index.watcher import ChangeHooks
 from shards.schemas.config import Config, load_config
 from shards.schemas.search import SearchResult
 
@@ -52,14 +51,6 @@ _FALLBACK_NOTICE = "search: using substring fallback (indexed unavailable)"
 @pytest.fixture
 def cfg(shards_config: Path) -> Config:
     return load_config()
-
-
-@pytest.fixture(autouse=True)
-def _clean_hooks() -> Iterator[None]:
-    """Keep the module-level watcher hook registry from leaking across tests."""
-    clear_change_hooks()
-    yield
-    clear_change_hooks()
 
 
 def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
@@ -199,6 +190,148 @@ def test_search_sandbox_skips_escaping_path(
     )
     results = indexed_client.search(cfg, "q")
     assert [r.id for r in results] == ["n-in"]
+
+
+# --------------------------------------------------------------------------- #
+# search(): pinned NDJSON hit schema — drift is detected, not mis-parsed       #
+# --------------------------------------------------------------------------- #
+
+
+def test_search_skips_hit_missing_required_path(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A drifted `indexed` release that drops `path` from a hit must not crash
+    # the query or silently coerce a bogus SearchResult — that one hit is
+    # skipped and every well-shaped hit around it still comes through.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"score": 0.95, "snippet": "no path here"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_skips_hit_missing_required_score(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `bad` is a real, readable file — proving the hit is dropped by the schema
+    # check itself, not merely because its path failed to resolve.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    bad = _seed(vault, "notes", entry_id="n-bad", title="Bad")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"path": str(bad), "snippet": "no score here"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_skips_hit_with_wrong_typed_score(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A shape drift where `score` becomes a string (or any non-numeric JSON
+    # value) is a validation failure against the pinned schema, not something
+    # silently coerced into a comparable float. `bad` is a real file so a
+    # regression that lets the hit through would surface as an extra id.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    bad = _seed(vault, "notes", entry_id="n-bad", title="Bad")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"path": str(bad), "score": "not-a-number", "snippet": "s"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_rejects_boolean_score(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # JSON `true`/`false` decode to Python bool, a float subtype pitfall the
+    # pinned schema must reject explicitly rather than silently treating as
+    # 1.0/0.0. `bad` is a real file for the same reason as above.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    bad = _seed(vault, "notes", entry_id="n-bad", title="Bad")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"path": str(bad), "score": True, "snippet": "s"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_tolerates_unknown_extra_fields_in_hit(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Forward-compatibility: indexed adding fields we don't model yet (an `id`,
+    # nested `metadata`, ...) must not break the pinned decode.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {
+                "path": str(keep),
+                "score": 0.9,
+                "snippet": "s",
+                "id": "indexed-internal-id",
+                "metadata": {"engine": "hybrid", "rank": 1},
+            }
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_coerces_integer_score_to_float(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(monkeypatch, _ndjson({"path": str(keep), "score": 1, "snippet": "s"}))
+    results = indexed_client.search(cfg, "q", threshold=0.0)
+    assert results[0].score == 1.0
+
+
+def test_search_snippet_defaults_to_none_when_absent(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(monkeypatch, _ndjson({"path": str(keep), "score": 0.9}))
+    results = indexed_client.search(cfg, "q")
+    assert results[0].snippet is None
+
+
+def test_parse_ndjson_skips_blank_and_garbled_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = "\n".join(
+        [
+            "",
+            "not json at all",
+            '{"path": "/a", "score": 0.5}',
+            "   ",
+            '["not", "an", "object"]',
+        ]
+    )
+    hits = indexed_client._parse_ndjson(text)
+    assert len(hits) == 1
+    assert hits[0].path == "/a"
+    assert hits[0].score == 0.5
+
+
+def test_parse_ndjson_decodes_through_the_pinned_schema() -> None:
+    text = '{"path": "/a", "score": 1, "snippet": "s"}'
+    hits = indexed_client._parse_ndjson(text)
+    assert hits == [indexed_client._IndexedHit(path="/a", score=1.0, snippet="s")]
 
 
 # --------------------------------------------------------------------------- #
@@ -496,9 +629,10 @@ def test_register_hook_drives_incremental_update(
         calls.append((config, path))
 
     monkeypatch.setattr(indexed_client, "incremental_update", _record)
-    indexed_client.register_hook(cfg)
+    hooks = ChangeHooks()
+    indexed_client.register_hook(cfg, hooks)
     changed = vault / "notes" / "n-x.md"
-    on_vault_change(changed)  # the watcher fans out to registered hooks
+    hooks.fire(changed)  # the watcher fans out to registered hooks
     assert calls == [(cfg, changed)]
 
 
@@ -511,7 +645,7 @@ def test_cli_hybrid_uses_indexed_when_daemon_up(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hit = _seed(vault, "notes", entry_id="n-hit", title="Hybrid Note")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
     _patch_search(
         monkeypatch, _ndjson({"path": str(hit), "score": 0.91, "snippet": "indexed snip"})
     )
@@ -528,7 +662,7 @@ def test_cli_hybrid_falls_back_on_called_process_error(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
 
     def _raise(*_a: object, **_k: object) -> str:
         raise subprocess.CalledProcessError(1, ["indexed"])
@@ -546,7 +680,7 @@ def test_cli_hybrid_falls_back_on_missing_binary(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
 
     def _raise(*_a: object, **_k: object) -> str:
         raise FileNotFoundError("indexed")
@@ -561,7 +695,7 @@ def test_cli_substring_when_daemon_down(
     shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: False)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: False)
 
     def _boom(*_a: object, **_k: object) -> str:
         raise AssertionError("indexed must not be shelled when the daemon is down")
@@ -585,7 +719,7 @@ def test_cli_hybrid_honours_status_filter(
     done_task = _seed(
         vault, "tasks/done", entry_id="t-done", entry_type="task", status="done", title="Shared"
     )
-    monkeypatch.setattr("shards.cli.search._daemon_up", lambda: True)
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
     _patch_search(
         monkeypatch,
         _ndjson(

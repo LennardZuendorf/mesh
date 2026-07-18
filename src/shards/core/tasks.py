@@ -25,7 +25,7 @@ from pathlib import Path
 
 import frontmatter
 import yaml
-from pydantic import ValidationError
+from msgspec import ValidationError
 
 from shards.core.ids import generate_task_id
 from shards.core.notes import _matches_tags, _parse_since, _validate_owner, apply_tag_spec
@@ -142,6 +142,7 @@ def create_task(
     tags: list[str] | None = None,
     owner: str | None = None,
     body: str = "",
+    project: str | None = None,
     blocks: list[str] | None = None,
     blocked_by: list[str] | None = None,
 ) -> Task:
@@ -152,9 +153,12 @@ def create_task(
     ``created == updated`` to the same instant (birth). ``owner`` defaults to the
     resolved config agent when not given; an explicit ``owner`` outside a
     non-empty ``[tasks].collections`` raises ``ValueError`` (CLI exit 2 — checked
-    before any write, so nothing is created). ``blocks``/``blocked_by`` are stored
-    verbatim but carry no readiness logic in v1. ``related`` is derived from the
-    body's wikilinks, exactly as notes. The write is atomic.
+    before any write, so nothing is created). ``project`` is an optional soft link
+    to a ``type: project`` note id (no validation — any string, a dangling id is
+    tolerated); like ``priority`` it is a declared optional, written as ``null``
+    when unset. ``blocks``/``blocked_by`` are stored verbatim but carry no
+    readiness logic in v1. ``related`` is derived from the body's wikilinks,
+    exactly as notes. The write is atomic.
     """
     _validate_owner(config, owner)
 
@@ -177,6 +181,7 @@ def create_task(
             "status": "open",
             "priority": priority,
             "claimed_by": None,
+            "project": project,
             "blocks": list(blocks or []),
             "blocked_by": list(blocked_by or []),
         }
@@ -197,22 +202,25 @@ def update_task(
     priority: str | None = None,
     tags: str | None = None,
     title: str | None = None,
+    project: str | None = None,
     blocks: list[str] | None = None,
     blocked_by: list[str] | None = None,
 ) -> Task:
     """Update a task's fields in place and bump ``updated`` (R1).
 
-    Only the supplied fields change: ``priority`` and ``title`` are set directly,
-    ``tags`` mutates the tag list (delta ``+x,-y`` or replacement — see
-    :func:`shards.core.notes.apply_tag_spec`), and ``blocks``/``blocked_by`` are
-    replaced verbatim (inert — no readiness logic). The read-modify-write runs
+    Only the supplied fields change: ``priority``, ``title`` and ``project`` are
+    set directly, ``tags`` mutates the tag list (delta ``+x,-y`` or replacement —
+    see :func:`shards.core.notes.apply_tag_spec`), and ``blocks``/``blocked_by``
+    are replaced verbatim (inert — no readiness logic). The read-modify-write runs
     under the per-entity ``O_EXCL`` lock and mutates the parsed metadata in place
     (never rebuilding it), so ``status``, ``claimed_by``, ``owner``, ``related``
-    and any unknown keys round-trip untouched. The write is atomic. The id is
-    resolved *inside* the lock (the lock id derives from ``task_id``, not the file
-    location, so it stays stable across a concurrent finish/cancel move), closing
-    the window where a racing finish renames the file open→done before this write.
-    Raises :class:`TaskNotFoundError` when the id resolves to no file.
+    and any unknown keys round-trip untouched — and a task that carried no
+    ``project`` key keeps carrying none unless ``project`` is passed here. The
+    write is atomic. The id is resolved *inside* the lock (the lock id derives
+    from ``task_id``, not the file location, so it stays stable across a
+    concurrent finish/cancel move), closing the window where a racing finish
+    renames the file open→done before this write. Raises
+    :class:`TaskNotFoundError` when the id resolves to no file.
     """
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
@@ -221,6 +229,8 @@ def update_task(
             post.metadata["priority"] = priority
         if title is not None:
             post.metadata["title"] = title
+        if project is not None:
+            post.metadata["project"] = project
         if tags is not None:
             current = post.metadata.get("tags") or []
             existing = [str(t) for t in current] if isinstance(current, list) else []
@@ -358,9 +368,7 @@ def finish_task(config: Config, task_id: str, outcome: str | None = None) -> Tas
     :class:`TaskNotFoundError` when the id resolves to no file. See
     :func:`_terminate_task` for the shared lock/write/move mechanics.
     """
-    return _terminate_task(
-        config, task_id, heading=_OUTCOME_HEADING, status="done", text=outcome
-    )
+    return _terminate_task(config, task_id, heading=_OUTCOME_HEADING, status="done", text=outcome)
 
 
 def cancel_task(config: Config, task_id: str, reason: str | None = None) -> Task:
@@ -435,6 +443,7 @@ def list_tasks(
     mine: bool = False,
     tags: list[str] | None = None,
     any_tag: bool = False,
+    project: str | None = None,
     since: str | None = None,
     sort: str = "updated",
     limit: int | None = _DEFAULT_LIMIT,
@@ -446,10 +455,11 @@ def list_tasks(
     foreign / malformed files are skipped silently. Filters (all conjunctive):
     exact ``status``, exact ``owner`` (on the ``owner`` field), ``mine`` (``owner``
     *or* ``claimed_by`` equals the configured agent), ``tags`` (AND, or OR with
-    ``any_tag``), and ``since`` recency on ``updated``. ``sort`` is
-    ``updated``/``created`` (descending) or ``title`` (ascending); ``limit`` caps
-    the result (``None`` for unbounded). Shares the ``--since``/tag/sort semantics
-    with :func:`shards.core.notes.list_notes`.
+    ``any_tag``), exact ``project`` (the project-scoped view — only tasks whose
+    ``project`` soft link matches), and ``since`` recency on ``updated``. ``sort``
+    is ``updated``/``created`` (descending) or ``title`` (ascending); ``limit``
+    caps the result (``None`` for unbounded). Shares the ``--since``/tag/sort
+    semantics with :func:`shards.core.notes.list_notes`.
     """
     if sort not in _SORT_FIELDS:
         raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
@@ -476,6 +486,8 @@ def list_tasks(
         if owner is not None and task.owner != owner:
             continue
         if mine and task.owner != me and task.claimed_by != me:
+            continue
+        if project is not None and task.project != project:
             continue
         if tags and not _matches_tags(task.tags, tags, any_tag):
             continue

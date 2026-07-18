@@ -38,7 +38,7 @@ Follow the **ASK → PLAN → CONFIRM → EXECUTE** loop:
 3. **CONFIRM** — get explicit user approval before implementing.
 4. **EXECUTE** — implement incrementally with clear explanations.
 
-Quality over speed. Simplicity (KISS) wins. Strict typing (mypy), `ruff`-clean, meaningful test
+Quality over speed. Simplicity (KISS) wins. Strict typing (`ty`), `ruff`-clean, meaningful test
 coverage, and an instant-feeling CLI (heavy work lives in the warm daemon, not at startup).
 
 ---
@@ -69,12 +69,13 @@ memory subsystem, or an external task tracker.
 
 **Language & runtime:** Python 3.11+, `uv`.
 
-**Core libraries:** `typer` (CLI), `python-frontmatter` (YAML frontmatter), `pydantic` v2
+**Core libraries:** `typer` (CLI), `python-frontmatter` (YAML frontmatter), `msgspec`
 (schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search is delegated to
 the first-party `indexed` engine (hybrid lexical + vector); Shards keeps only a deterministic
 tag-pull and a substring fallback in-process.
 
-**Dev tools:** `ruff` (lint/format), `mypy` (strict), `pytest` + `pytest-cov`, `pre-commit`.
+**Dev tools:** `ruff` (lint/format), `ty` (type-check — Astral's Rust-based checker, currently
+preview), `pytest` + `pytest-cov`, `pre-commit`.
 
 ---
 
@@ -86,14 +87,14 @@ tag-pull and a substring fallback in-process.
 uv sync --all-groups              # Install all dependencies
 uv run ruff check . --fix         # Lint with auto-fix
 uv run ruff format .              # Format
-uv run mypy src/                  # Type-check (strict)
+uv run ty check src/              # Type-check (strict)
 uv run pytest -q                  # Run tests
 uv run pytest -q --cov=src        # With coverage
 uv run shards --help               # CLI help
 uv run shards daemon start         # Start the local daemon
 ```
 
-> Phase 1–2 is **delivered** — all five features implemented and tested (578 tests, mypy strict,
+> Phase 1–2 is **delivered** — all five features implemented and tested (678 tests, ty clean,
 > ruff clean). Phase 3 (tasks-graph) is deferred; the commands above are live.
 
 ### Git commit standards
@@ -134,7 +135,7 @@ shards/
     ├── daemon/          # asyncio unix-socket server: watcher + warm frontmatter index (drives indexed)
     ├── core/            # domain logic: ids, notes, tasks, wikilinks, activity, context
     ├── index/           # indexed client, tag-pull, substring fallback, watch
-    ├── schemas/         # pydantic models (note, task, config)
+    ├── schemas/         # msgspec models (note, task, config)
     └── storage/         # atomic writes, O_EXCL locks, path sandbox
 ```
 
@@ -149,8 +150,17 @@ shards/
   unblock-cascade arrives with the deferred dependency-graph phase).
 - **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys; never inject machinery into bodies.
 - **Path sandboxing.** All file access stays inside `tolaria_path`; reject traversal/symlink escapes.
+- **Owner identity is trusted local input, not an authorization boundary.** `$SHARDS_AGENT` /
+  `--owner` / `claimed_by` say who an agent *claims* to be; `[tasks].collections` gates which
+  identities are valid, but nothing verifies an agent calling the CLI/MCP tools actually *is* the
+  owner it claims — any agent with local access can pass any valid `--owner`. This is fine for a
+  trusted local fleet on one operator's machine; it is not an auth boundary and must not be treated
+  as one if shards ever crosses a multi-user/multi-machine trust line.
 - **Agent content is data**, never instructions or shell input.
 - **Hash IDs** (`n-…`, `t-…`), never sequential.
+- **Delete is a hard `unlink`, by design.** No soft-delete/trash: Tolaria's git-backed vault is the
+  recovery path, and a `.trash/` would add a second delete lifecycle to keep in sync with it —
+  evaluated and deferred, not built.
 
 ---
 
@@ -167,7 +177,7 @@ shards/
 **DO ✅**
 - Read the spec and route spec changes through the `spec` skill, first.
 - Ask → plan → confirm → execute; get approval before coding.
-- Keep the surface at three verbs; use comprehensive type hints and Pydantic validation.
+- Keep the surface at three verbs; use comprehensive type hints and msgspec validation.
 - Make writes atomic and idempotent; keep the CLI usable without the daemon.
 
 **DON'T ❌**

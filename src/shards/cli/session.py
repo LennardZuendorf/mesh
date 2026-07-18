@@ -27,28 +27,37 @@ identically.
 task queue, de-duplicates by id, and orders *tasks first* then the remaining
 activity newest-first — the payload the ``SessionStart`` hook feeds a fresh
 agent session.
+
+``graph`` (cli-toolset-rework/3) delegates to :func:`shards.core.context.graph_query`
+— the same daemon-free BFS ``build-context`` performs, promoted to a first-class
+"what's connected to X" query. ``--json`` emits ``{seed, nodes, edges}``; the
+default text is a readable indented tree; ``--quiet`` is ids only. Like
+``build-context`` it never touches the daemon or hybrid search, so it has no
+degradation notice.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from typing import Any
+from typing import NoReturn
 
 import typer
 
-from shards.core.activity import recent_activity
-from shards.core.context import SeedNotFoundError, build_context
+from shards.core.lenses import (
+    ProjectNotFoundError,
+    SeedNotFoundError,
+    build_context,
+    graph_query,
+    project_view,
+    recent_activity,
+    session_start_entries,
+)
 from shards.core.tasks import list_tasks
 from shards.daemon.client import DaemonClient
-from shards.index.watch import DEFAULT_RECENT_LIMIT
+from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.schemas.config import load_config
 
 _DAEMON_DOWN_NOTICE = "recent-activity: daemon down, scanning the folder directly"
-
-# session-start only surfaces the caller's *live* queue — the non-terminal
-# statuses. Terminal (done/cancelled) tasks are dropped from the task section.
-_OPEN_STATUSES: frozenset[str] = frozenset({"open", "claimed"})
 _SESSION_SINCE = "7d"
 
 
@@ -58,6 +67,26 @@ def _daemon_up() -> bool:
     Kept as a module-level seam so tests can fake daemon liveness without a socket.
     """
     return DaemonClient().is_up()
+
+
+def _coalesce(ctx: typer.Context, json_out: bool, quiet: bool) -> tuple[bool, bool]:
+    """Coalesce the leaf ``--json``/``--quiet`` flags with the root callback's globals.
+
+    A flag given on either side of the command name takes effect — shared by
+    every lens command below.
+    """
+    return (
+        json_out or bool(getattr(ctx.obj, "json", False)),
+        quiet or bool(getattr(ctx.obj, "quiet", False)),
+    )
+
+
+def _lens_not_found(quiet: bool, message: str) -> NoReturn:
+    """Emit ``message`` to stderr (unless ``--quiet``) and exit 3 — the shared
+    not-found skeleton for the seed/project lenses."""
+    if not quiet:
+        typer.echo(message, err=True)
+    raise typer.Exit(3) from None
 
 
 def recent_activity_command(
@@ -74,8 +103,7 @@ def recent_activity_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
     owner = owner if owner is not None else getattr(ctx.obj, "owner", None)
     mine = mine or bool(getattr(ctx.obj, "mine", False))
 
@@ -105,27 +133,6 @@ def recent_activity_command(
         )
 
 
-def _updated_key(entry: dict[str, Any]) -> float:
-    """Descending-sort key for the activity remainder: ``updated`` then ``mtime``.
-
-    Remaining entries come from :func:`recent_activity`, whose rows carry
-    ``mtime`` (the on-disk ``updated`` proxy) rather than a parsed ``updated``
-    field — so ``mtime`` is the effective sort. A parsed ``updated`` ISO string
-    is honoured first for robustness; a missing/unparseable value → ``0.0``
-    (sorts oldest).
-    """
-    updated = entry.get("updated")
-    if isinstance(updated, str):
-        try:
-            return datetime.fromisoformat(updated.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            pass
-    mtime = entry.get("mtime")
-    if isinstance(mtime, (int, float)):
-        return float(mtime)
-    return 0.0
-
-
 def session_start_command(
     ctx: typer.Context,
     meta_only: bool = typer.Option(
@@ -149,33 +156,17 @@ def session_start_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag on
     # either side of the command name takes effect.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
 
     # Source A — my live queue: every open/claimed task I own or have claimed.
-    task_views = [
-        view
-        for view in list_tasks(config, mine=True, limit=None)
-        if view.task.status in _OPEN_STATUSES
-    ]
-    task_ids = {view.task.id for view in task_views}
-    task_entries: list[dict[str, Any]] = []
-    for view in task_views:
-        entry = view.task.model_dump(mode="json")
-        entry["path"] = str(view.path)
-        if not meta_only:
-            entry["body"] = view.body
-        task_entries.append(entry)
-
-    # Source B — my recent changes. Dedup is by *id* (not type): a task already
-    # in the queue above is dropped here, so it is listed exactly once.
+    task_views = list_tasks(config, mine=True, limit=None)
+    # Source B — my recent changes (dedup by id happens in the compose step below).
     activity = recent_activity(
         config, since=_SESSION_SINCE, owner=None, mine=True, limit=DEFAULT_RECENT_LIMIT
     )
-    remaining = [entry for entry in activity if entry.get("id") not in task_ids]
-    remaining.sort(key=_updated_key, reverse=True)
-
-    entries = task_entries + remaining
+    # Compose the warm-start payload: open/claimed tasks first (deduped by id),
+    # then the remaining activity newest-first.
+    entries = session_start_entries(task_views, activity, meta_only=meta_only)
 
     if json_out:
         typer.echo(json.dumps(entries))
@@ -204,15 +195,12 @@ def build_context_command(
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect. This lens is daemon-free —
     # every node is read off disk — so there is no degradation notice.
-    json_out = json_out or bool(getattr(ctx.obj, "json", False))
-    quiet = quiet or bool(getattr(ctx.obj, "quiet", False))
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
 
     try:
         entries = build_context(config, seed_id, depth=depth)
     except SeedNotFoundError:
-        if not quiet:
-            typer.echo(f"build-context: seed not found: {seed_id}", err=True)
-        raise typer.Exit(3) from None
+        _lens_not_found(quiet, f"build-context: seed not found: {seed_id}")
 
     if json_out:
         typer.echo(json.dumps(entries))
@@ -226,3 +214,75 @@ def build_context_command(
             f"{entry.get('id', '')}\t{entry.get('type', '')}\t"
             f"{entry.get('title', '')}\t{entry.get('path', '')}"
         )
+
+
+def graph_command(
+    ctx: typer.Context,
+    seed_id: str = typer.Argument(..., help="Seed note/task id (n-… or t-…) to expand from."),
+    depth: int = typer.Option(1, "--depth", help="Hops to walk (0 = seed only; 1 = direct)."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable {seed, nodes, edges}."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only, one per line."),
+) -> None:
+    """Query what's connected to a seed id: readable tree, or JSON nodes+edges."""
+    config = load_config()
+
+    # Coalesce the leaf flags with the root callback's global flags so a flag given
+    # on either side of the command name takes effect. Same daemon-free traversal
+    # as build-context, so there is no degradation notice.
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
+
+    try:
+        result = graph_query(config, seed_id, depth=depth)
+    except SeedNotFoundError:
+        _lens_not_found(quiet, f"graph: seed not found: {seed_id}")
+
+    # Both branches below render the one already-computed `result` — no second
+    # traversal for JSON vs. tree output.
+    if json_out:
+        typer.echo(json.dumps(result.to_dict()))
+        return
+    if quiet:
+        for entry_id in result.ids:
+            typer.echo(entry_id)
+        return
+    for line in result.tree_lines():
+        typer.echo(line)
+
+
+def project_command(
+    ctx: typer.Context,
+    project_id: str = typer.Argument(..., help="Project note id (n-…) to scope to."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable {project, tasks}."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only (project then tasks)."),
+) -> None:
+    """Show a project note and the tasks scoped to it — a read-only lens, not a verb.
+
+    Delegates to :func:`shards.core.lenses.project_view`: the project note plus
+    every task whose ``project`` soft link matches. ``--json`` emits
+    ``{project, tasks}``; the default text is the project row then its task rows;
+    ``--quiet`` is ids only (project id first). Daemon-free — every node is read
+    off disk — so there is no degradation notice; an unresolvable project exits 3.
+    """
+    config = load_config()
+
+    # Coalesce the leaf flags with the root callback's global flags so a flag given
+    # on either side of the command name takes effect.
+    json_out, quiet = _coalesce(ctx, json_out, quiet)
+
+    try:
+        result = project_view(config, project_id)
+    except ProjectNotFoundError:
+        _lens_not_found(quiet, f"project: not found: {project_id}")
+
+    if json_out:
+        typer.echo(json.dumps(result.to_dict()))
+        return
+    if quiet:
+        typer.echo(str(result.project.get("id", "")))
+        for task in result.tasks:
+            typer.echo(str(task.get("id", "")))
+        return
+    project = result.project
+    typer.echo(f"{project.get('id', '')}\t{project.get('type', '')}\t{project.get('title', '')}")
+    for task in result.tasks:
+        typer.echo(f"  {task.get('id', '')}\t{task.get('status', '')}\t{task.get('title', '')}")

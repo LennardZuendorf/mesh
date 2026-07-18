@@ -213,10 +213,19 @@ def test_finish_reconciles_crash_stranded_file(cfg: Config, vault: Path) -> None
     reconcile it into done/ rather than short-circuit and leave it unrecoverable.
     """
     meta: dict[str, object] = {
-        "id": "t-crash", "type": "task", "title": "Crash", "tags": [],
-        "owner": "seed-agent", "created": _OLD, "updated": _OLD, "related": [],
-        "status": "done", "priority": None, "claimed_by": None,
-        "blocks": [], "blocked_by": [],
+        "id": "t-crash",
+        "type": "task",
+        "title": "Crash",
+        "tags": [],
+        "owner": "seed-agent",
+        "created": _OLD,
+        "updated": _OLD,
+        "related": [],
+        "status": "done",
+        "priority": None,
+        "claimed_by": None,
+        "blocks": [],
+        "blocked_by": [],
     }
     stranded = task_folder("open", vault) / "t-crash.md"
     stranded.write_text(

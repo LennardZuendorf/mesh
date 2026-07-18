@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import get_args
 
 import frontmatter
-from pydantic import ValidationError
+from msgspec import ValidationError
 
 from shards.core.ids import generate_note_id
 from shards.core.wikilinks import resolve_wikilinks
