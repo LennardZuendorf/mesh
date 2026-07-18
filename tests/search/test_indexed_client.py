@@ -193,6 +193,148 @@ def test_search_sandbox_skips_escaping_path(
 
 
 # --------------------------------------------------------------------------- #
+# search(): pinned NDJSON hit schema — drift is detected, not mis-parsed       #
+# --------------------------------------------------------------------------- #
+
+
+def test_search_skips_hit_missing_required_path(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A drifted `indexed` release that drops `path` from a hit must not crash
+    # the query or silently coerce a bogus SearchResult — that one hit is
+    # skipped and every well-shaped hit around it still comes through.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"score": 0.95, "snippet": "no path here"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_skips_hit_missing_required_score(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `bad` is a real, readable file — proving the hit is dropped by the schema
+    # check itself, not merely because its path failed to resolve.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    bad = _seed(vault, "notes", entry_id="n-bad", title="Bad")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"path": str(bad), "snippet": "no score here"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_skips_hit_with_wrong_typed_score(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A shape drift where `score` becomes a string (or any non-numeric JSON
+    # value) is a validation failure against the pinned schema, not something
+    # silently coerced into a comparable float. `bad` is a real file so a
+    # regression that lets the hit through would surface as an extra id.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    bad = _seed(vault, "notes", entry_id="n-bad", title="Bad")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"path": str(bad), "score": "not-a-number", "snippet": "s"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_rejects_boolean_score(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # JSON `true`/`false` decode to Python bool, a float subtype pitfall the
+    # pinned schema must reject explicitly rather than silently treating as
+    # 1.0/0.0. `bad` is a real file for the same reason as above.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    bad = _seed(vault, "notes", entry_id="n-bad", title="Bad")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {"path": str(bad), "score": True, "snippet": "s"},
+            {"path": str(keep), "score": 0.90, "snippet": "s"},
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_tolerates_unknown_extra_fields_in_hit(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Forward-compatibility: indexed adding fields we don't model yet (an `id`,
+    # nested `metadata`, ...) must not break the pinned decode.
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(
+        monkeypatch,
+        _ndjson(
+            {
+                "path": str(keep),
+                "score": 0.9,
+                "snippet": "s",
+                "id": "indexed-internal-id",
+                "metadata": {"engine": "hybrid", "rank": 1},
+            }
+        ),
+    )
+    results = indexed_client.search(cfg, "q")
+    assert [r.id for r in results] == ["n-keep"]
+
+
+def test_search_coerces_integer_score_to_float(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(monkeypatch, _ndjson({"path": str(keep), "score": 1, "snippet": "s"}))
+    results = indexed_client.search(cfg, "q", threshold=0.0)
+    assert results[0].score == 1.0
+
+
+def test_search_snippet_defaults_to_none_when_absent(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep = _seed(vault, "notes", entry_id="n-keep", title="Keep")
+    _patch_search(monkeypatch, _ndjson({"path": str(keep), "score": 0.9}))
+    results = indexed_client.search(cfg, "q")
+    assert results[0].snippet is None
+
+
+def test_parse_ndjson_skips_blank_and_garbled_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = "\n".join(
+        [
+            "",
+            "not json at all",
+            '{"path": "/a", "score": 0.5}',
+            "   ",
+            '["not", "an", "object"]',
+        ]
+    )
+    hits = indexed_client._parse_ndjson(text)
+    assert len(hits) == 1
+    assert hits[0].path == "/a"
+    assert hits[0].score == 0.5
+
+
+def test_parse_ndjson_decodes_through_the_pinned_schema() -> None:
+    text = '{"path": "/a", "score": 1, "snippet": "s"}'
+    hits = indexed_client._parse_ndjson(text)
+    assert hits == [indexed_client._IndexedHit(path="/a", score=1.0, snippet="s")]
+
+
+# --------------------------------------------------------------------------- #
 # search(): ordering — score with a recency tiebreak within 0.02              #
 # --------------------------------------------------------------------------- #
 

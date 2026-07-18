@@ -5,14 +5,25 @@ Shards owns the *interface* to search, not the ranking: this module shells the
 shape. Three responsibilities, all daemon-optional:
 
 * **:func:`search`** — run ``indexed index search "<q>" --collection <c> --json
-  --limit N``, parse the NDJSON hits (``{path, score, snippet}``), and rehydrate
-  each into a :class:`SearchResult` by reading the frontmatter at ``path``. Foreign
-  (non-shards) files surface with ``id=None``; paths that escape the vault sandbox
-  or no longer exist are dropped. Results sort by ``score`` descending with a
-  recency tiebreak: two hits whose scores fall within :data:`_TIEBREAK_EPSILON`
-  order by ``updated`` descending. When ``[search].collection`` is unset the engine
-  is disabled and the call degrades to the in-process substring
+  --limit N``, parse the NDJSON hits through the pinned :class:`_IndexedHit` schema
+  (``{path, score, snippet?}`` — see below), and rehydrate each into a
+  :class:`SearchResult` by reading the frontmatter at ``path``. Foreign (non-shards)
+  files surface with ``id=None``; paths that escape the vault sandbox or no longer
+  exist are dropped. Results sort by ``score`` descending with a recency tiebreak:
+  two hits whose scores fall within :data:`_TIEBREAK_EPSILON` order by ``updated``
+  descending. When ``[search].collection`` is unset the engine is disabled and the
+  call degrades to the in-process substring
   :func:`~shards.index.fallback.search_fallback`.
+
+* **:class:`_IndexedHit`** — pins the ``indexed`` NDJSON hit contract: ``path`` and
+  ``score`` are required, ``snippet`` optional. Decoding through an explicit schema
+  (rather than duck-typed ``dict.get`` calls) means a shape drift in ``indexed``'s
+  output — a renamed/missing required field, a ``score`` that stops being numeric —
+  is *detected* (that one line is skipped) instead of *silently mis-parsed* (e.g. a
+  wrong-typed ``score`` quietly comparing as truthy). Unknown extra keys ``indexed``
+  may add are ignored (msgspec's default), so the parse stays forward-compatible.
+  One malformed line degrades that one hit, never the whole query — the
+  graceful-degradation contract holds even when the shape drifts.
 
 * **:func:`incremental_update` / :func:`full_rebuild` / :func:`reindex`** — keep the
   ``indexed`` collection fresh: update one path (``indexed index update``) or
@@ -40,11 +51,12 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+import msgspec
 
 from shards.index.fallback import search_fallback
 from shards.index.tagpull import (
@@ -128,19 +140,42 @@ def _run_indexed_create(root: Path, collection: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _parse_ndjson(text: str) -> list[dict[str, Any]]:
-    """Parse ``indexed``'s NDJSON stdout into hit dicts (blank/garbled lines skipped)."""
-    hits: list[dict[str, Any]] = []
+class _IndexedHit(msgspec.Struct, kw_only=True):
+    """Pins the ``indexed`` NDJSON hit contract: ``path`` + ``score`` required.
+
+    ``path`` locates the file on disk; ``score`` is ``indexed``'s numeric rank
+    (JSON integers coerce to ``float``; JSON booleans do **not** — msgspec treats
+    ``bool`` as a distinct JSON type, so a stray ``true``/``score`` never silently
+    reads as ``1.0``). ``snippet`` is optional. Any other key ``indexed`` emits is
+    ignored on decode (msgspec's default for a :class:`~msgspec.Struct` with no
+    ``forbid_unknown_fields``), so adding fields upstream never breaks this parse
+    — only *removing*/*retyping* one of the two required fields does, and that
+    failure is caught per-line in :func:`_parse_ndjson`, not raised.
+    """
+
+    path: str
+    score: float
+    snippet: str | None = None
+
+
+def _parse_ndjson(text: str) -> list[_IndexedHit]:
+    """Decode ``indexed``'s NDJSON stdout through :class:`_IndexedHit`.
+
+    One JSON object per line. Blank lines, malformed JSON, and lines that don't
+    match the pinned shape (missing/wrong-typed ``path``/``score``) are skipped
+    individually via :class:`msgspec.DecodeError` (the base of
+    :class:`msgspec.ValidationError` too) — a single bad line degrades that one
+    hit, never the whole query result.
+    """
+    hits: list[_IndexedHit] = []
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
         try:
-            obj = json.loads(stripped)
-        except json.JSONDecodeError:
+            hits.append(msgspec.json.decode(stripped, type=_IndexedHit))
+        except msgspec.DecodeError:
             continue
-        if isinstance(obj, dict):
-            hits.append(obj)
     return hits
 
 
@@ -159,14 +194,6 @@ def _compare(a: SearchResult, b: SearchResult) -> int:
             return -1 if a.score > b.score else 1
         return 0
     return -1 if a.score > b.score else 1
-
-
-def _hit_score(hit: dict[str, Any]) -> float | None:
-    """The hit's numeric ``score`` (``None`` if missing or non-numeric)."""
-    raw = hit.get("score")
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return None
-    return float(raw)
 
 
 # --------------------------------------------------------------------------- #
@@ -232,14 +259,10 @@ def search(
 
     results: list[SearchResult] = []
     for hit in _parse_ndjson(raw):
-        raw_path = hit.get("path")
-        if not isinstance(raw_path, str):
-            continue
-        score = _hit_score(hit)
-        if score is None or score < threshold:
+        if hit.score < threshold:
             continue
         try:
-            path = safe_resolve(vault, Path(raw_path))
+            path = safe_resolve(vault, Path(hit.path))
         except ValueError:
             continue  # a hit outside the vault sandbox is never read
         row = read_row(path)
@@ -255,15 +278,7 @@ def search(
             status=status,
         ):
             continue
-        snippet = hit.get("snippet")
-        results.append(
-            to_result(
-                path,
-                row.meta,
-                score=score,
-                snippet=snippet if isinstance(snippet, str) else None,
-            )
-        )
+        results.append(to_result(path, row.meta, score=hit.score, snippet=hit.snippet))
 
     results.sort(key=functools.cmp_to_key(_compare))
     if limit >= 0:
