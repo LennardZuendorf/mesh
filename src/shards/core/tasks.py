@@ -32,7 +32,7 @@ from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.task import Task
 from shards.storage.files import atomic_write, read_post, task_folder
-from shards.storage.locks import hold
+from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
 
 _ID_PREFIX = "t-"
@@ -158,39 +158,50 @@ def create_task(
     when unset. ``blocks``/``blocked_by`` are stored verbatim but carry no
     readiness logic in v1. ``related`` is derived from the body's wikilinks,
     exactly as notes. The write is atomic.
+
+    Id allocation (``_id_taken`` scan + the ``generate_task_id`` extension loop)
+    and the write both run under the per-kind allocator lock at
+    ``tasks/.locks/_create.lock`` (see :func:`shards.storage.locks.allocator_lock_path`),
+    so two concurrent creates that resolve the same candidate id can no longer
+    both pass the check and race ``os.replace`` — the second waits, rescans, and
+    extends past the collision instead of destroying the first file. A per-entity
+    lock cannot serve here (the id does not exist yet to name one), hence the
+    coarser per-kind lock; contention is bounded because a create is one scan
+    plus one write.
     """
     _validate_owner(config, owner)
 
     vault = config.core.tolaria_path
-    now = _now()
-    task_id = generate_task_id(
-        now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
-    )
-    _, related = resolve_wikilinks(body, vault)
-    task = Task.model_validate(
-        {
-            "id": task_id,
-            "type": "task",
-            "title": title,
-            "tags": list(tags or []),
-            "owner": owner if owner is not None else config.agent,
-            "created": now,
-            "updated": now,
-            "related": related,
-            "status": "open",
-            "priority": priority,
-            "claimed_by": None,
-            "project": project,
-            "blocks": list(blocks or []),
-            "blocked_by": list(blocked_by or []),
-        }
-    )
+    with hold(allocator_lock_path(_tasks_root(config))):
+        now = _now()
+        task_id = generate_task_id(
+            now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
+        )
+        _, related = resolve_wikilinks(body, vault)
+        task = Task.model_validate(
+            {
+                "id": task_id,
+                "type": "task",
+                "title": title,
+                "tags": list(tags or []),
+                "owner": owner if owner is not None else config.agent,
+                "created": now,
+                "updated": now,
+                "related": related,
+                "status": "open",
+                "priority": priority,
+                "claimed_by": None,
+                "project": project,
+                "blocks": list(blocks or []),
+                "blocked_by": list(blocked_by or []),
+            }
+        )
 
-    path = safe_resolve(vault, task_folder("open", vault) / f"{task_id}.md")
-    post = frontmatter.Post(body)
-    # Serialize the frontmatter from the validated model — one on-disk contract.
-    post.metadata = task.model_dump(mode="python")
-    atomic_write(path, frontmatter.dumps(post))
+        path = safe_resolve(vault, task_folder("open", vault) / f"{task_id}.md")
+        post = frontmatter.Post(body)
+        # Serialize the frontmatter from the validated model — one on-disk contract.
+        post.metadata = task.model_dump(mode="python")
+        atomic_write(path, frontmatter.dumps(post))
     return task
 
 

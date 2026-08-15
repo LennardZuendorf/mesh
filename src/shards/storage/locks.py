@@ -102,6 +102,19 @@ def _reclaim_if_stale(lock_path: Path) -> bool:
         os.close(fd)  # releases the flock
 
 
+def allocator_lock_path(kind_root: Path) -> Path:
+    """Return the per-kind allocator lock path under a ``notes/`` or ``tasks/`` root.
+
+    A create has no id yet, so the per-entity ``<id>.lock`` scheme (see callers of
+    :func:`hold` in ``core.notes``/``core.tasks``) does not apply — one coarse lock
+    per kind (``notes/.locks/_create.lock``, ``tasks/.locks/_create.lock``) is held
+    across id allocation and the write instead, closing the ``_id_taken`` ->
+    ``atomic_write`` TOCTOU. No new lock semantics: this is the same ``O_EXCL``
+    file used by every other lock in this module, just a fixed, id-less name.
+    """
+    return kind_root / ".locks" / "_create.lock"
+
+
 @contextlib.contextmanager
 def acquire(lock_path: Path) -> Iterator[Path]:
     """Context manager holding an ``O_EXCL`` lock at ``lock_path``.

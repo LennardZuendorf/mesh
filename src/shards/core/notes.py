@@ -32,7 +32,7 @@ from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.note import Note, NoteType
 from shards.storage.files import atomic_write, note_folder, read_post
-from shards.storage.locks import hold
+from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
 
 _NOTE_TYPES: tuple[str, ...] = get_args(NoteType)
@@ -204,36 +204,47 @@ def create_note(
     ``created`` and ``updated`` are set to the same instant (birth). ``owner``
     defaults to the resolved config agent (``$SHARDS_AGENT`` override applied at
     load) when not given. Raises ``ValueError`` for an unknown ``note_type``.
+
+    Id allocation (``_id_taken`` scan + the ``generate_note_id`` extension loop)
+    and the write both run under the per-kind allocator lock at
+    ``notes/.locks/_create.lock`` (see :func:`shards.storage.locks.allocator_lock_path`),
+    so two concurrent creates that resolve the same candidate id can no longer
+    both pass the check and race ``os.replace`` — the second waits, rescans, and
+    extends past the collision instead of destroying the first file. A per-entity
+    lock cannot serve here (the id does not exist yet to name one), hence the
+    coarser per-kind lock; contention is bounded because a create is one scan
+    plus one write.
     """
     if note_type not in _NOTE_TYPES:
         raise ValueError(f"invalid note type: {note_type!r}")
     _validate_owner(config, owner)
 
     vault = config.core.tolaria_path
-    now = _now()
-    note_id = generate_note_id(
-        now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
-    )
-    _, related = resolve_wikilinks(body, vault)
-    note = Note.model_validate(
-        {
-            "id": note_id,
-            "type": note_type,
-            "title": title,
-            "tags": list(tags or []),
-            "owner": owner if owner is not None else config.agent,
-            "created": now,
-            "updated": now,
-            "related": related,
-        }
-    )
+    with hold(allocator_lock_path(_notes_root(config))):
+        now = _now()
+        note_id = generate_note_id(
+            now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
+        )
+        _, related = resolve_wikilinks(body, vault)
+        note = Note.model_validate(
+            {
+                "id": note_id,
+                "type": note_type,
+                "title": title,
+                "tags": list(tags or []),
+                "owner": owner if owner is not None else config.agent,
+                "created": now,
+                "updated": now,
+                "related": related,
+            }
+        )
 
-    path = safe_resolve(vault, note_folder(note_type, vault) / f"{note_id}.md")
-    post = frontmatter.Post(body)
-    # Serialize the frontmatter from the validated model — the schema is the one
-    # on-disk contract, never a parallel hand-built dict that can drift from it.
-    post.metadata = note.model_dump(mode="python")
-    atomic_write(path, frontmatter.dumps(post))
+        path = safe_resolve(vault, note_folder(note_type, vault) / f"{note_id}.md")
+        post = frontmatter.Post(body)
+        # Serialize the frontmatter from the validated model — the schema is the
+        # one on-disk contract, never a parallel hand-built dict that can drift.
+        post.metadata = note.model_dump(mode="python")
+        atomic_write(path, frontmatter.dumps(post))
     return note
 
 
