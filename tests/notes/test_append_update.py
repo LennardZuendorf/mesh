@@ -121,6 +121,25 @@ def test_append_not_found_raises(cfg: Config, vault: Path) -> None:
         append_note(cfg, "n-missing", "x")
 
 
+def _seed_malformed(vault: Path, note_id: str = "n-bad") -> Path:
+    """Write an ``n-`` id file under ``notes/`` whose frontmatter is unparseable YAML."""
+    path = vault / "notes" / f"{note_id}.md"
+    path.write_text("---\ntitle: [unclosed\n---\nbody\n", encoding="utf-8")
+    return path
+
+
+def test_append_malformed_yaml_raises_not_found(cfg: Config, vault: Path) -> None:
+    """A resolved-but-unreadable note's content read maps to NoteNotFoundError.
+
+    ``_resolve_path`` matches on filename stem first, so a malformed target
+    still resolves; the content read (routed through ``read_post``) is what
+    fails here, and it maps to the same not-found contract as ``get_note``.
+    """
+    _seed_malformed(vault, "n-bad")
+    with pytest.raises(NoteNotFoundError):
+        append_note(cfg, "n-bad", "x")
+
+
 def test_append_section_appends_under_existing_heading(cfg: Config, vault: Path) -> None:
     _seed_note(vault, body="Intro.\n\n## Follow-ups\n\nfirst follow-up.")
     path = notes_core._resolve_path(cfg, "n-seed")
@@ -304,6 +323,13 @@ def test_update_not_found_raises(cfg: Config, vault: Path) -> None:
     _seed_note(vault)
     with pytest.raises(NoteNotFoundError):
         update_note(cfg, "n-missing", tags="+x")
+
+
+def test_update_malformed_yaml_raises_not_found(cfg: Config, vault: Path) -> None:
+    """A resolved-but-unreadable note's content read maps to NoteNotFoundError."""
+    _seed_malformed(vault, "n-bad")
+    with pytest.raises(NoteNotFoundError):
+        update_note(cfg, "n-bad", tags="+x")
 
 
 def test_update_uses_atomic_write(

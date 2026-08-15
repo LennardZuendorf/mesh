@@ -24,7 +24,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import frontmatter
-import yaml
 from msgspec import ValidationError
 
 from shards.core.ids import generate_task_id
@@ -32,7 +31,7 @@ from shards.core.notes import _matches_tags, _parse_since, _validate_owner, appl
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.task import Task
-from shards.storage.files import atomic_write, task_folder
+from shards.storage.files import atomic_write, read_post, task_folder
 from shards.storage.locks import hold
 from shards.storage.sandbox import safe_resolve
 
@@ -220,11 +219,15 @@ def update_task(
     from ``task_id``, not the file location, so it stays stable across a
     concurrent finish/cancel move), closing the window where a racing finish
     renames the file open→done before this write. Raises
-    :class:`TaskNotFoundError` when the id resolves to no file.
+    :class:`TaskNotFoundError` when the id resolves to no file, or when the
+    resolved file turns unreadable/malformed before this read (via
+    :func:`shards.storage.files.read_post`) — matching :func:`get_task`.
     """
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post = read_post(path)
+        if post is None:
+            raise TaskNotFoundError(task_id)
         if priority is not None:
             post.metadata["priority"] = priority
         if title is not None:
@@ -276,11 +279,15 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
     id is resolved *inside* the lock (the lock id derives from ``task_id``, not
     the file location, so it stays stable across a concurrent finish/cancel move),
     closing the window where a racing finish renames the file open→done before
-    this read. Raises :class:`TaskNotFoundError` when the id resolves to no file.
+    this read. Raises :class:`TaskNotFoundError` when the id resolves to no file,
+    or when the resolved file turns unreadable/malformed before this read (via
+    :func:`shards.storage.files.read_post`) — matching :func:`get_task`.
     """
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post = read_post(path)
+        if post is None:
+            raise TaskNotFoundError(task_id)
         if post.metadata.get("status") in _TERMINAL_STATUSES:
             return Task.model_validate(post.metadata)  # idempotent terminal no-op
         existing = post.metadata.get("claimed_by")
@@ -327,13 +334,17 @@ def _terminate_task(
     strand a terminal-status file in ``tasks/open/``. The terminal branch
     therefore *reconciles* rather than short-circuiting: it completes any pending
     open→done move, so no crash point leaves an unrecoverable state. Raises
-    :class:`TaskNotFoundError` when the id resolves to no file.
+    :class:`TaskNotFoundError` when the id resolves to no file, or when the
+    resolved file turns unreadable/malformed before this read (via
+    :func:`shards.storage.files.read_post`) — matching :func:`get_task`.
     """
     vault = config.core.tolaria_path
     done_path = safe_resolve(vault, task_folder("done", vault) / f"{task_id}.md")
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post = read_post(path)
+        if post is None:
+            raise TaskNotFoundError(task_id)
         if post.metadata.get("status") in _TERMINAL_STATUSES:
             _move_if_needed(path, done_path)  # heal a crash-stranded terminal file
             return Task.model_validate(post.metadata)
@@ -422,15 +433,16 @@ def get_task(config: Config, task_id: str) -> TaskView:
     readable through its whole lifecycle. The frontmatter is validated into a
     :class:`Task` and the raw body is returned verbatim (the CLI truncates for
     previews). Raises :class:`TaskNotFoundError` when no file matches *or* the
-    matched file's frontmatter is malformed YAML (unparseable — treated as
-    not-found rather than crashing); a matching file whose frontmatter parses but
-    is not a valid task raises ``ValidationError`` (the CLI maps both to exit 3).
+    matched file is unreadable (vanished/permission-denied) or its frontmatter is
+    malformed YAML — both surfaced as ``None`` from
+    :func:`shards.storage.files.read_post` and treated as not-found rather than
+    crashing; a matching file whose frontmatter parses but is not a valid task
+    raises ``ValidationError`` (the CLI maps both to exit 3).
     """
     path = _resolve_task_path(config, task_id)
-    try:
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise TaskNotFoundError(task_id) from exc
+    post = read_post(path)
+    if post is None:
+        raise TaskNotFoundError(task_id)
     task = Task.model_validate(post.metadata)
     return TaskView(task=task, body=post.content, path=path)
 
@@ -452,14 +464,17 @@ def list_tasks(
 
     Only files whose frontmatter carries a valid shards id (``t-`` prefix), declares
     ``type: task``, and validates against :class:`Task` are surfaced; Tolaria /
-    foreign / malformed files are skipped silently. Filters (all conjunctive):
-    exact ``status``, exact ``owner`` (on the ``owner`` field), ``mine`` (``owner``
-    *or* ``claimed_by`` equals the configured agent), ``tags`` (AND, or OR with
-    ``any_tag``), exact ``project`` (the project-scoped view — only tasks whose
-    ``project`` soft link matches), and ``since`` recency on ``updated``. ``sort``
-    is ``updated``/``created`` (descending) or ``title`` (ascending); ``limit``
-    caps the result (``None`` for unbounded). Shares the ``--since``/tag/sort
-    semantics with :func:`shards.core.notes.list_notes`.
+    foreign / unreadable / malformed files are skipped silently — the per-file read
+    goes through :func:`shards.storage.files.read_post`, so a vanished/permission-
+    denied file (``OSError``) is skipped exactly like malformed YAML, never a
+    crashed scan. Filters (all conjunctive): exact ``status``, exact ``owner`` (on
+    the ``owner`` field), ``mine`` (``owner`` *or* ``claimed_by`` equals the
+    configured agent), ``tags`` (AND, or OR with ``any_tag``), exact ``project``
+    (the project-scoped view — only tasks whose ``project`` soft link matches),
+    and ``since`` recency on ``updated``. ``sort`` is ``updated``/``created``
+    (descending) or ``title`` (ascending); ``limit`` caps the result (``None`` for
+    unbounded). Shares the ``--since``/tag/sort semantics with
+    :func:`shards.core.notes.list_notes`.
     """
     if sort not in _SORT_FIELDS:
         raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
@@ -468,10 +483,9 @@ def list_tasks(
 
     views: list[TaskView] = []
     for path in _iter_task_files(config):
-        try:
-            meta = frontmatter.loads(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError:
-            continue  # malformed YAML — skip silently, like foreign/invalid files
+        meta = read_post(path)
+        if meta is None:
+            continue  # unreadable or malformed YAML — skip silently, like foreign files
         task_id = meta.metadata.get("id")
         if not isinstance(task_id, str) or not task_id.startswith(_ID_PREFIX):
             continue

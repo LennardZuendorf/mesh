@@ -250,6 +250,36 @@ def test_finish_not_found_raises(cfg: Config, vault: Path) -> None:
         finish_task(cfg, "t-nope", "Done.")
 
 
+def _seed_malformed(vault: Path, task_id: str = "t-bad") -> Path:
+    """Write a ``t-`` id file whose frontmatter is unparseable YAML (open/)."""
+    folder = task_folder("open", vault)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    path.write_text("---\ntitle: [unclosed\nstatus: open\n---\nbody\n", encoding="utf-8")
+    return path
+
+
+def test_finish_malformed_target_raises_not_found(cfg: Config, vault: Path) -> None:
+    """Finishing a resolved-but-unreadable task maps to TaskNotFoundError (exit 3)."""
+    _seed_malformed(vault, "t-bad")
+    with pytest.raises(TaskNotFoundError):
+        finish_task(cfg, "t-bad", "Done.")
+
+
+def test_finish_different_task_unaffected_by_malformed_sibling(cfg: Config, vault: Path) -> None:
+    """A malformed sibling task never blocks finishing a different, valid task.
+
+    core-hardening/1 scenario: resolution is filename-stem-only and never reads
+    a non-matching file's content, so a corrupt ``t-bad`` alongside the target
+    is skipped — not fatal — while the real finish proceeds.
+    """
+    _seed_malformed(vault, "t-bad")
+    _seed_task(vault, task_id="t-good", status="open")
+    task = finish_task(cfg, "t-good", "Done.")
+    assert task.status == "done"
+    assert _done_path(vault, "t-good").exists()
+
+
 def test_finish_id_reresolves_from_done(cfg: Config, vault: Path) -> None:
     """After finishing, the id resolves from tasks/done/ (resolver scans both)."""
     _seed_task(vault, status="open")

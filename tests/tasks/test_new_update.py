@@ -306,6 +306,32 @@ def test_update_task_not_found_raises(cfg: Config, vault: Path) -> None:
         update_task(cfg, "t-missing", priority="high")
 
 
+def _seed_malformed(vault: Path, task_id: str = "t-bad") -> Path:
+    """Write a ``t-`` id file whose frontmatter is unparseable YAML (open/).
+
+    Mirrors ``tests/tasks/test_list_cancel.py::_seed_malformed`` — the id-only
+    resolver still matches this stem (it never reads content), so the failure
+    surfaces at the *content* read this unit routes through ``read_post``.
+    """
+    folder = task_folder("open", vault)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    path.write_text("---\ntitle: [unclosed\nstatus: open\n---\nbody\n", encoding="utf-8")
+    return path
+
+
+def test_update_task_malformed_yaml_raises_not_found(cfg: Config, vault: Path) -> None:
+    """A resolved-but-unreadable task's content read maps to TaskNotFoundError.
+
+    ``_resolve_task_path`` matches on filename stem only, so a malformed target
+    still resolves; the content read (routed through ``read_post``) is what
+    fails here, and it maps to the same not-found contract as ``get_task``.
+    """
+    _seed_malformed(vault, "t-bad")
+    with pytest.raises(TaskNotFoundError):
+        update_task(cfg, "t-bad", priority="high")
+
+
 def test_update_task_uses_atomic_write(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

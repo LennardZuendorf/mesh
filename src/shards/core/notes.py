@@ -250,13 +250,18 @@ def append_note(
     With ``section`` the text lands under a ``## {section}`` heading (created at
     end-of-body if missing). With ``timestamp`` an ISO-8601 UTC line is prepended
     to the text block. The whole read-modify-write runs under the entity lock and
-    the result is written atomically.
+    the result is written atomically. The re-read inside the lock goes through
+    :func:`shards.storage.files.read_post`; a file that vanishes or turns
+    unreadable between resolution and the lock raises
+    :class:`NoteNotFoundError`, matching :func:`get_note`.
     """
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
     block = _format_block(text, timestamp)
     with hold(_lock_path(config, note_id)):
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post = read_post(path)
+        if post is None:
+            raise NoteNotFoundError(id_or_slug)
         post.content = (
             _append_under_section(post.content, block, section)
             if section is not None
@@ -310,7 +315,10 @@ def update_note(
     ``tags`` mutates the tag list (delta or replace, see :func:`apply_tag_spec`).
     ``new_type`` rewrites the ``type`` field and moves the file into the matching
     folder via ``os.replace`` (atomic rename); the old path stops existing. Runs
-    under the entity lock; writes are atomic.
+    under the entity lock; writes are atomic. The re-read inside the lock goes
+    through :func:`shards.storage.files.read_post`; a file that vanishes or turns
+    unreadable between resolution and the lock raises :class:`NoteNotFoundError`,
+    matching :func:`get_note`.
     """
     if new_type is not None and new_type not in _NOTE_TYPES:
         raise ValueError(f"invalid note type: {new_type!r}")
@@ -319,7 +327,9 @@ def update_note(
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
     with hold(_lock_path(config, note_id)):
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post = read_post(path)
+        if post is None:
+            raise NoteNotFoundError(id_or_slug)
         if tags is not None:
             current = post.metadata.get("tags") or []
             existing = [str(t) for t in current] if isinstance(current, list) else []

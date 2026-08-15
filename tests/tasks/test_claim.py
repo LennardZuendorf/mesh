@@ -206,6 +206,36 @@ def test_claim_not_found_raises(cfg: Config, vault: Path) -> None:
         claim_task(cfg, "t-nope", "test-agent")
 
 
+def _seed_malformed(vault: Path, task_id: str = "t-bad") -> Path:
+    """Write a ``t-`` id file whose frontmatter is unparseable YAML (open/)."""
+    folder = task_folder("open", vault)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    path.write_text("---\ntitle: [unclosed\nstatus: open\n---\nbody\n", encoding="utf-8")
+    return path
+
+
+def test_claim_malformed_target_raises_not_found(cfg: Config, vault: Path) -> None:
+    """Claiming a resolved-but-unreadable task maps to TaskNotFoundError (exit 3)."""
+    _seed_malformed(vault, "t-bad")
+    with pytest.raises(TaskNotFoundError):
+        claim_task(cfg, "t-bad", "test-agent")
+
+
+def test_claim_different_task_unaffected_by_malformed_sibling(cfg: Config, vault: Path) -> None:
+    """A malformed sibling task never blocks claiming a different, valid task.
+
+    core-hardening/1 scenario: resolution is filename-stem-only and never reads
+    a non-matching file's content, so a corrupt ``t-bad`` alongside the target
+    is skipped — not fatal — while the real claim proceeds.
+    """
+    _seed_malformed(vault, "t-bad")
+    _seed_task(vault, task_id="t-good", status="open", claimed_by=None)
+    task = claim_task(cfg, "t-good", "test-agent")
+    assert task.claimed_by == "test-agent"
+    assert task.status == "claimed"
+
+
 # --------------------------------------------------------------------------- #
 # claim_task (core) — terminal statuses are never claimable (idempotent no-op) #
 # --------------------------------------------------------------------------- #
