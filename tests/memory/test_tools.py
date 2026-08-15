@@ -257,3 +257,39 @@ def test_build_context_tool_calls_core_build_context(
 
     assert out == sentinel
     assert seen == {"seed_id": "n-seed", "depth": 2}
+
+
+# --------------------------------------------------------------------------- #
+# core-hardening/3 — boundary mapping: domain/OSError -> a clean ToolError    #
+# --------------------------------------------------------------------------- #
+
+
+def test_note_not_found_surfaces_as_clean_tool_error(cfg: Config) -> None:
+    """A domain ``NoteNotFoundError`` reaches the client as a ``ToolError`` —
+    a clean one-line message, never a raw traceback string."""
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(server.app.call_tool("shards_note_get", {"id": "n-nope"}))
+
+    assert "note not found" in str(exc_info.value)
+    assert "Traceback" not in str(exc_info.value)
+
+
+def test_write_oserror_surfaces_as_clean_tool_error(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An infrastructure ``OSError`` (ENOSPC, read-only vault, ...) reaching a
+    write tool also becomes a clean ``ToolError`` with an ``io error:`` line."""
+    from fastmcp.exceptions import ToolError
+
+    def boom(config: Config, title: str, **kwargs: Any) -> Any:  # noqa: ARG001
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(server, "create_note", boom)
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(server.app.call_tool("shards_note_new", {"title": "x"}))
+
+    assert "io error:" in str(exc_info.value)
+    assert "Traceback" not in str(exc_info.value)

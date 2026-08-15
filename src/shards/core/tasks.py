@@ -26,6 +26,7 @@ from pathlib import Path
 import frontmatter
 from msgspec import ValidationError
 
+from shards.core.errors import ShardsError
 from shards.core.ids import generate_task_id
 from shards.core.notes import _matches_tags, _parse_since, _validate_owner, apply_tag_spec
 from shards.core.wikilinks import resolve_wikilinks
@@ -46,12 +47,18 @@ _OUTCOME_HEADING = "## Outcome"
 _CANCELLED_HEADING = "## Cancelled"
 
 
-class TaskError(Exception):
+class TaskError(ShardsError):
     """Base class for task-resolution failures."""
 
 
 class TaskNotFoundError(TaskError):
     """No task file matches the given id (CLI exit 3)."""
+
+    code = 3
+
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+        super().__init__(f"task not found: {task_id}")
 
 
 class ClaimConflictError(TaskError):
@@ -61,6 +68,8 @@ class ClaimConflictError(TaskError):
     who holds it. A same-agent reclaim is *not* a conflict — it is an idempotent
     no-op (see :func:`claim_task`).
     """
+
+    code = 4
 
     def __init__(self, existing_owner: str) -> None:
         super().__init__(f"task already claimed by {existing_owner}")

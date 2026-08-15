@@ -41,6 +41,7 @@ from typing import Any
 
 from msgspec import ValidationError
 
+from shards.core.errors import ShardsError
 from shards.core.notes import NoteError, get_note
 from shards.core.tasks import TaskError, get_task
 from shards.schemas.config import Config
@@ -50,12 +51,14 @@ __all__ = ["GraphResult", "SeedNotFoundError", "build_context", "graph_query"]
 _TASK_PREFIX = "t-"
 
 
-class SeedNotFoundError(Exception):
+class SeedNotFoundError(ShardsError):
     """The build-context seed id resolves to no note or task (CLI exit 3).
 
     Only the *seed* is fatal: a dangling ``related`` id encountered mid-traversal
     is skipped, never raised. Carries the offending seed id for the CLI message.
     """
+
+    code = 3
 
     def __init__(self, seed_id: str) -> None:
         self.seed_id = seed_id

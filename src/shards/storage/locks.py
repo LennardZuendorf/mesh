@@ -22,14 +22,25 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+from shards.core.errors import ShardsError
+
 LOCK_TTL_SECONDS = 300.0
 _MAX_ATTEMPTS = 3
 _LOCK_WAIT_SECONDS = 15.0
 _LOCK_POLL_SECONDS = 0.01
 
 
-class LockError(RuntimeError):
-    """Raised when a non-stale lock is already held by another owner."""
+class LockError(RuntimeError, ShardsError):
+    """Raised when a non-stale lock is already held by another owner (CLI exit 4).
+
+    A contended lock is a conflict, not an infrastructure crash — the same exit
+    tier as :class:`~shards.core.tasks.ClaimConflictError`. Keeps its historical
+    ``RuntimeError`` ancestry (nothing in the tree relies on catching it as a
+    plain ``RuntimeError``, but there is no reason to drop it) alongside the new
+    ``code``-bearing base the CLI/MCP boundary mappers read.
+    """
+
+    code = 4
 
 
 def _pid_alive(pid: int) -> bool:

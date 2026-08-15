@@ -39,13 +39,11 @@ degradation notice.
 from __future__ import annotations
 
 import json
-from typing import NoReturn
 
 import typer
 
+from shards.cli._errors import cli_errors
 from shards.core.lenses import (
-    ProjectNotFoundError,
-    SeedNotFoundError,
     build_context,
     graph_query,
     project_view,
@@ -81,14 +79,6 @@ def _coalesce(ctx: typer.Context, json_out: bool, quiet: bool) -> tuple[bool, bo
     )
 
 
-def _lens_not_found(quiet: bool, message: str) -> NoReturn:
-    """Emit ``message`` to stderr (unless ``--quiet``) and exit 3 — the shared
-    not-found skeleton for the seed/project lenses."""
-    if not quiet:
-        typer.echo(message, err=True)
-    raise typer.Exit(3) from None
-
-
 def recent_activity_command(
     ctx: typer.Context,
     since: str | None = typer.Option(None, "--since", help="Recency window: 7d, 12h, or ISO."),
@@ -107,12 +97,8 @@ def recent_activity_command(
     owner = owner if owner is not None else getattr(ctx.obj, "owner", None)
     mine = mine or bool(getattr(ctx.obj, "mine", False))
 
-    try:
+    with cli_errors():
         entries = recent_activity(config, since=since, owner=owner, mine=mine, limit=limit)
-    except ValueError:
-        if not quiet:
-            typer.echo(f"recent-activity: invalid --since value {since!r}", err=True)
-        raise typer.Exit(2) from None
 
     # Informational notice *after* a successful fetch, so a bad --since never emits
     # a spurious "daemon down" line before its exit-2.
@@ -158,15 +144,16 @@ def session_start_command(
     # either side of the command name takes effect.
     json_out, quiet = _coalesce(ctx, json_out, quiet)
 
-    # Source A — my live queue: every open/claimed task I own or have claimed.
-    task_views = list_tasks(config, mine=True, limit=None)
-    # Source B — my recent changes (dedup by id happens in the compose step below).
-    activity = recent_activity(
-        config, since=_SESSION_SINCE, owner=None, mine=True, limit=DEFAULT_RECENT_LIMIT
-    )
-    # Compose the warm-start payload: open/claimed tasks first (deduped by id),
-    # then the remaining activity newest-first.
-    entries = session_start_entries(task_views, activity, meta_only=meta_only)
+    with cli_errors():
+        # Source A — my live queue: every open/claimed task I own or have claimed.
+        task_views = list_tasks(config, mine=True, limit=None)
+        # Source B — my recent changes (dedup happens in the compose step below).
+        activity = recent_activity(
+            config, since=_SESSION_SINCE, owner=None, mine=True, limit=DEFAULT_RECENT_LIMIT
+        )
+        # Compose the warm-start payload: open/claimed tasks first (deduped by
+        # id), then the remaining activity newest-first.
+        entries = session_start_entries(task_views, activity, meta_only=meta_only)
 
     if json_out:
         typer.echo(json.dumps(entries))
@@ -197,10 +184,8 @@ def build_context_command(
     # every node is read off disk — so there is no degradation notice.
     json_out, quiet = _coalesce(ctx, json_out, quiet)
 
-    try:
+    with cli_errors():
         entries = build_context(config, seed_id, depth=depth)
-    except SeedNotFoundError:
-        _lens_not_found(quiet, f"build-context: seed not found: {seed_id}")
 
     if json_out:
         typer.echo(json.dumps(entries))
@@ -231,10 +216,8 @@ def graph_command(
     # as build-context, so there is no degradation notice.
     json_out, quiet = _coalesce(ctx, json_out, quiet)
 
-    try:
+    with cli_errors():
         result = graph_query(config, seed_id, depth=depth)
-    except SeedNotFoundError:
-        _lens_not_found(quiet, f"graph: seed not found: {seed_id}")
 
     # Both branches below render the one already-computed `result` — no second
     # traversal for JSON vs. tree output.
@@ -269,10 +252,8 @@ def project_command(
     # on either side of the command name takes effect.
     json_out, quiet = _coalesce(ctx, json_out, quiet)
 
-    try:
+    with cli_errors():
         result = project_view(config, project_id)
-    except ProjectNotFoundError:
-        _lens_not_found(quiet, f"project: not found: {project_id}")
 
     if json_out:
         typer.echo(json.dumps(result.to_dict()))

@@ -27,6 +27,7 @@ from typing import get_args
 import frontmatter
 from msgspec import ValidationError
 
+from shards.core.errors import ShardsError
 from shards.core.ids import generate_note_id
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
@@ -47,12 +48,18 @@ _DURATION = re.compile(r"^(\d+)([dhw])$")
 _DURATION_UNITS = {"d": "days", "h": "hours", "w": "weeks"}
 
 
-class NoteError(Exception):
+class NoteError(ShardsError):
     """Base class for note-resolution failures."""
 
 
 class NoteNotFoundError(NoteError):
     """No note matches the given id or slug (CLI exit 3)."""
+
+    code = 3
+
+    def __init__(self, id_or_slug: str) -> None:
+        self.id_or_slug = id_or_slug
+        super().__init__(f"note not found: {id_or_slug}")
 
 
 class AmbiguousSlugError(NoteError):
@@ -60,6 +67,8 @@ class AmbiguousSlugError(NoteError):
 
     Carries the matching ids so the CLI can list them in its exit-2 message.
     """
+
+    code = 2
 
     def __init__(self, slug: str, ids: list[str] | None = None) -> None:
         self.slug = slug

@@ -32,6 +32,7 @@ import json
 
 import typer
 
+from shards.cli._errors import cli_errors
 from shards.core.search import hit_dict, query_search, search_health
 from shards.index.tagpull import tagpull
 from shards.schemas.config import load_config
@@ -83,30 +84,31 @@ def search_command(
 
     tag_list = list(tags) if tags else None
 
-    if query is None:
-        # No query → frontmatter tag pull (meta-only by nature; score 1.0).
-        results = tagpull(
-            config,
-            tags=tag_list,
-            type_filter=type_filter,
-            owner=owner,
-            status=status,
-            limit=limit,
-        )
-    else:
-        # A query → hybrid indexed recall when available, else substring fallback.
-        effective_threshold = threshold if threshold is not None else config.search.threshold
-        results = query_search(
-            config,
-            query,
-            type_filter=type_filter,
-            tags=tag_list,
-            owner=owner,
-            status=status,
-            limit=limit,
-            threshold=effective_threshold,
-            quiet=quiet,
-        )
+    with cli_errors():
+        if query is None:
+            # No query → frontmatter tag pull (meta-only by nature; score 1.0).
+            results = tagpull(
+                config,
+                tags=tag_list,
+                type_filter=type_filter,
+                owner=owner,
+                status=status,
+                limit=limit,
+            )
+        else:
+            # A query → hybrid indexed recall when available, else substring fallback.
+            effective_threshold = threshold if threshold is not None else config.search.threshold
+            results = query_search(
+                config,
+                query,
+                type_filter=type_filter,
+                tags=tag_list,
+                owner=owner,
+                status=status,
+                limit=limit,
+                threshold=effective_threshold,
+                quiet=quiet,
+            )
+        payload = [hit_dict(result, meta_only=meta_only, full=full) for result in results]
 
-    payload = [hit_dict(result, meta_only=meta_only, full=full) for result in results]
     typer.echo(json.dumps(payload))

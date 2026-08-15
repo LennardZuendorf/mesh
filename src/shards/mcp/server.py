@@ -29,10 +29,14 @@ introspection still reports the correct names, schemas, and annotations.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import wraps
 from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
+from shards.core.errors import ShardsError
 from shards.core.lenses import build_context, graph_query, project_view, recent_activity
 from shards.core.notes import (
     NoteView,
@@ -353,29 +357,55 @@ _IDEMPOTENT: dict[str, Any] = {"idempotentHint": True}
 _DESTRUCTIVE: dict[str, Any] = {"destructiveHint": True}
 
 
+def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """The one MCP-boundary exception mapper (core-hardening/3), applied at
+    registration — the tool error mirror of the CLI's ``cli_errors()``.
+
+    Same exception families (``ShardsError`` — ``LockError`` included — and any
+    other ``OSError``), same one-line message, but MCP has no process exit code
+    to map to, so this raises a clean ``fastmcp.exceptions.ToolError`` instead of
+    letting FastMCP's own generic catch-all re-wrap an arbitrary traceback string.
+    The full structured-error payload (codes, fields) is agent-usability/5's
+    contract; this stays a plain message. The module-level ``shards_*`` functions
+    are left unwrapped so they stay directly importable/unit-testable (see the
+    module docstring) — only the registered tool goes through this wrapper.
+    """
+
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except ShardsError as exc:
+            raise ToolError(str(exc)) from exc
+        except OSError as exc:
+            raise ToolError(f"io error: {exc}") from exc
+
+    return wrapper
+
+
 def _register() -> None:
     """Register every ``shards_*`` tool with its annotation; called once at import."""
     # Read-only.
-    app.tool(shards_note_get, annotations=_READ_ONLY)
-    app.tool(shards_note_list, annotations=_READ_ONLY)
-    app.tool(shards_task_get, annotations=_READ_ONLY)
-    app.tool(shards_task_list, annotations=_READ_ONLY)
-    app.tool(shards_search, annotations=_READ_ONLY)
-    app.tool(shards_recent_activity, annotations=_READ_ONLY)
-    app.tool(shards_build_context, annotations=_READ_ONLY)
-    app.tool(shards_graph, annotations=_READ_ONLY)
-    app.tool(shards_project, annotations=_READ_ONLY)
+    app.tool(_guarded(shards_note_get), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_note_list), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_task_get), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_task_list), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_search), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_recent_activity), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_build_context), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_graph), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_project), annotations=_READ_ONLY)
     # Write (no special hint).
-    app.tool(shards_note_new)
-    app.tool(shards_note_append)
-    app.tool(shards_task_new)
+    app.tool(_guarded(shards_note_new))
+    app.tool(_guarded(shards_note_append))
+    app.tool(_guarded(shards_task_new))
     # Idempotent.
-    app.tool(shards_note_update, annotations=_IDEMPOTENT)
-    app.tool(shards_task_claim, annotations=_IDEMPOTENT)
-    app.tool(shards_task_finish, annotations=_IDEMPOTENT)
-    app.tool(shards_task_update, annotations=_IDEMPOTENT)
+    app.tool(_guarded(shards_note_update), annotations=_IDEMPOTENT)
+    app.tool(_guarded(shards_task_claim), annotations=_IDEMPOTENT)
+    app.tool(_guarded(shards_task_finish), annotations=_IDEMPOTENT)
+    app.tool(_guarded(shards_task_update), annotations=_IDEMPOTENT)
     # Destructive.
-    app.tool(shards_task_cancel, annotations=_DESTRUCTIVE)
+    app.tool(_guarded(shards_task_cancel), annotations=_DESTRUCTIVE)
 
 
 _register()

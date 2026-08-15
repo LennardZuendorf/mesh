@@ -21,8 +21,8 @@ import typer
 from msgspec import ValidationError
 
 from shards.cli import _output
+from shards.cli._errors import cli_errors
 from shards.core.notes import (
-    AmbiguousSlugError,
     NoteNotFoundError,
     NoteView,
     append_note,
@@ -56,7 +56,10 @@ def _resolve_body(ctx: typer.Context, body: str | None, body_file: str | None) -
     """Resolve the note body per precedence: ``--body`` → ``--file`` → ``$EDITOR``.
 
     On a headless path (``--json``/``--quiet`` or a non-interactive stdin) with
-    neither source given, refuses (exit 2) rather than launching ``$EDITOR``.
+    neither source given, or an unreadable ``--file``, raises ``ValueError`` —
+    mapped to exit 2 by the CLI boundary mapper — rather than launching
+    ``$EDITOR``. Callers must invoke this from inside a ``with cli_errors():``
+    block.
     """
     if body is not None:
         return body
@@ -64,15 +67,10 @@ def _resolve_body(ctx: typer.Context, body: str | None, body_file: str | None) -
         try:
             return Path(body_file).read_text(encoding="utf-8")
         except OSError as exc:
-            typer.echo(f"cannot read --file {body_file}: {exc}", err=True)
-            raise typer.Exit(2) from None
+            raise ValueError(f"cannot read --file {body_file}: {exc}") from exc
 
     if _output.is_machine(ctx) or not _is_tty():
-        typer.echo(
-            "no body: pass --body or --file on a non-interactive path",
-            err=True,
-        )
-        raise typer.Exit(2)
+        raise ValueError("no body: pass --body or --file on a non-interactive path")
     return _edit_body()
 
 
@@ -90,23 +88,16 @@ def new_command(
 ) -> None:
     """Create a note (routed by type); body from --body, --file, or $EDITOR (TTY)."""
     config = load_config()
-    if note_type not in _NOTE_TYPES:
-        typer.echo(f"invalid note type: {note_type}", err=True)
-        raise typer.Exit(2)
-
-    body_text = _resolve_body(ctx, body, body_file)
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-    try:
+    with cli_errors():
+        if note_type not in _NOTE_TYPES:
+            raise ValueError(f"invalid note type: {note_type}")
+        body_text = _resolve_body(ctx, body, body_file)
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        # ValidationError (schema-invalid) and ValueError (owner outside
+        # [tasks].collections, enforced once in core) both map to exit 2.
         note = create_note(
             config, title, note_type=note_type, tags=tag_list, owner=owner, body=body_text
         )
-    except ValidationError:
-        typer.echo("invalid note", err=True)
-        raise typer.Exit(2) from None
-    except ValueError as exc:
-        # Owner outside [tasks].collections (enforced once in core, before any write).
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from None
     _output.emit_mutation(
         ctx, obj_id=note.id, updated=note.updated, verb="created", fields={"type": note.type}
     )
@@ -126,14 +117,8 @@ def append_command(
 ) -> None:
     """Append text to a note's body (optionally under a section / timestamped)."""
     config = load_config()
-    try:
+    with cli_errors():
         note = append_note(config, target, text, section=section, timestamp=timestamp)
-    except NoteNotFoundError:
-        typer.echo(f"note not found: {target}", err=True)
-        raise typer.Exit(3) from None
-    except AmbiguousSlugError:
-        typer.echo(f"ambiguous slug: {target}", err=True)
-        raise typer.Exit(2) from None
     _output.emit_mutation(
         ctx, obj_id=note.id, updated=note.updated, verb="appended", fields={"type": note.type}
     )
@@ -152,17 +137,8 @@ def update_command(
 ) -> None:
     """Update a note's fields (tags, type — moving its folder)."""
     config = load_config()
-    try:
+    with cli_errors():
         note = update_note(config, target, tags=tags, new_type=new_type)
-    except NoteNotFoundError:
-        typer.echo(f"note not found: {target}", err=True)
-        raise typer.Exit(3) from None
-    except AmbiguousSlugError:
-        typer.echo(f"ambiguous slug: {target}", err=True)
-        raise typer.Exit(2) from None
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from None
     _output.emit_mutation(
         ctx, obj_id=note.id, updated=note.updated, verb="updated", fields={"type": note.type}
     )
@@ -192,19 +168,13 @@ def get_command(
 ) -> None:
     """Read a note: frontmatter + a 200-char body preview by default."""
     config = load_config()
-    try:
-        view = get_note(config, target)
-    except NoteNotFoundError:
-        typer.echo(f"note not found: {target}", err=True)
-        raise typer.Exit(3) from None
-    except AmbiguousSlugError as exc:
-        typer.echo(f"ambiguous slug: {target}: {', '.join(exc.ids)}", err=True)
-        raise typer.Exit(2) from None
-    except ValidationError:
-        # A shards-id file with malformed/incomplete frontmatter is unreadable as a
-        # note; treat it as not-found rather than crashing with a traceback.
-        typer.echo(f"note not found: {target}", err=True)
-        raise typer.Exit(3) from None
+    with cli_errors():
+        try:
+            view = get_note(config, target)
+        except ValidationError:
+            # A shards-id file with malformed/incomplete frontmatter is unreadable
+            # as a note; treat it as not-found rather than crashing.
+            raise NoteNotFoundError(target) from None
 
     if _output.is_quiet(ctx):
         typer.echo(view.note.id)
@@ -244,7 +214,7 @@ def list_command(
     """List shards notes (id-bearing files only) with filters, sort and limit."""
     config = load_config()
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-    try:
+    with cli_errors():
         views = list_notes(
             config,
             tags=tag_list,
@@ -255,9 +225,6 @@ def list_command(
             sort=sort,
             limit=limit,
         )
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from None
 
     if _output.is_quiet(ctx):
         for view in views:
@@ -289,21 +256,13 @@ def delete_command(
 ) -> None:
     """Hard-delete a note. Prompts on a TTY; refuses on a machine path without --force."""
     config = load_config()
-    try:
+    with cli_errors():
         note_id = resolve_slug(config, target)
-    except NoteNotFoundError:
-        typer.echo(f"note not found: {target}", err=True)
-        raise typer.Exit(3) from None
-    except AmbiguousSlugError as exc:
-        typer.echo(f"ambiguous slug: {target}: {', '.join(exc.ids)}", err=True)
-        raise typer.Exit(2) from None
-
-    if not force:
-        _output.refuse_delete_if_non_interactive(ctx, tty=_is_tty())
-        # click renders "Delete <id>? [y/N]: "; declining aborts (exit 1).
-        typer.confirm(f"Delete {note_id}?", abort=True)
-
-    delete_note(config, note_id)
+        if not force:
+            _output.refuse_delete_if_non_interactive(ctx, tty=_is_tty())
+            # click renders "Delete <id>? [y/N]: "; declining aborts (exit 1).
+            typer.confirm(f"Delete {note_id}?", abort=True)
+        delete_note(config, note_id)
 
     if _output.is_quiet(ctx):
         typer.echo(note_id)

@@ -40,6 +40,7 @@ from typing import Any
 
 import typer
 
+from shards.cli._errors import cli_errors
 from shards.core.notes import list_notes
 from shards.core.tasks import list_tasks
 from shards.core.wikilinks import find_dangling
@@ -225,34 +226,38 @@ daemon_app = typer.Typer(
 def daemon_start_command(ctx: typer.Context) -> None:
     """Launch the daemon in the background (idempotent; no second spawn)."""
     pid_path = default_pid_path()
-    running = daemon_running(pid_path)
-    if running is not None:
-        _emit(
-            ctx,
-            {"running": True, "started": False, "pid": running},
-            f"daemon already running (pid {running})",
-        )
-        return
-    pid = spawn_daemon()
-    write_pid(pid_path, pid)
-    _emit(ctx, {"running": True, "started": True, "pid": pid}, f"daemon started (pid {pid})")
+    with cli_errors():
+        running = daemon_running(pid_path)
+        if running is not None:
+            _emit(
+                ctx,
+                {"running": True, "started": False, "pid": running},
+                f"daemon already running (pid {running})",
+            )
+            return
+        pid = spawn_daemon()
+        write_pid(pid_path, pid)
+        _emit(ctx, {"running": True, "started": True, "pid": pid}, f"daemon started (pid {pid})")
 
 
 @daemon_app.command("stop")
 def daemon_stop_command(ctx: typer.Context) -> None:
     """Terminate the daemon and clear its socket + PID file (idempotent)."""
     pid_path = default_pid_path()
-    running = daemon_running(pid_path)
-    if running is None:
-        _remove(pid_path)  # clear a stale PID file if one lingers
-        _emit(ctx, {"running": False, "stopped": False}, "daemon not running")
-        return
-    terminate_process(running)
-    _remove(default_socket_path())
-    _remove(pid_path)
-    _emit(
-        ctx, {"running": False, "stopped": True, "pid": running}, f"daemon stopped (pid {running})"
-    )
+    with cli_errors():
+        running = daemon_running(pid_path)
+        if running is None:
+            _remove(pid_path)  # clear a stale PID file if one lingers
+            _emit(ctx, {"running": False, "stopped": False}, "daemon not running")
+            return
+        terminate_process(running)
+        _remove(default_socket_path())
+        _remove(pid_path)
+        _emit(
+            ctx,
+            {"running": False, "stopped": True, "pid": running},
+            f"daemon stopped (pid {running})",
+        )
 
 
 @daemon_app.command("status")
@@ -260,13 +265,14 @@ def daemon_status_command(ctx: typer.Context) -> None:
     """Report whether the daemon is running, its PID, and the socket path."""
     pid_path = default_pid_path()
     socket_path = default_socket_path()
-    running = daemon_running(pid_path)
-    payload = {"running": running is not None, "pid": running, "socket": str(socket_path)}
-    if running is not None:
-        human = f"running (pid {running}) — socket {socket_path}"
-    else:
-        human = f"stopped — socket {socket_path}"
-    _emit(ctx, payload, human)
+    with cli_errors():
+        running = daemon_running(pid_path)
+        payload = {"running": running is not None, "pid": running, "socket": str(socket_path)}
+        if running is not None:
+            human = f"running (pid {running}) — socket {socket_path}"
+        else:
+            human = f"stopped — socket {socket_path}"
+        _emit(ctx, payload, human)
 
 
 # --------------------------------------------------------------------------- #
@@ -281,9 +287,10 @@ def status_command(ctx: typer.Context) -> None:
     liveness is reported from its PID file (no socket dependency).
     """
     config = load_config()
-    report = vault_status(config)
-    running = daemon_running(default_pid_path())
-    report["daemon"] = {"running": running is not None, "pid": running}
+    with cli_errors():
+        report = vault_status(config)
+        running = daemon_running(default_pid_path())
+        report["daemon"] = {"running": running is not None, "pid": running}
 
     if _json(ctx):
         typer.echo(json.dumps(report))
@@ -321,9 +328,11 @@ def reindex_command(ctx: typer.Context) -> None:
     config = load_config()
     from shards.index import indexed_client
 
-    try:
-        indexed_client.reindex(config)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        # ``indexed`` binary is missing or exited non-zero: the search accelerator is
-        # optional, so degrade with a notice rather than crashing the CLI.
-        _notice(ctx, "search index unavailable (indexed binary missing or failed)")
+    with cli_errors():
+        try:
+            indexed_client.reindex(config)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            # ``indexed`` binary is missing or exited non-zero: the search
+            # accelerator is optional, so degrade with a notice rather than
+            # crashing the CLI.
+            _notice(ctx, "search index unavailable (indexed binary missing or failed)")

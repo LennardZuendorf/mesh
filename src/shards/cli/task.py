@@ -20,8 +20,8 @@ import typer
 from msgspec import ValidationError
 
 from shards.cli import _output
+from shards.cli._errors import cli_errors
 from shards.core.tasks import (
-    ClaimConflictError,
     TaskNotFoundError,
     TaskView,
     cancel_task,
@@ -73,7 +73,9 @@ def new_command(
     """Create a task in tasks/open/ (status open, unclaimed)."""
     config = load_config()
     tag_list = _csv(tags) or []
-    try:
+    with cli_errors():
+        # ValidationError (schema-invalid) and ValueError (owner outside
+        # [tasks].collections, enforced once in core) both map to exit 2.
         task = create_task(
             config,
             title,
@@ -85,12 +87,6 @@ def new_command(
             blocks=_csv(blocks),
             blocked_by=_csv(blocked_by),
         )
-    except ValidationError:
-        typer.echo("invalid task", err=True)
-        raise typer.Exit(2) from None
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from None
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="created", fields={"status": task.status}
     )
@@ -117,7 +113,7 @@ def update_command(
 ) -> None:
     """Update a task's fields (priority, tags, title, project, blocks/blocked_by)."""
     config = load_config()
-    try:
+    with cli_errors():
         task = update_task(
             config,
             task_id,
@@ -128,12 +124,6 @@ def update_command(
             blocks=_csv(blocks),
             blocked_by=_csv(blocked_by),
         )
-    except TaskNotFoundError:
-        typer.echo(f"task not found: {task_id}", err=True)
-        raise typer.Exit(3) from None
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from None
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="updated", fields={"status": task.status}
     )
@@ -146,19 +136,12 @@ def claim_command(
 ) -> None:
     """Claim a task for the acting agent (atomic; exit 4 if held by another)."""
     config = load_config()
-    # The acting agent = global --owner override, else the configured identity.
-    claimer = getattr(ctx.obj, "owner", None) or config.agent
-    if not claimer:
-        typer.echo("no agent identity: set [core].agent or pass --owner", err=True)
-        raise typer.Exit(2)
-    try:
+    with cli_errors():
+        # The acting agent = global --owner override, else the configured identity.
+        claimer = getattr(ctx.obj, "owner", None) or config.agent
+        if not claimer:
+            raise ValueError("no agent identity: set [core].agent or pass --owner")
         task = claim_task(config, task_id, claimer)
-    except TaskNotFoundError:
-        typer.echo(f"task not found: {task_id}", err=True)
-        raise typer.Exit(3) from None
-    except ClaimConflictError as exc:
-        typer.echo(f"task already claimed by {exc.existing_owner}", err=True)
-        raise typer.Exit(4) from None
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="claimed", fields={"status": task.status}
     )
@@ -174,11 +157,8 @@ def finish_command(
 ) -> None:
     """Finish a task: append an outcome and move it to tasks/done/ (idempotent)."""
     config = load_config()
-    try:
+    with cli_errors():
         task = finish_task(config, task_id, outcome)
-    except TaskNotFoundError:
-        typer.echo(f"task not found: {task_id}", err=True)
-        raise typer.Exit(3) from None
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="finished", fields={"status": task.status}
     )
@@ -194,11 +174,8 @@ def cancel_command(
 ) -> None:
     """Cancel a task: append a reason and move it to tasks/done/ (idempotent)."""
     config = load_config()
-    try:
+    with cli_errors():
         task = cancel_task(config, task_id, reason)
-    except TaskNotFoundError:
-        typer.echo(f"task not found: {task_id}", err=True)
-        raise typer.Exit(3) from None
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="cancelled", fields={"status": task.status}
     )
@@ -233,16 +210,13 @@ def get_command(
 ) -> None:
     """Read a task: frontmatter + a 200-char body preview by default."""
     config = load_config()
-    try:
-        view = get_task(config, task_id)
-    except TaskNotFoundError:
-        typer.echo(f"task not found: {task_id}", err=True)
-        raise typer.Exit(3) from None
-    except ValidationError:
-        # A t-id file with malformed/incomplete frontmatter is unreadable as a
-        # task; treat it as not-found rather than crashing with a traceback.
-        typer.echo(f"task not found: {task_id}", err=True)
-        raise typer.Exit(3) from None
+    with cli_errors():
+        try:
+            view = get_task(config, task_id)
+        except ValidationError:
+            # A t-id file with malformed/incomplete frontmatter is unreadable as a
+            # task; treat it as not-found rather than crashing.
+            raise TaskNotFoundError(task_id) from None
 
     if _output.is_quiet(ctx):
         typer.echo(view.task.id)
@@ -281,7 +255,7 @@ def list_command(
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     # Honour --mine whether it lands on this command or as a global flag.
     mine_flag = mine or getattr(ctx.obj, "mine", False)
-    try:
+    with cli_errors():
         views = list_tasks(
             config,
             status=status,
@@ -294,9 +268,6 @@ def list_command(
             sort=sort,
             limit=limit,
         )
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(2) from None
 
     if _output.is_quiet(ctx):
         for view in views:
@@ -328,16 +299,12 @@ def delete_command(
 ) -> None:
     """Hard-delete a task. Prompts on a TTY; refuses on a machine path without --force."""
     config = load_config()
-    if not force:
-        _output.refuse_delete_if_non_interactive(ctx, tty=_is_tty())
-        # click renders "Delete <id>? [y/N]: "; declining aborts (exit 1).
-        typer.confirm(f"Delete {task_id}?", abort=True)
-
-    try:
+    with cli_errors():
+        if not force:
+            _output.refuse_delete_if_non_interactive(ctx, tty=_is_tty())
+            # click renders "Delete <id>? [y/N]: "; declining aborts (exit 1).
+            typer.confirm(f"Delete {task_id}?", abort=True)
         deleted = delete_task(config, task_id)
-    except TaskNotFoundError:
-        typer.echo(f"task not found: {task_id}", err=True)
-        raise typer.Exit(3) from None
 
     if _output.is_quiet(ctx):
         typer.echo(deleted)

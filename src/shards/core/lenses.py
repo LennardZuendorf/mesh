@@ -36,6 +36,7 @@ from typing import Any
 
 from shards.core.activity import recent_activity
 from shards.core.context import GraphResult, SeedNotFoundError, build_context, graph_query
+from shards.core.errors import ShardsError
 from shards.core.notes import NoteError, get_note
 from shards.core.tasks import TaskView, list_tasks
 from shards.schemas.config import Config
@@ -114,13 +115,15 @@ def session_start_entries(
 # --------------------------------------------------------------------------- #
 
 
-class ProjectNotFoundError(Exception):
+class ProjectNotFoundError(ShardsError):
     """The project id resolves to no note (CLI exit 3).
 
     Only the *project note* is fatal: the lens is "the project note + its tasks",
     so an id that names no note has nothing to return. Carries the offending id
     for the CLI message.
     """
+
+    code = 3
 
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id

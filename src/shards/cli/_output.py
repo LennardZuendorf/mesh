@@ -67,15 +67,13 @@ def emit_mutation(
 
 
 def refuse_delete_if_non_interactive(ctx: typer.Context, *, tty: bool) -> None:
-    """Raise ``Exit(2)`` on a machine path (``--json``/``--quiet``) or non-tty stdin.
+    """Raise ``ValueError`` on a machine path (``--json``/``--quiet``) or non-tty stdin.
 
-    ``tty`` is injected — each command passes its own ``_is_tty()`` seam — so the
+    Mapped to exit 2 by the CLI boundary mapper (:func:`shards.cli._errors.cli_errors`)
+    — callers must invoke this from inside a ``with cli_errors():`` block. ``tty``
+    is injected — each command passes its own ``_is_tty()`` seam — so the
     module-level tty fake in the delete tests keeps working while the guard itself
     lives in one place.
     """
     if is_machine(ctx) or not tty:
-        typer.echo(
-            "refusing to delete on a non-interactive path; pass --force to confirm",
-            err=True,
-        )
-        raise typer.Exit(2)
+        raise ValueError("refusing to delete on a non-interactive path; pass --force to confirm")
