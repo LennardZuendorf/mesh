@@ -19,10 +19,11 @@ warm-index-or-fallback shape, so they are grouped here as one layer that surface
   project and its work in one call" — as a :class:`ProjectResult`.
 * **session-start** — :func:`session_start_entries`: the warm-start *composite*
   that merges a recent-activity window with the caller's live task queue.
-* **vault-status** — :func:`status_report`: the vault-health composite behind
-  ``shards status`` and the daemon's ``vault.status`` handler, assembled from
-  already-fetched note/task/recency lenses so the warm and on-disk paths share
-  one shape.
+* **vault-status** — :func:`status_inputs` + :func:`status_report`: the
+  vault-health composite behind ``shards status``. The daemon's ``vault.status``
+  handler computes the index-derivable half (:func:`status_inputs`) and the client
+  finishes the report, so the warm and on-disk paths share one shape without
+  putting a whole-vault body scan on the daemon's event loop.
 
 The session-start composition and the project lens are defined here;
 ``recent_activity``, ``build_context``, and ``graph_query`` keep their existing
@@ -35,6 +36,7 @@ source lenses independently testable and lets a surface substitute its own input
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +67,7 @@ __all__ = [
     "recent_activity",
     "scan_stale_locks",
     "session_start_entries",
+    "status_inputs",
     "status_report",
 ]
 
@@ -160,31 +163,45 @@ def scan_stale_locks(config: Config) -> list[Path]:
     return stale
 
 
+def status_inputs(notes: list[NoteView], tasks: list[TaskView]) -> dict[str, Any]:
+    """Reduce the note/task lenses to the two primitives :func:`status_report` needs.
+
+    Split out from the report so the daemon can compute *only this half* from its
+    warm index and ship it: the rest of the report reads bodies and lock files off
+    disk, and ``DaemonServer._dispatch`` runs handlers synchronously on the event
+    loop, so doing that work daemon-side would block every other agent's warm read
+    behind one ``shards status``. Both callers reduce their views through this one
+    function, so the warm and on-disk inputs cannot drift.
+    """
+    return {"note_count": len(notes), "task_statuses": [view.task.status for view in tasks]}
+
+
 def status_report(
     config: Config,
     *,
-    notes: list[NoteView],
-    tasks: list[TaskView],
+    note_count: int,
+    task_statuses: Sequence[str],
     newest: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Assemble the vault-health payload from already-fetched lenses.
+    """Assemble the vault-health payload from already-fetched lens primitives.
 
     Like :func:`session_start_entries`, this composes sources the *caller* fetched
-    rather than fetching them itself — which is exactly what lets ``shards
-    status`` feed it disk-scanned rows and the daemon's ``vault.status`` handler
-    feed it warm-index rows, from one implementation of the shape. ``newest`` is a
-    one-row recency window (:meth:`~shards.index.warm.VaultIndex.recent` or
+    rather than fetching them itself — which is exactly what lets the client feed
+    it disk-scanned counts when the daemon is down and index-derived counts (over
+    the socket) when it is up, from one implementation of the shape. ``newest`` is
+    a one-row recency window (:meth:`~shards.index.warm.VaultIndex.recent` or
     :func:`~shards.index.warm.scan_recent`) whose ``mtime`` drives freshness.
 
-    Two fields are *not* index projections and are computed on disk by whichever
-    side calls this: ``dangling_links`` needs note/task **bodies**, which the warm
-    index deliberately does not hold, and ``stale_locks`` is a lock-directory
-    listing. Both are cheap relative to the three full-vault frontmatter parses
-    the counts used to cost. Strictly read-only: nothing here writes.
+    ``dangling_links`` and ``stale_locks`` are computed here, on disk, by whoever
+    calls this — always the client. ``dangling_links`` needs note/task **bodies**,
+    which the warm index deliberately does not hold, and ``stale_locks`` is a
+    lock-directory listing rather than a parse. So ``shards status`` is warm in its
+    *counts* and unchanged in its link scan; that scan is a per-invocation cost in
+    the caller's own process, where it blocks nobody else. Strictly read-only:
+    nothing here writes.
     """
     task_counts = dict.fromkeys(TASK_STATUSES, 0)
-    for view in tasks:
-        status = view.task.status
+    for status in task_statuses:
         task_counts[status] = task_counts.get(status, 0) + 1
 
     mtime: float | None = None
@@ -194,9 +211,9 @@ def status_report(
         age = max(0.0, time.time() - mtime)
 
     return {
-        "notes": len(notes),
+        "notes": note_count,
         "tasks": task_counts,
-        "tasks_total": len(tasks),
+        "tasks_total": len(task_statuses),
         "freshness": {"mtime": mtime, "age_seconds": age},
         "dangling_links": find_dangling(config.core.tolaria_path),
         "stale_locks": [str(p) for p in scan_stale_locks(config)],

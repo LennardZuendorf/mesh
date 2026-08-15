@@ -23,9 +23,12 @@ connection, then registers the reads that index can actually accelerate:
 * ``activity.recent`` — the mtime-ordered lens (daemon/2);
 * ``task.list`` / ``note.list`` — the O(vault) walk + YAML parse per invocation
   that the index makes disappear;
-* ``vault.status`` — counts and freshness off the index (dangling links and stale
-  locks still touch disk: bodies are not indexed, and locks are not vault
-  Markdown);
+* ``vault.status`` — the index-derivable half only: note count, task statuses and
+  the freshness row. Dangling links need note/task *bodies* and stale locks are a
+  lock-directory listing, so neither is an index projection; the **client**
+  computes those and finishes the report, because ``_dispatch`` runs handlers
+  synchronously on the event loop and a whole-vault body parse there would block
+  every other agent's warm read;
 * ``search.tag_pull`` — a pure frontmatter filter over the corpus the index holds
   in full, foreign files included.
 
@@ -55,14 +58,15 @@ import contextlib
 import json
 import os
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import msgspec
 
-from shards.core.lenses import status_report
-from shards.core.notes import MetaRow, NoteFilter, select_notes
-from shards.core.tasks import TaskFilter, select_tasks
+from shards.core.lenses import status_inputs
+from shards.core.notes import MetaRow, NoteFilter, in_note_scope, select_notes
+from shards.core.tasks import TaskFilter, in_task_scope, select_tasks
 from shards.daemon.client import default_socket_path, entity_row
 from shards.index.indexed_client import incremental_update
 from shards.index.tagpull import TagPullFilter, select_tagpull
@@ -107,9 +111,16 @@ def default_dispatch() -> dict[str, Handler]:
     return {"ping": _ping}
 
 
-def _meta_rows(entries: list[IndexEntry]) -> list[MetaRow]:
-    """Project index entries into the shared selector's ``(path, frontmatter)`` rows."""
-    return [(entry.path, entry.meta) for entry in entries]
+def _meta_rows(entries: list[IndexEntry], in_scope: Callable[[Path], bool]) -> list[MetaRow]:
+    """Project the index down to the rows the on-disk walk in ``in_scope`` would yield.
+
+    The index is deliberately vault-wide (it also serves the tag pull's wider
+    corpus), while ``note list`` / ``task list`` each walk one narrower folder
+    scope. Filtering here is what keeps the warm answer equal to the cold one
+    rather than a superset of it — a task nested under ``tasks/open/sub/`` is in
+    the index but is not a task any on-disk verb can reach.
+    """
+    return [(entry.path, entry.meta) for entry in entries if in_scope(entry.path)]
 
 
 def _error_envelope(code: int, message: str) -> dict[str, Any]:
@@ -186,6 +197,9 @@ class DaemonServer:
         config = self._config
         assert index is not None
         assert config is not None
+        vault = config.core.tolaria_path
+        note_scope = partial(in_note_scope, vault)
+        task_scope = partial(in_task_scope, vault)
 
         def activity_recent(params: dict[str, Any]) -> dict[str, Any]:
             limit = params.get("limit")
@@ -198,21 +212,29 @@ class DaemonServer:
             return {"entries": index.recent(n)}
 
         def note_list(params: dict[str, Any]) -> dict[str, Any]:
-            views = select_notes(_meta_rows(index.entries()), NoteFilter.from_params(params))
+            rows = _meta_rows(index.entries(), note_scope)
+            views = select_notes(rows, NoteFilter.from_params(params))
             return {"entries": [entity_row(v.note, v.path) for v in views]}
 
         def task_list(params: dict[str, Any]) -> dict[str, Any]:
-            views = select_tasks(_meta_rows(index.entries()), TaskFilter.from_params(params))
+            rows = _meta_rows(index.entries(), task_scope)
+            views = select_tasks(rows, TaskFilter.from_params(params))
             return {"entries": [entity_row(v.task, v.path) for v in views]}
 
         def vault_status(_params: dict[str, Any]) -> dict[str, Any]:
-            rows = _meta_rows(index.entries())
-            return status_report(
-                config,
-                notes=select_notes(rows, NoteFilter(limit=None)),
-                tasks=select_tasks(rows, TaskFilter(limit=None)),
-                newest=index.recent(1),
-            )
+            # Only the *index-derivable* half. Assembling the full report here
+            # would run ``find_dangling`` — an unbounded whole-vault body parse —
+            # on the event loop that every other agent's warm read is waiting on.
+            # The client owns the disk half; both sides finish through the same
+            # ``status_report``. See :func:`shards.core.lenses.status_inputs`.
+            entries = index.entries()
+            return {
+                **status_inputs(
+                    select_notes(_meta_rows(entries, note_scope), NoteFilter(limit=None)),
+                    select_tasks(_meta_rows(entries, task_scope), TaskFilter(limit=None)),
+                ),
+                "newest": index.recent(1),
+            }
 
         def tag_pull(params: dict[str, Any]) -> dict[str, Any]:
             # The wider corpus: tag pull covers coexisting foreign Markdown too,

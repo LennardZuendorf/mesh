@@ -115,17 +115,34 @@ def _tasks_root(config: Config) -> Path:
 
 
 def _iter_task_files(config: Config) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``tasks/open/`` and ``tasks/done/``.
+    """Yield every ``*.md`` directly under ``tasks/open/`` and ``tasks/done/``.
 
-    ``.locks/`` holds no ``.md``, so it is naturally excluded. Both live and
-    terminal folders are scanned so a task is resolvable through its whole
-    lifecycle.
+    Non-recursive, and deliberately so: these two folders *are* the task
+    lifecycle, and :func:`_resolve_task_path` / :func:`_id_taken` resolve through
+    here, so a file nested any deeper is not a task this program can get, claim or
+    finish. Both live and terminal folders are scanned so a task is resolvable
+    through its whole lifecycle; ``.locks/`` holds no ``.md``, so it is naturally
+    excluded. :func:`in_task_scope` is the membership form of this same scope —
+    keep the two in step.
     """
     root = _tasks_root(config)
     for sub in _TASK_SUBDIRS:
         folder = root / sub
         if folder.is_dir():
             yield from folder.glob("*.md")
+
+
+def in_task_scope(vault: Path, path: Path) -> bool:
+    """Whether ``path`` lies in the folder scope :func:`_iter_task_files` walks.
+
+    The membership form of that walk (see :func:`shards.core.notes.in_note_scope`
+    for why the daemon needs one). Note the asymmetry with notes: this scope is
+    the two folders themselves, **not** their subtrees, so ``tasks/open/sub/t-x.md``
+    and ``tasks/archive/t-x.md`` are outside it — matching the walk, and matching
+    the fact that neither file is resolvable by ``task get``.
+    """
+    root = vault / "tasks"
+    return path.suffix == ".md" and path.parent in {root / sub for sub in _TASK_SUBDIRS}
 
 
 def _id_taken(config: Config, candidate: str) -> bool:

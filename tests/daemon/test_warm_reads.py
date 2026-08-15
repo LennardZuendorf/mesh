@@ -40,9 +40,11 @@ import pytest
 from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
+from shards.core.notes import _iter_note_files, in_note_scope
 from shards.core.search import hit_dict
+from shards.core.tasks import _iter_task_files, in_task_scope
 from shards.daemon.client import DaemonClient
-from shards.index.warm import VaultIndex
+from shards.index.warm import VaultIndex, iter_vault_md
 from shards.schemas.config import Config, load_config
 from shards.schemas.note import Note
 from tests.daemon.conftest import running_daemon
@@ -67,6 +69,28 @@ def _write(path: Path, meta: dict[str, Any], body: str) -> Path:
     return path
 
 
+def _note_meta(
+    note_id: str,
+    title: str,
+    *,
+    note_type: str = "note",
+    tags: list[str] | None = None,
+    owner: str = _AGENT,
+    age_days: int = 0,
+) -> dict[str, Any]:
+    when = datetime.now(UTC) - timedelta(days=age_days)
+    return {
+        "id": note_id,
+        "type": note_type,
+        "title": title,
+        "tags": list(tags or []),
+        "owner": owner,
+        "created": when,
+        "updated": when,
+        "related": [],
+    }
+
+
 def _note(
     vault: Path,
     *,
@@ -79,21 +103,32 @@ def _note(
     age_days: int = 0,
     body: str = "Note body.",
 ) -> Path:
-    when = datetime.now(UTC) - timedelta(days=age_days)
-    return _write(
-        vault / sub / f"{note_id}.md",
-        {
-            "id": note_id,
-            "type": note_type,
-            "title": title,
-            "tags": list(tags or []),
-            "owner": owner,
-            "created": when,
-            "updated": when,
-            "related": [],
-        },
-        body,
+    meta = _note_meta(
+        note_id, title, note_type=note_type, tags=tags, owner=owner, age_days=age_days
     )
+    return _write(vault / sub / f"{note_id}.md", meta, body)
+
+
+def _task_meta(
+    task_id: str,
+    title: str,
+    *,
+    status: str = "open",
+    tags: list[str] | None = None,
+    owner: str = _AGENT,
+    claimed_by: str | None = None,
+    project: str | None = None,
+    age_days: int = 0,
+) -> dict[str, Any]:
+    return {
+        **_note_meta(task_id, title, note_type="task", tags=tags, owner=owner, age_days=age_days),
+        "status": status,
+        "priority": None,
+        "claimed_by": claimed_by,
+        "project": project,
+        "blocks": [],
+        "blocked_by": [],
+    }
 
 
 def _task(
@@ -109,28 +144,18 @@ def _task(
     age_days: int = 0,
     body: str = "Task body.",
 ) -> Path:
-    when = datetime.now(UTC) - timedelta(days=age_days)
-    sub = "tasks/done" if status in {"done", "cancelled"} else "tasks/open"
-    return _write(
-        vault / sub / f"{task_id}.md",
-        {
-            "id": task_id,
-            "type": "task",
-            "title": title,
-            "tags": list(tags or []),
-            "owner": owner,
-            "created": when,
-            "updated": when,
-            "related": [],
-            "status": status,
-            "priority": None,
-            "claimed_by": claimed_by,
-            "project": project,
-            "blocks": [],
-            "blocked_by": [],
-        },
-        body,
+    meta = _task_meta(
+        task_id,
+        title,
+        status=status,
+        tags=tags,
+        owner=owner,
+        claimed_by=claimed_by,
+        project=project,
+        age_days=age_days,
     )
+    sub = "tasks/done" if status in {"done", "cancelled"} else "tasks/open"
+    return _write(vault / sub / f"{task_id}.md", meta, body)
 
 
 @pytest.fixture
@@ -140,7 +165,14 @@ def seeded_vault(vault: Path) -> Path:
     Deliberately includes the awkward cases: a foreign (id-less) Tolaria file that
     the tag pull must still surface with ``id: None``, a file whose frontmatter is
     malformed YAML that every reader must skip, a note carrying a wikilink that
-    dangles, and both task folders.
+    dangles, both task folders, and — the case that matters most for parity —
+    three **misfiled** entities that the warm index holds but the on-disk walks do
+    not reach: a task nested under ``tasks/open/sub/``, a task in a folder outside
+    the ``open|done`` lifecycle, and an ``n-`` note filed under ``tasks/``. None of
+    the three is gettable, claimable or finishable on disk, so neither list may
+    surface them; all three *are* part of the search corpus. Without them here the
+    parity matrix would compare two identically-canonical vaults and prove nothing
+    about scope.
     """
     _note(vault, note_id="n-alpha", title="Alpha", tags=["a", "shared"])
     _note(
@@ -168,6 +200,18 @@ def seeded_vault(vault: Path) -> Path:
         owner=_OTHER,
         tags=["shared"],
         age_days=30,
+    )
+
+    # Misfiled entities — in the vault-wide index, outside every on-disk walk.
+    for rel, task_id in (
+        ("tasks/open/sub", "t-nested"),
+        ("tasks/archive", "t-stray"),
+    ):
+        _write(vault / rel / f"{task_id}.md", _task_meta(task_id, f"Misfiled {task_id}"), "body")
+    _write(
+        vault / "tasks" / "n-misfiled.md",
+        _note_meta("n-misfiled", "Misfiled Note"),
+        "body",
     )
 
     # Coexisting Tolaria markdown: no shards id, so it is invisible to note/task
@@ -334,10 +378,14 @@ def test_tag_pull_includes_foreign_files(reads: DaemonClient, cfg: Config) -> No
 
 
 def test_tag_pull_filters_and_scores(reads: DaemonClient, cfg: Config) -> None:
+    # The *corpus* is wider than the entity scope: the misfiled tasks are search
+    # hits even though no task verb can reach them. Warm and cold agree on that.
     assert {h.id for h in reads.tag_pull(cfg, type_filter="task", limit=-1)} == {
         "t-open",
         "t-claim",
         "t-done",
+        "t-nested",
+        "t-stray",
     }
     assert {h.id for h in reads.tag_pull(cfg, status="done", limit=-1)} == {"t-done"}
     assert all(h.score == 1.0 for h in reads.tag_pull(cfg, limit=-1))
@@ -420,6 +468,190 @@ def test_the_walker_patch_would_catch_a_disk_read(
             cold.note_list(cfg, limit=None)
         else:
             cold.tag_pull(cfg, limit=-1)
+
+
+# --------------------------------------------------------------------------- #
+# Scope — the warm projection selects exactly what the on-disk walk would        #
+# --------------------------------------------------------------------------- #
+
+
+def test_scope_predicates_match_the_on_disk_walks(cfg: Config, seeded_vault: Path) -> None:
+    """The membership predicates and the walkers state one scope, not two.
+
+    The index is vault-wide (the tag pull needs the whole corpus), so the warm
+    ``note.list`` / ``task.list`` handlers project it through these predicates. If
+    the predicate and the walker ever drift, the warm answer becomes a *superset*
+    of the cold one and the two paths silently stop agreeing — which is precisely
+    what the misfiled entities in ``seeded_vault`` are here to catch.
+    """
+    vault = cfg.core.tolaria_path
+    corpus = set(iter_vault_md(vault))
+
+    assert {p for p in corpus if in_note_scope(vault, p)} == set(_iter_note_files(cfg))
+    assert {p for p in corpus if in_task_scope(vault, p)} == set(_iter_task_files(cfg))
+
+    # …and the misfiled files really are in the corpus, so the assertions above
+    # are not comparing two empty differences.
+    assert vault / "tasks" / "open" / "sub" / "t-nested.md" in corpus
+    assert vault / "tasks" / "archive" / "t-stray.md" in corpus
+    assert vault / "tasks" / "n-misfiled.md" in corpus
+
+
+def test_misfiled_entities_are_in_no_list_on_either_path(reads: DaemonClient, cfg: Config) -> None:
+    """A task outside ``tasks/{open,done}`` — or a note under ``tasks/`` — is not listed.
+
+    They are not resolvable by ``task get`` / ``note get`` either (the same walk
+    backs ``_resolve_task_path``), so listing them would advertise entities no
+    other verb can act on.
+    """
+    task_ids = set(_ids(reads.task_list(cfg, limit=None), "task"))
+    note_ids = set(_ids(reads.note_list(cfg, limit=None), "note"))
+    assert not task_ids & {"t-nested", "t-stray"}
+    assert "n-misfiled" not in note_ids
+    assert reads.vault_status(cfg)["tasks_total"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# An undecodable reply falls back — it never becomes an empty answer            #
+# --------------------------------------------------------------------------- #
+
+_UNDECODABLE_ENTRIES: tuple[Any, ...] = (
+    None,
+    [],
+    {},
+    {"entries": "not-a-list"},
+    {"entries": [7]},
+    {"entries": [{"path": "/x"}]},  # no meta
+    {"entries": [{"meta": {"id": "n-x"}, "path": "/x"}]},  # meta fails validation
+)
+
+
+def _replying(client: DaemonClient, monkeypatch: pytest.MonkeyPatch, payload: Any) -> None:
+    """Make every RPC on ``client`` succeed with ``payload`` as its result."""
+    monkeypatch.setattr(client, "_request", lambda _method, _params: payload)
+
+
+@pytest.mark.parametrize("payload", _UNDECODABLE_ENTRIES)
+def test_note_list_falls_back_when_the_reply_cannot_be_decoded(
+    cfg: Config,
+    seeded_vault: Path,
+    cold: DaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+) -> None:
+    """A live daemon answering ``ok: true`` with rows we cannot read must not gate.
+
+    This is the version-skew case the widened fallback-code set names: the daemon
+    knows the method and answers successfully, but its rows no longer validate
+    after a schema change. Returning what parsed — usually nothing — would show
+    "no notes" over a full vault, which is the accelerator gating the read.
+    """
+    _replying(cold, monkeypatch, payload)
+    assert set(_ids(cold.note_list(cfg, limit=None), "note")) == {"n-alpha", "n-beta", "n-proj"}
+
+
+@pytest.mark.parametrize("payload", _UNDECODABLE_ENTRIES)
+def test_task_list_falls_back_when_the_reply_cannot_be_decoded(
+    cfg: Config,
+    seeded_vault: Path,
+    cold: DaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+) -> None:
+    _replying(cold, monkeypatch, payload)
+    assert set(_ids(cold.task_list(cfg, limit=None), "task")) == {"t-open", "t-claim", "t-done"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, [], {}, {"results": "not-a-list"}, {"results": [7]}, {"results": [{"nope": 1}]}],
+)
+def test_tag_pull_falls_back_when_the_reply_cannot_be_decoded(
+    cfg: Config,
+    seeded_vault: Path,
+    cold: DaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+) -> None:
+    _replying(cold, monkeypatch, payload)
+    assert len(cold.tag_pull(cfg, tags=["shared"], limit=-1)) == 4
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {},
+        {"notes": 3, "tasks": {}},  # the pre-split payload an older daemon would send
+        {"note_count": "three", "task_statuses": [], "newest": []},
+        {"note_count": 3, "task_statuses": "open", "newest": []},
+        {"note_count": 3, "task_statuses": [1], "newest": []},
+        {"note_count": 3, "task_statuses": [], "newest": "no"},
+        {"note_count": True, "task_statuses": [], "newest": []},  # bool is not a count
+    ],
+)
+def test_vault_status_falls_back_when_the_reply_cannot_be_decoded(
+    cfg: Config,
+    seeded_vault: Path,
+    cold: DaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+) -> None:
+    """A half-built report is never returned: the client recomputes the whole thing."""
+    _replying(cold, monkeypatch, payload)
+    report = cold.vault_status(cfg)
+    assert report["notes"] == 3
+    assert report["tasks_total"] == 3
+    assert report["dangling_links"] == ["Nowhere At All"]
+
+
+# --------------------------------------------------------------------------- #
+# vault.status keeps the disk half off the daemon's event loop                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_vault_status_handler_does_no_disk_scan(
+    cfg: Config, seeded_vault: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler ships only the index-derivable half — no body scan on the loop.
+
+    ``DaemonServer._dispatch`` runs handlers synchronously on the event loop, so a
+    whole-vault ``find_dangling`` there would block every other agent's warm read
+    behind one ``shards status``. The handler is dispatched directly here with the
+    disk halves patched to raise: it must still answer.
+    """
+    with running_daemon(socket_path, config=cfg) as server:
+        monkeypatch.setattr("shards.core.lenses.find_dangling", _explode)
+        monkeypatch.setattr("shards.core.lenses.scan_stale_locks", _explode)
+        monkeypatch.setattr("shards.core.notes._iter_note_files", _explode)
+        monkeypatch.setattr("shards.core.tasks._iter_task_files", _explode)
+        line = (json.dumps({"id": "s", "method": "vault.status", "params": {}}) + "\n").encode()
+        reply = server._dispatch(line)
+
+    assert reply["ok"] is True, reply
+    assert set(reply["result"]) == {"note_count", "task_statuses", "newest"}
+    assert reply["result"]["note_count"] == 3
+    assert sorted(reply["result"]["task_statuses"]) == ["claimed", "done", "open"]
+
+
+def test_warm_vault_status_never_walks_the_entity_folders(
+    cfg: Config, seeded_vault: Path, socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: warm ``vault.status`` costs no note/task frontmatter walk.
+
+    The link scan and the lock listing still run — in *this* process, where they
+    block nobody else — so only the two entity walkers are patched.
+    """
+    with running_daemon(socket_path, config=cfg):
+        client = DaemonClient(socket_path=socket_path)
+        monkeypatch.setattr("shards.core.notes._iter_note_files", _explode)
+        monkeypatch.setattr("shards.core.tasks._iter_task_files", _explode)
+        report = client.vault_status(cfg)
+
+    assert report["notes"] == 3
+    assert report["tasks"] == {"open": 1, "claimed": 1, "done": 1, "cancelled": 0}
+    assert report["dangling_links"] == ["Nowhere At All"]  # the disk half still ran
 
 
 # --------------------------------------------------------------------------- #

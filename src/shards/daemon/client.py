@@ -40,7 +40,7 @@ import json
 import os
 import socket
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -77,10 +77,6 @@ Fallback = Callable[[], Any]
 # serve this" — a sentinel rather than ``None`` so it can never be confused with a
 # legitimate ``null`` result off the wire.
 _UNSERVED: Any = object()
-# The keys ``shards status`` renders straight out of the ``vault.status`` payload.
-_STATUS_KEYS: frozenset[str] = frozenset(
-    {"notes", "tasks", "tasks_total", "freshness", "dangling_links", "stale_locks"}
-)
 
 
 def default_socket_path() -> Path:
@@ -126,32 +122,42 @@ def entity_row(model: Note, path: Path) -> dict[str, Any]:
     return {"meta": model.model_dump(mode="json"), "path": str(path)}
 
 
-def _rows(result: Any, key: str) -> list[Any]:
-    """The row list under ``key`` in a reply, or empty for any unexpected shape."""
+def _wire_list(result: Any, key: str) -> list[Any] | None:
+    """The row list under ``key`` in a reply, or ``None`` for any unexpected shape."""
     if not isinstance(result, dict):
-        return []
+        return None
     rows = result.get(key)
-    return rows if isinstance(rows, list) else []
+    return rows if isinstance(rows, list) else None
 
 
-def _decode_rows(result: Any, model: type[Note] | type[Task]) -> Iterable[tuple[Any, Path]]:
-    """Decode ``{"entries": [...]}`` into ``(model, path)`` pairs, skipping bad rows.
+def _decode_rows(result: Any, model: type[Note] | type[Task]) -> list[tuple[Any, Path]] | None:
+    """Decode ``{"entries": [...]}`` into ``(model, path)`` pairs — all or nothing.
 
-    A row the running daemon shaped differently (version skew) or that fails
-    validation is dropped rather than raised — the same silent-skip tolerance
-    every on-disk scanner applies to a foreign or malformed file.
+    ``None`` means *this reply cannot be trusted*, and the caller must run its
+    file-op fallback rather than hand back what it managed to parse. A single
+    undecodable row is enough: on disk a malformed file is **data** and skipping
+    it is the documented tolerance, but on the wire it is **protocol skew** — an
+    older daemon still running after a schema change answers ``ok: true`` with
+    rows that no longer validate, and silently returning a short (or empty) list
+    would show the user "no notes" while the vault is full of them. That is the
+    accelerator gating the read, which invariant 1 forbids.
     """
-    for row in _rows(result, "entries"):
+    rows = _wire_list(result, "entries")
+    if rows is None:
+        return None
+    decoded: list[tuple[Any, Path]] = []
+    for row in rows:
         if not isinstance(row, dict):
-            continue
+            return None
         meta = row.get("meta")
         path = row.get("path")
         if not isinstance(meta, dict) or not isinstance(path, str):
-            continue
+            return None
         try:
-            yield model.model_validate(meta), Path(path)
+            decoded.append((model.model_validate(meta), Path(path)))
         except (msgspec.ValidationError, TypeError):
-            continue
+            return None
+    return decoded
 
 
 class DaemonClient:
@@ -281,8 +287,8 @@ class DaemonClient:
             sort=sort,
             limit=limit,
         )
-        result = self._warm("note.list", spec.to_params())
-        if result is _UNSERVED:
+        decoded = _decode_rows(self._warm("note.list", spec.to_params()), Note)
+        if decoded is None:
             return list_notes(
                 config,
                 tags=tags,
@@ -293,9 +299,7 @@ class DaemonClient:
                 sort=sort,
                 limit=limit,
             )
-        return [
-            NoteView(note=note, body="", path=path) for note, path in _decode_rows(result, Note)
-        ]
+        return [NoteView(note=note, body="", path=path) for note, path in decoded]
 
     def task_list(
         self,
@@ -329,8 +333,8 @@ class DaemonClient:
             sort=sort,
             limit=limit,
         )
-        result = self._warm("task.list", spec.to_params())
-        if result is _UNSERVED:
+        decoded = _decode_rows(self._warm("task.list", spec.to_params()), Task)
+        if decoded is None:
             return list_tasks(
                 config,
                 status=status,
@@ -343,9 +347,7 @@ class DaemonClient:
                 sort=sort,
                 limit=limit,
             )
-        return [
-            TaskView(task=task, body="", path=path) for task, path in _decode_rows(result, Task)
-        ]
+        return [TaskView(task=task, body="", path=path) for task, path in decoded]
 
     def tag_pull(
         self,
@@ -370,8 +372,8 @@ class DaemonClient:
             status=status,
             limit=limit,
         )
-        result = self._warm("search.tag_pull", spec.to_params())
-        if result is _UNSERVED:
+        hits = _decode_results(self._warm("search.tag_pull", spec.to_params()))
+        if hits is None:
             return tagpull(
                 config,
                 tags=tags,
@@ -380,33 +382,40 @@ class DaemonClient:
                 status=status,
                 limit=limit,
             )
-        return _decode_results(result)
+        return hits
 
     def vault_status(self, config: Config) -> dict[str, Any]:
-        """Vault health — warm-index counts when up, a direct triple scan when down.
+        """Vault health — warm counts when the daemon is up, a direct scan when down.
 
         Same payload either way: note count, tasks-by-status, freshness, dangling
-        links, stale locks. The fallback is
-        :func:`shards.core.lenses.status_report` over disk-scanned lenses, which
-        is the identical assembly the daemon's handler runs over index rows.
+        links, stale locks.
 
-        A reply missing any declared key is treated as unserved rather than
-        returned: the renderer indexes the payload directly, and a partial dict
-        off a skewed daemon would surface as a ``KeyError`` traceback instead of
-        the answer the caller can always compute locally.
+        The daemon ships only the half its index can derive — note count, task
+        statuses, the freshness row — and *this* side finishes the report through
+        :func:`shards.core.lenses.status_report`. The remainder reads note/task
+        bodies (dangling links) and lists lock files off disk, and the daemon
+        dispatches handlers synchronously on its event loop, so computing it there
+        would block every other agent's warm read behind one ``shards status``.
+        Here it blocks only this invocation. A reply that is missing or ill-typed
+        is treated as unserved: the two primitives are then computed from the same
+        :func:`shards.core.lenses.status_inputs` over the on-disk lenses, so the
+        report is never returned half-built.
         """
-        result = self._warm("vault.status", {})
-        if isinstance(result, dict) and set(result) >= _STATUS_KEYS:
-            return result
         # Imported lazily: ``core.lenses`` imports this module (for the project
         # lens's task list), so a module-level import here would be circular.
-        from shards.core.lenses import status_report
+        from shards.core.lenses import status_inputs, status_report
 
+        served: dict[str, Any] | None = _decode_status(self._warm("vault.status", {}))
+        if served is None:
+            served = {
+                **status_inputs(list_notes(config, limit=None), list_tasks(config, limit=None)),
+                "newest": scan_recent(config, 1),
+            }
         return status_report(
             config,
-            notes=list_notes(config, limit=None),
-            tasks=list_tasks(config, limit=None),
-            newest=scan_recent(config, 1),
+            note_count=served["note_count"],
+            task_statuses=served["task_statuses"],
+            newest=served["newest"],
         )
 
     def activity_recent(self, config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> Any:
@@ -430,12 +439,36 @@ class DaemonClient:
         )
 
 
-def _decode_results(result: Any) -> list[SearchResult]:
-    """Decode ``{"results": [...]}`` into hits, skipping rows that fail validation."""
+def _decode_results(result: Any) -> list[SearchResult] | None:
+    """Decode ``{"results": [...]}`` into hits — all or nothing (see :func:`_decode_rows`)."""
+    rows = _wire_list(result, "results")
+    if rows is None:
+        return None
     hits: list[SearchResult] = []
-    for row in _rows(result, "results"):
+    for row in rows:
         try:
             hits.append(msgspec.convert(row, SearchResult))
         except (msgspec.ValidationError, TypeError):
-            continue
+            return None
     return hits
+
+
+def _decode_status(result: Any) -> dict[str, Any] | None:
+    """Decode the ``vault.status`` half-report, or ``None`` if it is not usable.
+
+    The daemon ships only what its index can derive — ``note_count``,
+    ``task_statuses`` and the one-row ``newest`` window; anything missing or
+    ill-typed means the client computes the whole report itself.
+    """
+    if not isinstance(result, dict):
+        return None
+    note_count = result.get("note_count")
+    statuses = result.get("task_statuses")
+    newest = result.get("newest")
+    if isinstance(note_count, bool) or not isinstance(note_count, int):
+        return None
+    if not isinstance(statuses, list) or not all(isinstance(s, str) for s in statuses):
+        return None
+    if not isinstance(newest, list):
+        return None
+    return {"note_count": note_count, "task_statuses": statuses, "newest": newest}

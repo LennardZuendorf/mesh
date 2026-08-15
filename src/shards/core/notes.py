@@ -103,11 +103,31 @@ def _notes_root(config: Config) -> Path:
 
 
 def _iter_note_files(config: Config) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``notes/`` (``.locks/`` holds no ``.md``)."""
+    """Yield every ``*.md`` under ``notes/`` (``.locks/`` holds no ``.md``).
+
+    The *canonical* note scope: :func:`_resolve_path`, :func:`_id_taken` and
+    :func:`note_rows` all read through here, so a file outside it is not a note as
+    far as this program is concerned. :func:`in_note_scope` is the membership form
+    of this same scope — keep the two in step.
+    """
     root = _notes_root(config)
     if not root.is_dir():
         return
     yield from root.rglob("*.md")
+
+
+def in_note_scope(vault: Path, path: Path) -> bool:
+    """Whether ``path`` lies in the folder scope :func:`_iter_note_files` walks.
+
+    The membership form of that walk, for a caller holding a path rather than a
+    directory: the daemon's warm handlers hold one vault-wide index and must
+    project it down to exactly the rows the on-disk walk would have yielded.
+    Without this the warm answer is a *superset* of the cold one — an ``n-`` note
+    filed under ``tasks/`` is in the index but outside the note walk — and the two
+    paths stop agreeing. ``tests/daemon/test_warm_reads.py`` asserts the walk and
+    the predicate select the same set over a deliberately misfiled corpus.
+    """
+    return path.suffix == ".md" and path.is_relative_to(vault / "notes")
 
 
 def _resolve_path(config: Config, id_or_slug: str) -> Path:
