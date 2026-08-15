@@ -32,6 +32,29 @@ def test_config_reads_all_sections(shards_config: Path, vault: Path) -> None:
     assert cfg.tasks.collections == ["test-agent", "other-agent"]
 
 
+def test_search_threshold_explicit_when_set_in_toml(shards_config: Path, vault: Path) -> None:
+    # shards_config writes an explicit [search].threshold = 0.65.
+    cfg = load_config()
+    assert cfg.search.threshold_explicit() is True
+
+
+def test_search_threshold_not_explicit_when_absent(config_path: Path, vault: Path) -> None:
+    config_path.write_text(
+        f'[core]\ntolaria_path = "{vault}"\n\n[search]\ncollection = "v"\n', encoding="utf-8"
+    )
+    cfg = load_config(config_path)
+    assert cfg.search.threshold_explicit() is False
+    assert cfg.search.threshold == pytest.approx(0.65)  # decoded default, unaffected
+
+
+def test_search_threshold_not_explicit_with_no_search_section(
+    config_path: Path, vault: Path
+) -> None:
+    config_path.write_text(f'[core]\ntolaria_path = "{vault}"\n', encoding="utf-8")
+    cfg = load_config(config_path)
+    assert cfg.search.threshold_explicit() is False
+
+
 def test_config_accepts_path_alias(config_path: Path, vault: Path) -> None:
     # Root tech.md spells the key `[core].path`; the model must accept it too.
     config_path.write_text(f'[core]\npath = "{vault}"\nagent = "aliased"\n', encoding="utf-8")

@@ -22,6 +22,7 @@ plain ``core`` primitive.
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +56,7 @@ def query_search(
     owner: str | None,
     status: str | None,
     limit: int,
-    threshold: float,
+    threshold: float | None,
     quiet: bool,
 ) -> list[SearchResult]:
     """Route a query to hybrid ``indexed`` recall or the substring fallback.
@@ -65,6 +66,13 @@ def query_search(
     fallback, which prints its own stderr notice. Every filter — ``type`` / ``tags``
     / ``owner`` / ``status`` — is applied post-retrieval by both paths; ``quiet`` is
     forwarded so a degradation notice honours ``--quiet`` whichever path emits it.
+
+    ``threshold`` is ``None`` when the caller has no *explicit* value (neither
+    ``--threshold`` nor an explicit ``[search].threshold`` in config) — the
+    substring fallback then applies its own floor (root tech.md § B5) rather
+    than a silently-defaulted cutoff. The ``indexed`` path is unaffected by that
+    rule: it always gets a concrete value, defaulting to ``[search].threshold``
+    when the caller left it unset.
     """
     if config.search.hybrid and _daemon_up():
         try:
@@ -72,7 +80,7 @@ def query_search(
                 config,
                 query,
                 limit=limit,
-                threshold=threshold,
+                threshold=threshold if threshold is not None else config.search.threshold,
                 type_filter=type_filter,
                 tags=tags,
                 owner=owner,
@@ -136,6 +144,17 @@ def search_health(config: Config) -> dict[str, Any]:
     return payload
 
 
+def _iso_z(value: datetime) -> str:
+    """Render a UTC-aware datetime with a ``Z`` suffix instead of ``+00:00``.
+
+    Mirrors :func:`shards.schemas.note._iso_z` — kept as a local one-liner per
+    the DRY-filter convention (root tech.md § Duplication) rather than a shared
+    import across an unrelated module boundary.
+    """
+    text = value.isoformat()
+    return f"{text[:-6]}Z" if text.endswith("+00:00") else text
+
+
 def _read_body(path: str) -> str:
     """Return the Markdown body at ``path`` (empty on a read/parse failure)."""
     post = read_post(Path(path))
@@ -162,7 +181,7 @@ def hit_dict(result: SearchResult, *, meta_only: bool, full: bool) -> dict[str, 
     if result.owner is not None:
         hit["owner"] = result.owner
     if result.updated is not None:
-        hit["updated"] = result.updated.isoformat()
+        hit["updated"] = _iso_z(result.updated)
     if meta_only:
         return hit
     if full:

@@ -14,9 +14,14 @@ both task folders, and coexisting non-shards (foreign) files, which surface with
 
 Scoring matrix (highest matching tier wins): title exact ``1.0`` · title
 substring ``0.8`` · tag contains ``0.6`` · body substring ``0.4``. Results below
-``threshold`` are dropped; ties break on ``updated`` descending. The default
-``threshold`` (``0.65``) therefore excludes tag-only (``0.6``) and body-only
-(``0.4``) hits — the tests pick tiers deliberately around that boundary.
+the effective threshold are dropped; ties break on ``updated`` descending.
+``threshold`` filters only when a caller sets it explicitly — with no explicit
+value (``None``, the default) the fallback uses its own floor, the lowest tier
+(``0.4``), so every tier is reachable at default configuration (core-hardening/4,
+root tech.md § B5). The tests here pass an explicit low threshold (``0.1``) to
+isolate the scoring matrix from that application rule; the rule itself is
+covered by ``tests/index/test_fallback_threshold.py`` and the CLI cases below,
+whose ``shards_config`` fixture sets an *explicit* ``[search].threshold = 0.65``.
 """
 
 from __future__ import annotations
@@ -277,11 +282,21 @@ def test_fallback_sort_score_then_updated(cfg: Config, vault: Path) -> None:
     assert [r.id for r in results] == ["n-exact", "n-new", "n-old"]
 
 
-def test_fallback_threshold_excludes_below(cfg: Config, vault: Path) -> None:
-    # Body-only hit scores 0.4 → excluded under the default 0.65 threshold.
+def test_fallback_no_explicit_threshold_uses_lowest_tier_floor(cfg: Config, vault: Path) -> None:
+    # No threshold passed (None) → no explicit value → the fallback's own floor
+    # is the lowest matrix tier (0.4), so the body-only hit is now returned
+    # (core-hardening/4, root tech.md § B5) rather than silently dropped.
     _seed(vault, "notes", entry_id="n-body", title="Unrelated", body="the needle hides here")
-    assert search_fallback(cfg, "needle") == []
-    # A lower threshold lets it through.
+    results = search_fallback(cfg, "needle")
+    assert {r.id for r in results} == {"n-body"}
+    assert results[0].score == 0.4
+
+
+def test_fallback_threshold_excludes_below(cfg: Config, vault: Path) -> None:
+    # An explicit threshold above the body tier still filters it out.
+    _seed(vault, "notes", entry_id="n-body", title="Unrelated", body="the needle hides here")
+    assert search_fallback(cfg, "needle", threshold=0.65) == []
+    # A lower explicit threshold lets it through.
     low = search_fallback(cfg, "needle", threshold=0.3)
     assert {r.id for r in low} == {"n-body"}
 
@@ -446,7 +461,8 @@ def test_cli_full_includes_body(shards_config: Path, vault: Path) -> None:
 
 
 def test_cli_threshold_excludes(shards_config: Path, vault: Path) -> None:
-    # Body-only hit (0.4) is below the default 0.65 threshold → excluded.
+    # shards_config sets an explicit [search].threshold = 0.65 → the body-only
+    # hit (0.4) is excluded, same as before this fix (explicit is honoured).
     _seed(vault, "notes", entry_id="n-body", title="Nothing", body="the needle here")
     excluded = _invoke(["search", "needle"])
     assert excluded.exit_code == 0, excluded.output

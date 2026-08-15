@@ -3,8 +3,8 @@
 When ``indexed`` is unavailable (daemon down, no engine, or ``hybrid=false``),
 ``shards search "<q>"`` falls back to a deterministic in-process substring scan
 over the same corpus :mod:`~shards.index.tagpull` walks. Each file is scored by
-the highest matching tier of a fixed matrix and results below ``threshold`` are
-dropped:
+the highest matching tier of a fixed matrix (pinned — root tech.md § Implemented
+surfaces):
 
 | Tier            | Score |
 |-----------------|-------|
@@ -17,6 +17,14 @@ Results sort by ``score`` descending, ties broken by ``updated`` descending. The
 fallback emits **exactly one** stderr notice per call so a human knows recall is
 degraded (suppressed under ``--quiet``); the JSON payload itself never carries
 infrastructure text.
+
+``threshold`` filters hits below it **only when a caller set it explicitly**
+(``--threshold`` on the CLI, or an explicit ``[search].threshold`` in
+``config.toml``) — pass ``None`` (the default) for "no explicit value", which
+uses the fallback's own floor: the lowest matrix tier (``0.4``), so every tier
+is reachable at default configuration (root tech.md § B5). This is the
+threshold-*application* rule, which is deliberately not pinned; the matrix
+values above are.
 """
 
 from __future__ import annotations
@@ -36,16 +44,19 @@ from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
 
 _DEFAULT_LIMIT = 10
-_DEFAULT_THRESHOLD = 0.65
 _SNIPPET_CHARS = 200
 
 FALLBACK_NOTICE = "search: using substring fallback (indexed unavailable)"
 
-# Highest matching tier wins.
+# Highest matching tier wins. Pinned — root tech.md § Implemented surfaces.
 _TITLE_EXACT = 1.0
 _TITLE_SUBSTRING = 0.8
 _TAG_CONTAINS = 0.6
 _BODY_SUBSTRING = 0.4
+
+# The floor applied when no explicit threshold was given: the lowest matrix
+# tier, so every tier is reachable at default configuration (root tech.md § B5).
+_NO_EXPLICIT_THRESHOLD_FLOOR = _BODY_SUBSTRING
 
 
 def _emit_notice(quiet: bool) -> None:
@@ -83,7 +94,7 @@ def search_fallback(
     tags: list[str] | None = None,
     owner: str | None = None,
     limit: int = _DEFAULT_LIMIT,
-    threshold: float = _DEFAULT_THRESHOLD,
+    threshold: float | None = None,
     status: str | None = None,
     quiet: bool = False,
 ) -> list[SearchResult]:
@@ -92,11 +103,15 @@ def search_fallback(
     Walks every ``*.md`` under ``notes/`` + ``tasks/`` (foreign files included,
     surfacing with ``id=None``), applies the conjunctive ``tags`` **AND** ``type``
     / ``owner`` / ``status`` filters, scores by the highest matching tier, and
-    drops anything below ``threshold``. Emits exactly one stderr degradation
-    notice (unless ``quiet``). Sorted ``score`` descending, ``updated``
-    descending on ties, capped at ``limit`` (``limit < 0`` → unbounded).
+    drops anything below the effective threshold. ``threshold=None`` (the
+    default) means no caller set it explicitly, so the effective floor is the
+    lowest matrix tier (``0.4``); a caller-supplied value is honoured exactly as
+    given. Emits exactly one stderr degradation notice (unless ``quiet``).
+    Sorted ``score`` descending, ``updated`` descending on ties, capped at
+    ``limit`` (``limit < 0`` → unbounded).
     """
     _emit_notice(quiet)
+    effective_threshold = threshold if threshold is not None else _NO_EXPLICIT_THRESHOLD_FLOOR
     query_lower = query.lower()
 
     results: list[SearchResult] = []
@@ -115,7 +130,7 @@ def search_fallback(
         ):
             continue
         score = _score(query_lower, _str_or_none(row.meta.get("title")), file_tags, row.body)
-        if score < threshold:
+        if score < effective_threshold:
             continue
         results.append(to_result(path, row.meta, score=score, snippet=_snippet(row.body)))
 

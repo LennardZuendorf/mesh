@@ -45,11 +45,27 @@ class CoreConfig(msgspec.Struct, kw_only=True):
 
 
 class SearchConfig(msgspec.Struct, kw_only=True):
-    """``[search]`` — how ``shards search`` talks to ``indexed``."""
+    """``[search]`` — how ``shards search`` talks to ``indexed``.
+
+    ``_explicit`` records which ``[search]`` keys were actually present in the
+    raw TOML mapping. msgspec ``Struct``s expose no ``fields_set`` /
+    ``__pydantic_fields_set__`` equivalent, so :func:`load_config` populates
+    this by inspecting the parsed mapping directly (the same place the
+    ``[core].path`` alias is already resolved) rather than the decoded
+    ``Config``. It exists solely to answer :meth:`threshold_explicit` — the
+    substring fallback (root tech.md § B5) must apply ``threshold`` only when
+    a caller set it explicitly, never on the decoded default. Not a general
+    field-provenance mechanism: nothing else reads it.
+    """
 
     collection: str | None = None
     hybrid: bool = True
     threshold: float = 0.65
+    _explicit: frozenset[str] = msgspec.field(default_factory=frozenset)
+
+    def threshold_explicit(self) -> bool:
+        """Whether ``[search].threshold`` was set explicitly in ``config.toml``."""
+        return "threshold" in self._explicit
 
 
 class TasksConfig(msgspec.Struct, kw_only=True):
@@ -94,6 +110,13 @@ def load_config(path: Path | None = None) -> Config:
     with cfg_path.open("rb") as fh:
         data = tomllib.load(fh)
 
+    # Record which ``[search]`` keys the raw TOML actually set, before decoding
+    # loses that information — msgspec has no ``fields_set`` to ask afterward.
+    raw_search = data.get("search")
+    explicit_search_keys: frozenset[str] = (
+        frozenset(str(key) for key in raw_search) if isinstance(raw_search, dict) else frozenset()
+    )
+
     core = data.get("core")
     if isinstance(core, dict):
         core = dict(core)
@@ -105,4 +128,6 @@ def load_config(path: Path | None = None) -> Config:
             core["agent"] = agent_override
         data = {**data, "core": core}
 
-    return msgspec.convert(data, Config, dec_hook=_dec_hook)
+    config = msgspec.convert(data, Config, dec_hook=_dec_hook)
+    config.search._explicit = explicit_search_keys
+    return config

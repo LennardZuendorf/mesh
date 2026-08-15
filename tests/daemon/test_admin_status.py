@@ -116,6 +116,7 @@ def _seed_task(
     task_id: str,
     status: str = "open",
     title: str = "Seed Task",
+    body: str = "t",
 ) -> Path:
     when = datetime.now(UTC)
     meta: dict[str, object] = {
@@ -136,7 +137,7 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("t", **meta)), encoding="utf-8")
+    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
     return path
 
 
@@ -248,6 +249,19 @@ def test_vault_status_reports_dangling_wikilinks(cfg: Config, vault: Path) -> No
 def test_vault_status_no_dangling_when_link_resolves(cfg: Config, vault: Path) -> None:
     _seed_note(vault, note_id="n-target", title="Target Title")
     _seed_note(vault, note_id="n-src", title="Source", body="see [[Target Title]]")
+    status = vault_status(cfg)
+    assert status["dangling_links"] == []
+
+
+def test_vault_status_reports_dangling_wikilinks_in_task_bodies(cfg: Config, vault: Path) -> None:
+    # core-hardening/4, root tech.md § B6: dangling counts cover tasks/, not just notes/.
+    _seed_task(vault, task_id="t-src", body="Blocked on [[No Such Design Doc]].")
+    status = vault_status(cfg)
+    assert "No Such Design Doc" in status["dangling_links"]
+
+
+def test_vault_status_task_id_form_link_is_not_dangling(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-src2", body="See [[n-nope]] and [[t-nope]].")
     status = vault_status(cfg)
     assert status["dangling_links"] == []
 

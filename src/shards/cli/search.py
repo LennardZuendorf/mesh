@@ -62,7 +62,10 @@ def search_command(
     status: str | None = typer.Option(None, "--status", help="Filter by task status."),
     limit: int = typer.Option(10, "--limit", help="Cap the number of hits."),
     threshold: float | None = typer.Option(
-        None, "--threshold", help="Min score to keep (default from [search].threshold)."
+        None,
+        "--threshold",
+        help="Min score to keep (unset: [search].threshold if explicit, else the "
+        "fallback's own floor).",
     ),
     meta_only: bool = typer.Option(False, "--meta-only", help="Omit body/snippet from hits."),
     full: bool = typer.Option(False, "--full", help="Include the full Markdown body per hit."),
@@ -97,7 +100,15 @@ def search_command(
             )
         else:
             # A query → hybrid indexed recall when available, else substring fallback.
-            effective_threshold = threshold if threshold is not None else config.search.threshold
+            # ``None`` propagates when neither the flag nor the config key was set
+            # explicitly, so the substring fallback applies its own floor rather than
+            # a silently-defaulted cutoff (root tech.md § B5).
+            if threshold is not None:
+                effective_threshold = threshold
+            elif config.search.threshold_explicit():
+                effective_threshold = config.search.threshold
+            else:
+                effective_threshold = None
             results = query_search(
                 config,
                 query,

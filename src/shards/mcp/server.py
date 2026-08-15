@@ -179,7 +179,15 @@ def shards_search(
             limit=limit,
         )
     else:
-        effective_threshold = threshold if threshold is not None else config.search.threshold
+        # ``None`` propagates when neither the caller nor the config key set
+        # threshold explicitly, so the substring fallback applies its own floor
+        # rather than a silently-defaulted cutoff (root tech.md § B5).
+        if threshold is not None:
+            effective_threshold = threshold
+        elif config.search.threshold_explicit():
+            effective_threshold = config.search.threshold
+        else:
+            effective_threshold = None
         results = query_search(
             config,
             query,

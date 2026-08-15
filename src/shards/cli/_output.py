@@ -23,6 +23,17 @@ import typer
 PREVIEW_CHARS = 200
 
 
+def _iso_z(value: datetime) -> str:
+    """Render a UTC-aware datetime with a ``Z`` suffix instead of ``+00:00``.
+
+    Mirrors :func:`shards.schemas.note._iso_z` — kept as a local one-liner per
+    the DRY-filter convention (root tech.md § Duplication) rather than a shared
+    import across an unrelated module boundary.
+    """
+    text = value.isoformat()
+    return f"{text[:-6]}Z" if text.endswith("+00:00") else text
+
+
 def is_quiet(ctx: typer.Context) -> bool:
     """Whether ``--quiet`` (id-only output) is active."""
     return bool(getattr(ctx.obj, "quiet", False))
@@ -61,7 +72,7 @@ def emit_mutation(
         typer.echo(obj_id)
         return
     if is_json(ctx):
-        typer.echo(json.dumps({"id": obj_id, **fields, "updated": updated.isoformat()}))
+        typer.echo(json.dumps({"id": obj_id, **fields, "updated": _iso_z(updated)}))
         return
     typer.echo(f"{verb} {obj_id}")
 
