@@ -31,6 +31,9 @@ from shards.core.errors import ShardsError
 from shards.core.ids import generate_task_id
 from shards.core.notes import (
     MetaRow,
+    _append_to_end,
+    _append_under_section,
+    _format_block,
     _matches_tags,
     _opt_datetime,
     _opt_int,
@@ -290,6 +293,60 @@ def update_task(
             post.metadata["blocks"] = list(blocks)
         if blocked_by is not None:
             post.metadata["blocked_by"] = list(blocked_by)
+        post.metadata["updated"] = _now()
+        task = Task.model_validate(post.metadata)
+        atomic_write(path, frontmatter.dumps(post))
+    return task
+
+
+def append_task(
+    config: Config,
+    task_id: str,
+    text: str,
+    *,
+    section: str | None = None,
+    timestamp: bool = False,
+) -> Task:
+    """Append ``text`` to a task's body and bump ``updated`` (R2).
+
+    The missing half of "a task is a note": a task body is otherwise write-once
+    after creation (only :func:`finish_task`/:func:`cancel_task` ever touch it,
+    and only once, terminally). This reuses :func:`shards.core.notes.append_note`'s
+    body-editing helpers verbatim (``_append_to_end``, ``_append_under_section``,
+    ``_format_block``) rather than forking a second append implementation — the
+    existing precedent for borrowing private note helpers (``_matches_tags``,
+    ``_parse_since``, ``_validate_owner``, already imported above).
+
+    Never a lifecycle transition: ``status`` and folder are left untouched, so a
+    ``claimed`` task appended to stays ``claimed`` in ``tasks/open/``, and a
+    ``done`` task appended to stays ``done`` in ``tasks/done/`` — appending a
+    post-mortem to finished work is legitimate and does not resurrect it or add a
+    second ``## Outcome``/``## Cancelled`` section. ``related`` is recomputed from
+    the amended body, exactly as notes, so a ``[[…]]`` mention in the appended
+    text becomes discoverable via ``graph --direction in`` from the mentioned id.
+
+    Mechanics mirror :func:`update_task`: the id is resolved *inside*
+    ``hold(_lock_path(config, task_id))`` (the lock name derives from ``task_id``,
+    not the file location) so a concurrent finish/cancel move cannot race the
+    read; unknown frontmatter keys round-trip because the parsed metadata dict is
+    mutated in place, never rebuilt. Raises :class:`TaskNotFoundError` when the id
+    resolves to no file, or when the resolved file turns unreadable/malformed
+    before this read (via :func:`shards.storage.files.read_post`) — matching
+    :func:`get_task`.
+    """
+    block = _format_block(text, timestamp)
+    with hold(_lock_path(config, task_id)):
+        path = _resolve_task_path(config, task_id)
+        post = read_post(path)
+        if post is None:
+            raise TaskNotFoundError(task_id)
+        post.content = (
+            _append_under_section(post.content, block, section)
+            if section is not None
+            else _append_to_end(post.content, block)
+        )
+        _, related = resolve_wikilinks(post.content, config.core.tolaria_path)
+        post.metadata["related"] = related
         post.metadata["updated"] = _now()
         task = Task.model_validate(post.metadata)
         atomic_write(path, frontmatter.dumps(post))

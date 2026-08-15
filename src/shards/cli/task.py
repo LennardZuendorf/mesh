@@ -24,6 +24,7 @@ from shards.cli._errors import cli_errors
 from shards.core.tasks import (
     TaskNotFoundError,
     TaskView,
+    append_task,
     cancel_task,
     claim_task,
     create_task,
@@ -126,6 +127,27 @@ def update_command(
         )
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="updated", fields={"status": task.status}
+    )
+
+
+@task_app.command("append")
+def append_command(
+    ctx: typer.Context,
+    task_id: str = typer.Argument(..., help="Task id."),
+    text: str = typer.Argument(..., help="Text to append to the body."),
+    section: str | None = typer.Option(
+        None, "--section", help="Append under this ## heading (created if absent)."
+    ),
+    timestamp: bool = typer.Option(
+        False, "--timestamp", help="Prepend an ISO-8601 UTC timestamp line."
+    ),
+) -> None:
+    """Append text to a task's body (no status/folder change; mirrors note append)."""
+    config = load_config()
+    with cli_errors():
+        task = append_task(config, task_id, text, section=section, timestamp=timestamp)
+    _output.emit_mutation(
+        ctx, obj_id=task.id, updated=task.updated, verb="appended", fields={"status": task.status}
     )
 
 

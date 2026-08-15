@@ -212,8 +212,24 @@ def test_project_is_a_leaf_lens_not_a_subapp() -> None:
 
 
 def test_task_verb_gains_no_new_command() -> None:
-    """--project rides existing task new/update/list; no new task subcommand."""
+    """--project rides existing task new/update/list; no new task subcommand.
+
+    ``append`` is included because team-awareness/2 legitimately adds it as a
+    sub-command of the existing ``task`` verb (still three top-level verbs) —
+    this assertion guards against a *stray* extra subcommand, not against
+    ``task`` ever growing one.
+    """
     import shards.cli.task as task_cli
 
     names = {cmd.name for cmd in task_cli.task_app.registered_commands}
-    assert names == {"new", "update", "claim", "finish", "cancel", "get", "list", "delete"}
+    assert names == {
+        "new",
+        "append",
+        "update",
+        "claim",
+        "finish",
+        "cancel",
+        "get",
+        "list",
+        "delete",
+    }
