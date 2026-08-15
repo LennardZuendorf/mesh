@@ -33,7 +33,7 @@ import json
 import typer
 
 from shards.cli._errors import cli_errors
-from shards.core.search import hit_dict, query_search, search_health
+from shards.core.search import hit_dict, query_search, resolve_effective_threshold, search_health
 from shards.index.tagpull import tagpull
 from shards.schemas.config import load_config
 
@@ -103,12 +103,7 @@ def search_command(
             # ``None`` propagates when neither the flag nor the config key was set
             # explicitly, so the substring fallback applies its own floor rather than
             # a silently-defaulted cutoff (root tech.md § B5).
-            if threshold is not None:
-                effective_threshold = threshold
-            elif config.search.threshold_explicit():
-                effective_threshold = config.search.threshold
-            else:
-                effective_threshold = None
+            effective_threshold = resolve_effective_threshold(threshold, config)
             results = query_search(
                 config,
                 query,

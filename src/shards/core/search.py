@@ -33,7 +33,26 @@ from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
 from shards.storage.files import read_post
 
-__all__ = ["hit_dict", "query_search", "search_health"]
+__all__ = ["hit_dict", "query_search", "resolve_effective_threshold", "search_health"]
+
+
+def resolve_effective_threshold(flag: float | None, config: Config) -> float | None:
+    """Resolve the ``threshold`` to pass to :func:`query_search`.
+
+    ``None`` only when neither an explicit caller value (``--threshold`` on the
+    CLI, or the equivalent typed MCP parameter) *nor* an explicit
+    ``[search].threshold`` in config was given — :func:`query_search` then lets
+    the substring fallback apply its own floor (root tech.md § B5) instead of a
+    silently-defaulted cutoff. Shared by the ``shards search`` CLI command and
+    the ``shards_search`` MCP tool so this three-way resolution is one mechanism,
+    not two copies that could drift (the two surfaces "must behave identically",
+    per the module docstring above).
+    """
+    if flag is not None:
+        return flag
+    if config.search.threshold_explicit():
+        return config.search.threshold
+    return None
 
 
 def _daemon_up() -> bool:

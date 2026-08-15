@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import frontmatter
 import pytest
 
 import shards.mcp.server as server
@@ -331,3 +332,106 @@ def test_invalid_note_type_surfaces_as_clean_tool_error(cfg: Config) -> None:
 
     assert "invalid note type" in str(exc_info.value)
     assert "Traceback" not in str(exc_info.value)
+
+
+# --------------------------------------------------------------------------- #
+# core-hardening/4 — the MCP surface must mirror the CLI's threshold fix       #
+# --------------------------------------------------------------------------- #
+#
+# `core/search.py::query_search` states the CLI and MCP surfaces "must behave
+# identically". `shards_search` calls the same `resolve_effective_threshold`
+# helper `cli/search.py` calls (core-hardening/4 review finding: the two
+# surfaces used to hand-roll the same three-way branch, unverified on the MCP
+# side). These tests drive the real registered tool via `app.call_tool`, not
+# `shards_search` directly, so the MCP dispatch itself is covered — mirroring
+# `tests/index/test_fallback_threshold.py::test_default_config_no_indexed_returns_body_hit`.
+
+
+@pytest.fixture
+def default_threshold_config(
+    vault: Path, config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Config pointed at ``vault`` whose ``[search]`` section omits ``threshold``
+    (the fresh-install case: no explicit value anywhere)."""
+    config_path.write_text(
+        "\n".join(
+            (
+                "[core]",
+                f'tolaria_path = "{vault}"',
+                'agent = "test-agent"',
+                "",
+                "[search]",
+                'collection = "test-vault"',
+                "hybrid = true",
+                "",
+                "[tasks]",
+                'collections = ["test-agent"]',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    return config_path
+
+
+def _seed_body_only_hit(vault: Path) -> None:
+    """A note whose title/tags don't match but whose body contains 'eTA'."""
+    meta = {
+        "id": "n-visa",
+        "type": "note",
+        "title": "Travel Notes",
+        "tags": ["travel"],
+        "owner": "seed-agent",
+        "created": "2026-06-01T00:00:00+00:00",
+        "updated": "2026-06-01T00:00:00+00:00",
+        "related": [],
+    }
+    body = "Remember to apply for the eTA before the flight."
+    folder = vault / "notes"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "n-visa.md").write_text(
+        frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8"
+    )
+
+
+def test_mcp_search_default_config_no_indexed_returns_body_hit(
+    default_threshold_config: Path, vault: Path
+) -> None:
+    """Default config, no `indexed` on PATH, no daemon: the body-only hit (score
+    0.4) is returned through the real `shards_search` MCP tool dispatch — the
+    CLI-side fix (`test_default_config_no_indexed_returns_body_hit`) mirrored on
+    the MCP surface."""
+    _seed_body_only_hit(vault)
+
+    dispatched = asyncio.run(server.app.call_tool("shards_search", {"query": "eTA"}))
+
+    hits = dispatched.structured_content["result"]
+    assert {h["id"] for h in hits} == {"n-visa"}
+    assert hits[0]["score"] == 0.4
+
+
+def test_mcp_search_explicit_threshold_param_still_excludes_body_hit(
+    default_threshold_config: Path, vault: Path
+) -> None:
+    """The tool's own typed `threshold` parameter is the MCP equivalent of
+    `--threshold`; passing it explicitly still filters, even over a default
+    config with no other explicit threshold source."""
+    _seed_body_only_hit(vault)
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_search", {"query": "eTA", "threshold": 0.7})
+    )
+
+    assert dispatched.structured_content["result"] == []
+
+
+def test_mcp_search_explicit_config_threshold_behaves_as_today(cfg: Config, vault: Path) -> None:
+    """`cfg` (the `shards_config` fixture) sets an explicit `[search].threshold
+    = 0.65` — the body-only hit stays excluded, same as before this fix."""
+    _seed_body_only_hit(vault)
+
+    dispatched = asyncio.run(server.app.call_tool("shards_search", {"query": "eTA"}))
+
+    assert dispatched.structured_content["result"] == []

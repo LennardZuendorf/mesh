@@ -46,7 +46,7 @@ from shards.core.notes import (
     list_notes,
     update_note,
 )
-from shards.core.search import hit_dict, query_search
+from shards.core.search import hit_dict, query_search, resolve_effective_threshold
 from shards.core.tasks import (
     TaskView,
     cancel_task,
@@ -182,12 +182,7 @@ def shards_search(
         # ``None`` propagates when neither the caller nor the config key set
         # threshold explicitly, so the substring fallback applies its own floor
         # rather than a silently-defaulted cutoff (root tech.md § B5).
-        if threshold is not None:
-            effective_threshold = threshold
-        elif config.search.threshold_explicit():
-            effective_threshold = config.search.threshold
-        else:
-            effective_threshold = None
+        effective_threshold = resolve_effective_threshold(threshold, config)
         results = query_search(
             config,
             query,
