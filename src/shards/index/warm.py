@@ -5,17 +5,31 @@ folder so read-lenses do not re-parse from disk while the daemon is up. This
 module owns that view and its daemon-down equivalent — no ``watchdog`` import, so
 it stays cheap on the CLI path:
 
-* **:class:`VaultIndex`** — an in-process frontmatter index keyed by shards id
-  (``n-``/``t-``). ``reparse(path)`` (re)reads one file, ``evict(path)`` drops a
-  (possibly already-deleted) path without error, and ``recent(limit)`` returns the
-  most-recently-modified rows for ``activity.recent``. It is guarded by a lock
-  because the watchdog observer thread writes it while the asyncio server thread
-  reads it.
+* **:class:`VaultIndex`** — an in-process frontmatter index of the vault corpus.
+  ``reparse(path)`` (re)reads one file, ``evict(path)`` drops a (possibly
+  already-deleted) path without error, ``recent(limit)`` returns the
+  most-recently-modified *shards* rows for ``activity.recent``, and
+  :meth:`~VaultIndex.entries` / :meth:`~VaultIndex.corpus` are the projections the
+  daemon's warm read handlers filter over. It is guarded by a lock because the
+  watchdog observer thread writes it while the asyncio server thread reads it.
 
 * **:func:`scan_recent`** — the daemon-down fallback for ``activity.recent``: an
   mtime-sorted dir scan of ``notes/`` and ``tasks/`` (shards-id files only),
   returning the same JSON-serializable row shape and ordering as
   :meth:`VaultIndex.recent`.
+
+**Shards rows vs. the corpus.** ``note list`` / ``task list`` only ever surface
+files carrying a shards id (``n-``/``t-``), but ``search`` (tag-pull and the
+substring fallback) deliberately covers *every* ``*.md`` under ``notes/`` and
+``tasks/`` — coexisting Tolaria/foreign files included, surfaced with ``id:
+None``. The index therefore holds both, split into two buckets: id-bearing
+entities keyed by shards id (:meth:`~VaultIndex.entries`, and everything
+``recent`` / ``get`` / ``len`` speak for) and id-less corpus files keyed by real
+path. Without the second bucket a warm ``search.tag_pull`` would silently drop
+foreign hits the disk path returns — a result-contract change, not an
+acceleration. Bodies stay off the index in both buckets: no list-shaped read
+needs them, and holding them would trade the daemon's whole memory budget for
+nothing.
 
 The watcher that drives ``reparse``/``evict`` on filesystem events lives in
 :mod:`shards.index.watcher`; folder reconcile lives in
@@ -31,9 +45,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import frontmatter
-import yaml
-
 from shards.schemas.config import Config
 from shards.storage.files import read_post
 
@@ -45,20 +56,19 @@ def _is_shards_id(value: object) -> bool:
     return isinstance(value, str) and value.startswith(_ID_PREFIXES)
 
 
-def _iter_vault_md(vault: Path) -> Iterator[Path]:
-    """Yield every candidate ``*.md`` under ``notes/`` and ``tasks/{open,done}/``.
+def iter_vault_md(vault: Path) -> Iterator[Path]:
+    """Yield every ``*.md`` under ``notes/`` and ``tasks/`` (full recursive walk).
 
-    ``notes/`` is scanned recursively (typed subfolders live under it);
-    ``.locks/`` holds no ``.md`` and is naturally excluded.
+    Recursive so typed note subfolders (``notes/decisions/`` …) and both task
+    folders (``tasks/open/``, ``tasks/done/``) are covered. ``.locks/`` holds no
+    ``.md`` and is naturally excluded. This is the corpus
+    :func:`shards.index.tagpull.iter_corpus` walks, shared verbatim so the warm
+    index and the on-disk scanners can never disagree about *which* files exist.
     """
-    notes = vault / "notes"
-    if notes.is_dir():
-        yield from notes.rglob("*.md")
-    tasks = vault / "tasks"
-    for sub in ("open", "done"):
-        folder = tasks / sub
-        if folder.is_dir():
-            yield from folder.glob("*.md")
+    for sub in ("notes", "tasks"):
+        root = vault / sub
+        if root.is_dir():
+            yield from root.rglob("*.md")
 
 
 def _entry_dict(path: Path, meta: dict[str, Any], mtime: float) -> dict[str, Any]:
@@ -84,20 +94,27 @@ def _entry_dict(path: Path, meta: dict[str, Any], mtime: float) -> dict[str, Any
 
 @dataclass(frozen=True)
 class IndexEntry:
-    """One indexed note/task: shards id, on-disk path, mtime, and frontmatter."""
+    """One indexed vault file: its shards id (``None`` if foreign), path, mtime, meta."""
 
-    id: str
+    id: str | None
     path: Path
     mtime: float
     meta: dict[str, Any]
 
 
 class VaultIndex:
-    """Thread-safe in-process frontmatter index keyed by shards id."""
+    """Thread-safe in-process frontmatter index over the vault corpus.
+
+    Shards entities are keyed by their shards id; coexisting foreign Markdown is
+    kept in a second bucket keyed by real path (see the module docstring for why
+    both are needed). ``len()``, :meth:`get` and :meth:`recent` speak only for the
+    shards bucket, exactly as before.
+    """
 
     def __init__(self) -> None:
         self._entries: dict[str, IndexEntry] = {}
         self._by_path: dict[str, str] = {}  # realpath -> id, for path-based eviction
+        self._foreign: dict[str, IndexEntry] = {}  # realpath -> row, for id-less files
         self._lock = threading.RLock()
 
     @staticmethod
@@ -105,37 +122,45 @@ class VaultIndex:
         return os.path.realpath(path)
 
     def reparse(self, path: Path) -> None:
-        """(Re)index ``path``; a vanished or non-shards file is a no-op / eviction.
+        """(Re)index ``path``; a vanished file is evicted, an unreadable one skipped.
 
-        Only ``*.md`` files whose frontmatter carries a shards id are indexed;
-        malformed YAML or a foreign file is skipped silently (never raised). A file
-        that no longer exists is evicted instead.
+        Reads through :func:`shards.storage.files.read_post` — the project's one
+        safe reader — which collapses "vanished" and "corrupt" into a single
+        ``None``. The two must stay distinguishable here (a deleted file has to
+        leave the index; a momentarily unreadable or malformed one must keep its
+        last good row rather than disappear from ``activity.recent``), so the
+        ``None`` branch re-checks the path: no longer a file → evict, still a file
+        → skip. That preserves the original ``FileNotFoundError``/``IsADirectoryError``
+        → evict, other ``OSError``/``yaml.YAMLError`` → skip behaviour at the cost
+        of one extra ``stat`` on the failure path only. Never raises.
         """
         p = Path(path)
         if p.suffix != ".md":
             return
-        try:
-            text = p.read_text(encoding="utf-8")
-        except (FileNotFoundError, IsADirectoryError):
-            self.evict(p)
-            return
-        except OSError:
-            return
-        try:
-            meta = dict(frontmatter.loads(text).metadata)
-        except yaml.YAMLError:
-            return
-        entry_id = meta.get("id")
-        if not _is_shards_id(entry_id):
-            return
-        assert isinstance(entry_id, str)
+        post = read_post(p)
+        if post is None:
+            if not p.is_file():
+                self.evict(p)  # gone (or replaced by a directory) — drop the row
+            return  # unreadable or malformed — keep the last good row
         try:
             mtime = p.stat().st_mtime
         except OSError:
             return
-        entry = IndexEntry(id=entry_id, path=p, mtime=mtime, meta=meta)
+        meta = dict(post.metadata)
+        entry_id = meta.get("id")
         rp = self._rp(p)
+        if not _is_shards_id(entry_id):
+            entry = IndexEntry(id=None, path=p, mtime=mtime, meta=meta)
+            with self._lock:
+                prior_id = self._by_path.pop(rp, None)  # the file lost its shards id
+                if prior_id is not None:
+                    self._entries.pop(prior_id, None)
+                self._foreign[rp] = entry
+            return
+        assert isinstance(entry_id, str)
+        entry = IndexEntry(id=entry_id, path=p, mtime=mtime, meta=meta)
         with self._lock:
+            self._foreign.pop(rp, None)  # the file gained a shards id
             prior = self._entries.get(entry_id)
             if prior is not None:
                 self._by_path.pop(self._rp(prior.path), None)
@@ -143,9 +168,10 @@ class VaultIndex:
             self._by_path[rp] = entry_id
 
     def evict(self, path: Path) -> None:
-        """Drop the entry whose path matches ``path`` — silent if none does."""
+        """Drop the row whose path matches ``path`` — silent if none does."""
         rp = self._rp(Path(path))
         with self._lock:
+            self._foreign.pop(rp, None)
             entry_id = self._by_path.pop(rp, None)
             if entry_id is not None:
                 self._entries.pop(entry_id, None)
@@ -154,11 +180,31 @@ class VaultIndex:
         with self._lock:
             return self._entries.get(entry_id)
 
+    def entries(self) -> list[IndexEntry]:
+        """Every indexed *shards* entity (id-bearing), as a snapshot list.
+
+        The row source behind the warm ``note.list`` / ``task.list`` /
+        ``vault.status`` handlers. Order is unspecified — the shared selectors
+        impose a deterministic path order before sorting, so the warm and on-disk
+        row orders can never diverge.
+        """
+        with self._lock:
+            return list(self._entries.values())
+
+    def corpus(self) -> list[IndexEntry]:
+        """Every indexed vault file — shards entities *and* foreign ones.
+
+        The row source behind the warm ``search.tag_pull`` handler, whose on-disk
+        twin walks the same wider corpus (foreign files surface with ``id: None``).
+        """
+        with self._lock:
+            return [*self._entries.values(), *self._foreign.values()]
+
     def recent(self, limit: int = DEFAULT_RECENT_LIMIT) -> list[dict[str, Any]]:
-        """Most-recently-modified rows, mtime-descending (id-ascending on ties)."""
+        """Most-recently-modified shards rows, mtime-descending (id-ascending on ties)."""
         with self._lock:
             entries = list(self._entries.values())
-        entries.sort(key=lambda e: e.id)  # stable secondary key
+        entries.sort(key=lambda e: e.id or "")  # stable secondary key
         entries.sort(key=lambda e: e.mtime, reverse=True)
         if limit >= 0:
             entries = entries[:limit]
@@ -169,8 +215,10 @@ class VaultIndex:
         with self._lock:
             self._entries.clear()
             self._by_path.clear()
+            self._foreign.clear()
 
     def __len__(self) -> int:
+        """The number of indexed *shards* entities (foreign corpus rows excluded)."""
         with self._lock:
             return len(self._entries)
 
@@ -188,7 +236,7 @@ def scan_recent(config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> list[dict[
     :meth:`VaultIndex.recent`, computed by a fresh on-disk scan.
     """
     rows: list[tuple[float, str, dict[str, Any], Path]] = []
-    for path in _iter_vault_md(config.core.tolaria_path):
+    for path in iter_vault_md(config.core.tolaria_path):
         post = read_post(path)
         if post is None:
             continue
@@ -213,5 +261,6 @@ __all__ = [
     "DEFAULT_RECENT_LIMIT",
     "IndexEntry",
     "VaultIndex",
+    "iter_vault_md",
     "scan_recent",
 ]

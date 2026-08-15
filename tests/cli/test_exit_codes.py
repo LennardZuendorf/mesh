@@ -194,12 +194,13 @@ def test_cli_status_scan_oserror_exits_1_no_traceback(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Admin surface coverage: ``shards status`` maps an unexpected OSError too."""
-    import shards.cli.admin as admin_cli
 
-    def boom(config: Config, **kwargs: object) -> None:  # noqa: ARG001
+    def boom(*_args: object, **_kwargs: object) -> None:
         raise OSError(13, "Permission denied")
 
-    monkeypatch.setattr(admin_cli, "list_notes", boom)
+    # ``status`` now runs through the daemon client, whose file-op fallback is the
+    # same ``list_notes`` scan the direct call used to make.
+    monkeypatch.setattr("shards.daemon.client.list_notes", boom)
 
     result = _invoke(["status"])
 

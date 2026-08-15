@@ -18,17 +18,28 @@ agents hand off, and slug matching would make handoff ambiguous.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 from msgspec import ValidationError
 
 from shards.core.errors import ShardsError
 from shards.core.ids import generate_task_id
-from shards.core.notes import _matches_tags, _parse_since, _validate_owner, apply_tag_spec
+from shards.core.notes import (
+    MetaRow,
+    _matches_tags,
+    _opt_datetime,
+    _opt_int,
+    _opt_str,
+    _parse_since,
+    _str_tuple,
+    _validate_owner,
+    apply_tag_spec,
+)
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.task import Task
@@ -467,6 +478,172 @@ def get_task(config: Config, task_id: str) -> TaskView:
     return TaskView(task=task, body=post.content, path=path)
 
 
+# --------------------------------------------------------------------------- #
+# The one task list predicate — shared by the disk walk and the warm index      #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class TaskFilter:
+    """A normalized, socket-transportable ``task list`` filter/sort/limit spec.
+
+    The task twin of :class:`shards.core.notes.NoteFilter`; see there for the
+    build-once/ship-over-the-socket contract. ``mine`` carries its identity
+    explicitly in ``me`` rather than reading a config: the daemon's own
+    ``[core].agent`` is *not* the calling agent's, so "mine" must be resolved on
+    the caller's side and travel with the request.
+    """
+
+    status: str | None = None
+    owner: str | None = None
+    mine: bool = False
+    me: str | None = None
+    tags: tuple[str, ...] | None = None
+    any_tag: bool = False
+    project: str | None = None
+    cutoff: datetime | None = None
+    sort: str = "updated"
+    limit: int | None = _DEFAULT_LIMIT
+
+    @classmethod
+    def build(
+        cls,
+        config: Config,
+        *,
+        status: str | None = None,
+        owner: str | None = None,
+        mine: bool = False,
+        tags: list[str] | None = None,
+        any_tag: bool = False,
+        project: str | None = None,
+        since: str | None = None,
+        sort: str = "updated",
+        limit: int | None = _DEFAULT_LIMIT,
+    ) -> TaskFilter:
+        """Validate and normalize the caller-level arguments into a spec.
+
+        Resolves ``mine`` against ``config.agent`` here, at the caller's boundary.
+        Raises ``ValueError`` for an unknown ``sort`` field or an unparseable
+        ``since`` (the boundary mappers turn both into exit 2) — *before* any
+        socket call, so validation never depends on the daemon being up.
+        """
+        if sort not in _SORT_FIELDS:
+            raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
+        return cls(
+            status=status,
+            owner=owner,
+            mine=mine,
+            me=config.agent,
+            tags=tuple(tags) if tags else None,
+            any_tag=any_tag,
+            project=project,
+            cutoff=_parse_since(since) if since else None,
+            sort=sort,
+            limit=limit,
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        """Render the spec as JSON-safe RPC params."""
+        return {
+            "status": self.status,
+            "owner": self.owner,
+            "mine": self.mine,
+            "me": self.me,
+            "tags": list(self.tags) if self.tags else None,
+            "any_tag": self.any_tag,
+            "project": self.project,
+            "cutoff": self.cutoff.isoformat() if self.cutoff is not None else None,
+            "sort": self.sort,
+            "limit": self.limit,
+        }
+
+    @classmethod
+    def from_params(cls, params: Mapping[str, Any]) -> TaskFilter:
+        """Rebuild a spec from untrusted RPC params (see :meth:`NoteFilter.from_params`)."""
+        sort = params.get("sort")
+        return cls(
+            status=_opt_str(params.get("status")),
+            owner=_opt_str(params.get("owner")),
+            mine=bool(params.get("mine", False)),
+            me=_opt_str(params.get("me")),
+            tags=_str_tuple(params.get("tags")),
+            any_tag=bool(params.get("any_tag", False)),
+            project=_opt_str(params.get("project")),
+            cutoff=_opt_datetime(params.get("cutoff")),
+            sort=sort if sort in _SORT_FIELDS else "updated",
+            limit=_opt_int(params.get("limit")),
+        )
+
+
+def task_rows(config: Config) -> Iterator[MetaRow]:
+    """Yield one :data:`~shards.core.notes.MetaRow` per readable task file.
+
+    Walks ``tasks/open/`` and ``tasks/done/``. Unreadable and malformed files are
+    skipped by :func:`shards.storage.files.read_post`, so a vanished/permission-
+    denied sibling is skipped exactly like malformed YAML — never a crashed scan.
+    """
+    for path in _iter_task_files(config):
+        post = read_post(path)
+        if post is None:
+            continue
+        yield path, post.metadata
+
+
+def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
+    """Apply ``spec`` to ``rows`` — the *one* task filter/sort/limit implementation (R4).
+
+    Called with on-disk rows by :func:`list_tasks` and with warm-index rows by the
+    daemon's ``task.list`` handler, so the two paths can never drift. Only rows
+    whose frontmatter carries a valid shards id (``t-`` prefix), declare
+    ``type: task``, and validate against :class:`Task` are surfaced; Tolaria /
+    foreign / malformed rows are skipped silently. Filters (all conjunctive):
+    exact ``status``, exact ``owner`` (on the ``owner`` field), ``mine``
+    (``owner`` *or* ``claimed_by`` equals ``spec.me``), ``tags`` (AND, or OR with
+    ``any_tag``), exact ``project`` (the project-scoped view — only tasks whose
+    ``project`` soft link matches), and the ``cutoff`` recency bound on
+    ``updated``. ``sort`` is ``updated``/``created`` (descending) or ``title``
+    (ascending), tie-broken by path so the order is deterministic and identical on
+    both paths; ``limit`` caps the result (``None`` for unbounded). Shares the
+    ``--since``/tag/sort semantics with :func:`shards.core.notes.select_notes`.
+
+    The returned views carry ``body=""`` — see :data:`shards.core.notes.MetaRow`.
+    """
+    views: list[TaskView] = []
+    for path, meta in rows:
+        task_id = meta.get("id")
+        if not isinstance(task_id, str) or not task_id.startswith(_ID_PREFIX):
+            continue
+        if meta.get("type") != "task":
+            continue
+        try:
+            task = Task.model_validate(meta)
+        except ValidationError:
+            continue
+        if spec.status is not None and task.status != spec.status:
+            continue
+        if spec.owner is not None and task.owner != spec.owner:
+            continue
+        if spec.mine and task.owner != spec.me and task.claimed_by != spec.me:
+            continue
+        if spec.project is not None and task.project != spec.project:
+            continue
+        if spec.tags and not _matches_tags(task.tags, list(spec.tags), spec.any_tag):
+            continue
+        if spec.cutoff is not None and task.updated < spec.cutoff:
+            continue
+        views.append(TaskView(task=task, body="", path=path))
+
+    views.sort(key=lambda v: str(v.path))  # deterministic tie order under a stable sort
+    if spec.sort == "title":
+        views.sort(key=lambda v: v.task.title.lower())
+    else:
+        views.sort(key=lambda v: getattr(v.task, spec.sort), reverse=True)
+
+    if spec.limit is not None and spec.limit >= 0:
+        return views[: spec.limit]
+    return views
+
+
 def list_tasks(
     config: Config,
     *,
@@ -480,60 +657,25 @@ def list_tasks(
     sort: str = "updated",
     limit: int | None = _DEFAULT_LIMIT,
 ) -> list[TaskView]:
-    """List shards tasks across ``tasks/open/`` and ``tasks/done/``, filtered/sorted (R4).
+    """List shards tasks across ``tasks/open/`` and ``tasks/done/`` — the on-disk path (R4).
 
-    Only files whose frontmatter carries a valid shards id (``t-`` prefix), declares
-    ``type: task``, and validates against :class:`Task` are surfaced; Tolaria /
-    foreign / unreadable / malformed files are skipped silently — the per-file read
-    goes through :func:`shards.storage.files.read_post`, so a vanished/permission-
-    denied file (``OSError``) is skipped exactly like malformed YAML, never a
-    crashed scan. Filters (all conjunctive): exact ``status``, exact ``owner`` (on
-    the ``owner`` field), ``mine`` (``owner`` *or* ``claimed_by`` equals the
-    configured agent), ``tags`` (AND, or OR with ``any_tag``), exact ``project``
-    (the project-scoped view — only tasks whose ``project`` soft link matches),
-    and ``since`` recency on ``updated``. ``sort`` is ``updated``/``created``
-    (descending) or ``title`` (ascending); ``limit`` caps the result (``None`` for
-    unbounded). Shares the ``--since``/tag/sort semantics with
-    :func:`shards.core.notes.list_notes`.
+    A thin composition of :func:`task_rows` (the walk) and :func:`select_tasks`
+    (the predicate); see the latter for the filter/sort/limit semantics, including
+    why the views carry no body. This is also the daemon-down fallback behind
+    :meth:`DaemonClient.task_list <shards.daemon.client.DaemonClient.task_list>`.
     """
-    if sort not in _SORT_FIELDS:
-        raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
-    cutoff = _parse_since(since) if since else None
-    me = config.agent
-
-    views: list[TaskView] = []
-    for path in _iter_task_files(config):
-        meta = read_post(path)
-        if meta is None:
-            continue  # unreadable or malformed YAML — skip silently, like foreign files
-        task_id = meta.metadata.get("id")
-        if not isinstance(task_id, str) or not task_id.startswith(_ID_PREFIX):
-            continue
-        if meta.metadata.get("type") != "task":
-            continue
-        try:
-            task = Task.model_validate(meta.metadata)
-        except ValidationError:
-            continue
-        if status is not None and task.status != status:
-            continue
-        if owner is not None and task.owner != owner:
-            continue
-        if mine and task.owner != me and task.claimed_by != me:
-            continue
-        if project is not None and task.project != project:
-            continue
-        if tags and not _matches_tags(task.tags, tags, any_tag):
-            continue
-        if cutoff is not None and task.updated < cutoff:
-            continue
-        views.append(TaskView(task=task, body=meta.content, path=path))
-
-    if sort == "title":
-        views.sort(key=lambda v: v.task.title.lower())
-    else:
-        views.sort(key=lambda v: getattr(v.task, sort), reverse=True)
-
-    if limit is not None and limit >= 0:
-        return views[:limit]
-    return views
+    return select_tasks(
+        task_rows(config),
+        TaskFilter.build(
+            config,
+            status=status,
+            owner=owner,
+            mine=mine,
+            tags=tags,
+            any_tag=any_tag,
+            project=project,
+            since=since,
+            sort=sort,
+            limit=limit,
+        ),
+    )

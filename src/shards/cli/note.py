@@ -29,10 +29,10 @@ from shards.core.notes import (
     create_note,
     delete_note,
     get_note,
-    list_notes,
     resolve_slug,
     update_note,
 )
+from shards.daemon.client import DaemonClient
 from shards.schemas.config import load_config
 from shards.schemas.note import Note, NoteType
 
@@ -215,7 +215,9 @@ def list_command(
     config = load_config()
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     with cli_errors():
-        views = list_notes(
+        # Served from the daemon's warm index when it is up, from the identical
+        # on-disk walk when it is down — one predicate, either way.
+        views = DaemonClient().note_list(
             config,
             tags=tag_list,
             any_tag=any_tag,

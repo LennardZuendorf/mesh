@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import frontmatter
 from msgspec import ValidationError
@@ -444,6 +444,202 @@ def _matches_tags(note_tags: list[str], want: list[str], any_tag: bool) -> bool:
     return not have.isdisjoint(want) if any_tag else set(want).issubset(have)
 
 
+# --------------------------------------------------------------------------- #
+# RPC param coercers — shared by every filter spec that crosses the socket      #
+# --------------------------------------------------------------------------- #
+#
+# Filter specs are rebuilt daemon-side from JSON that arrived over a socket, so
+# every field is untrusted: a wrong-typed value degrades to ``None``/the default
+# rather than raising, which would turn a garbled param into a 500 the caller
+# cannot fall back from. Defined once here and reused by the task and tag-pull
+# specs (``core.tasks``, ``index.tagpull``) — the same import direction those
+# modules already use for ``_matches_tags`` / ``_parse_since``.
+
+
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _opt_int(value: object) -> int | None:
+    """An ``int`` or ``None``; ``bool`` is excluded (a stray ``true`` must not cap to 1)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _str_tuple(value: object) -> tuple[str, ...] | None:
+    """A non-empty tuple of strings, or ``None`` (absent / empty / wrong type)."""
+    if not isinstance(value, list):
+        return None
+    items = tuple(item for item in value if isinstance(item, str))
+    return items or None
+
+
+def _opt_datetime(value: object) -> datetime | None:
+    """An ISO-8601 string parsed to an aware UTC datetime, or ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+# --------------------------------------------------------------------------- #
+# The one note list predicate — shared by the disk walk and the warm index      #
+# --------------------------------------------------------------------------- #
+
+# One candidate row: a path and its parsed frontmatter. Deliberately **no body**:
+# the daemon's warm index holds frontmatter only, so a body-bearing row shape
+# could never be filled warm — and a list result whose ``body`` silently emptied
+# whenever the daemon came up would be worse than one that never carries it. The
+# views a list produces therefore always have ``body=""``; a caller that needs a
+# body reads it per id (``get_note``/``get_task``, or ``storage.files.read_body``).
+MetaRow = tuple[Path, Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
+class NoteFilter:
+    """A normalized, socket-transportable ``note list`` filter/sort/limit spec.
+
+    Built once at the caller's boundary by :meth:`build` (which is where the
+    caller-facing strings — ``sort``, ``--since`` — are *validated*, so a bad
+    value fails the same way whether the daemon is up or down), then either
+    applied locally by :func:`select_notes` or shipped over the socket via
+    :meth:`to_params` and rebuilt daemon-side by :meth:`from_params`.
+    """
+
+    tags: tuple[str, ...] | None = None
+    any_tag: bool = False
+    owner: str | None = None
+    note_type: str | None = None
+    cutoff: datetime | None = None
+    sort: str = "updated"
+    limit: int | None = _DEFAULT_LIMIT
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        tags: list[str] | None = None,
+        any_tag: bool = False,
+        owner: str | None = None,
+        note_type: str | None = None,
+        since: str | None = None,
+        sort: str = "updated",
+        limit: int | None = _DEFAULT_LIMIT,
+    ) -> NoteFilter:
+        """Validate and normalize the caller-level arguments into a spec.
+
+        Raises ``ValueError`` for an unknown ``sort`` field or an unparseable
+        ``since`` (the boundary mappers turn both into exit 2) — *before* any
+        socket call, so validation never depends on the daemon being up.
+        """
+        if sort not in _SORT_FIELDS:
+            raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
+        return cls(
+            tags=tuple(tags) if tags else None,
+            any_tag=any_tag,
+            owner=owner,
+            note_type=note_type,
+            cutoff=_parse_since(since) if since else None,
+            sort=sort,
+            limit=limit,
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        """Render the spec as JSON-safe RPC params."""
+        return {
+            "tags": list(self.tags) if self.tags else None,
+            "any_tag": self.any_tag,
+            "owner": self.owner,
+            "note_type": self.note_type,
+            "cutoff": self.cutoff.isoformat() if self.cutoff is not None else None,
+            "sort": self.sort,
+            "limit": self.limit,
+        }
+
+    @classmethod
+    def from_params(cls, params: Mapping[str, Any]) -> NoteFilter:
+        """Rebuild a spec from RPC params, coercing defensively.
+
+        Params arrive off a socket, so every field is treated as untrusted: a
+        wrong-typed value falls back to its default rather than raising, and an
+        unknown ``sort`` collapses to ``updated``. The wire is not a validation
+        boundary — :meth:`build` already ran on the caller's side.
+        """
+        sort = params.get("sort")
+        return cls(
+            tags=_str_tuple(params.get("tags")),
+            any_tag=bool(params.get("any_tag", False)),
+            owner=_opt_str(params.get("owner")),
+            note_type=_opt_str(params.get("note_type")),
+            cutoff=_opt_datetime(params.get("cutoff")),
+            sort=sort if sort in _SORT_FIELDS else "updated",
+            limit=_opt_int(params.get("limit")),
+        )
+
+
+def note_rows(config: Config) -> Iterator[MetaRow]:
+    """Yield one :data:`MetaRow` per readable ``*.md`` under ``notes/``.
+
+    Unreadable and malformed files are skipped by
+    :func:`shards.storage.files.read_post`, so a foreign or corrupt sibling never
+    crashes the walk.
+    """
+    for path in _iter_note_files(config):
+        post = read_post(path)
+        if post is None:
+            continue
+        yield path, post.metadata
+
+
+def select_notes(rows: Iterable[MetaRow], spec: NoteFilter) -> list[NoteView]:
+    """Apply ``spec`` to ``rows`` — the *one* note filter/sort/limit implementation.
+
+    Called with on-disk rows by :func:`list_notes` and with warm-index rows by the
+    daemon's ``note.list`` handler, so the two paths can never drift. Only rows
+    whose frontmatter carries a valid shards id (``n-`` prefix) and validates
+    against :class:`Note` are surfaced; Tolaria/foreign rows are skipped silently.
+    Filters (all conjunctive): ``tags`` (AND, or OR with ``any_tag``), exact
+    ``owner``, exact ``note_type``, and the ``cutoff`` recency bound on
+    ``updated``. ``sort`` is ``updated``/``created`` (descending) or ``title``
+    (ascending), tie-broken by path so the order is deterministic and identical
+    on both paths; ``limit`` caps the result (``None`` for unbounded).
+
+    The returned views carry ``body=""`` — see :data:`MetaRow`.
+    """
+    views: list[NoteView] = []
+    for path, meta in rows:
+        note_id = meta.get("id")
+        if not isinstance(note_id, str) or not note_id.startswith(_ID_PREFIX):
+            continue
+        try:
+            note = Note.model_validate(meta)
+        except ValidationError:
+            continue
+        if spec.note_type is not None and note.type != spec.note_type:
+            continue
+        if spec.owner is not None and note.owner != spec.owner:
+            continue
+        if spec.tags and not _matches_tags(note.tags, list(spec.tags), spec.any_tag):
+            continue
+        if spec.cutoff is not None and note.updated < spec.cutoff:
+            continue
+        views.append(NoteView(note=note, body="", path=path))
+
+    views.sort(key=lambda v: str(v.path))  # deterministic tie order under a stable sort
+    if spec.sort == "title":
+        views.sort(key=lambda v: v.note.title.lower())
+    else:
+        views.sort(key=lambda v: getattr(v.note, spec.sort), reverse=True)
+
+    if spec.limit is not None and spec.limit >= 0:
+        return views[: spec.limit]
+    return views
+
+
 def list_notes(
     config: Config,
     *,
@@ -455,46 +651,22 @@ def list_notes(
     sort: str = "updated",
     limit: int | None = _DEFAULT_LIMIT,
 ) -> list[NoteView]:
-    """List shards notes under ``notes/``, filtered and sorted.
+    """List shards notes under ``notes/``, filtered and sorted — the on-disk path.
 
-    Only files whose frontmatter carries a valid shards id (``n-`` prefix) and
-    validates against :class:`Note` are surfaced; Tolaria/foreign files are
-    skipped silently. Filters (all conjunctive): ``tags`` (AND, or OR with
-    ``any_tag``), exact ``owner``, exact ``note_type``, and ``since`` recency on
-    ``updated``. ``sort`` is ``updated``/``created`` (descending) or ``title``
-    (ascending); ``limit`` caps the result (``None`` for unbounded).
+    A thin composition of :func:`note_rows` (the walk) and :func:`select_notes`
+    (the predicate); see the latter for the filter/sort/limit semantics, including
+    why the views carry no body. This is also the daemon-down fallback behind
+    :meth:`DaemonClient.note_list <shards.daemon.client.DaemonClient.note_list>`.
     """
-    if sort not in _SORT_FIELDS:
-        raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
-    cutoff = _parse_since(since) if since else None
-
-    views: list[NoteView] = []
-    for path in _iter_note_files(config):
-        post = read_post(path)
-        if post is None:
-            continue
-        note_id = post.metadata.get("id")
-        if not isinstance(note_id, str) or not note_id.startswith(_ID_PREFIX):
-            continue
-        try:
-            note = Note.model_validate(post.metadata)
-        except ValidationError:
-            continue
-        if note_type is not None and note.type != note_type:
-            continue
-        if owner is not None and note.owner != owner:
-            continue
-        if tags and not _matches_tags(note.tags, tags, any_tag):
-            continue
-        if cutoff is not None and note.updated < cutoff:
-            continue
-        views.append(NoteView(note=note, body=post.content, path=path))
-
-    if sort == "title":
-        views.sort(key=lambda v: v.note.title.lower())
-    else:
-        views.sort(key=lambda v: getattr(v.note, sort), reverse=True)
-
-    if limit is not None and limit >= 0:
-        return views[:limit]
-    return views
+    return select_notes(
+        note_rows(config),
+        NoteFilter.build(
+            tags=tags,
+            any_tag=any_tag,
+            owner=owner,
+            note_type=note_type,
+            since=since,
+            sort=sort,
+            limit=limit,
+        ),
+    )

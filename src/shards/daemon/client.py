@@ -12,17 +12,26 @@ transport failure — a missing socket, a refused/stale socket, a hung daemon
 (timeout), a mid-response crash, or a truncated/garbled reply — is swallowed and
 the caller's fallback is run instead; the failure is never re-raised. A *live*
 daemon that answers ``ok: false`` surfaces as :class:`DaemonError`, except for the
-fallback-eligible codes (``503`` "reserved but not yet wired"), which also run the
-fallback so a not-yet-implemented method degrades to its file-op path. :meth:`ping`
-is the one exception: it is a liveness probe with no fallback, so a down daemon
-propagates.
+fallback-eligible codes, which also run the fallback. :meth:`ping` is the one
+exception: it is a liveness probe with no fallback, so a down daemon propagates.
 
-The convenience read verbs (:meth:`note_get`, :meth:`note_list`, :meth:`task_get`,
-:meth:`task_list`) bind the right fallback — a single-file ``python-frontmatter``
-read for ``get``, a recursive shards-id scan for ``list`` — delegating to
-``shards.core`` so the sandbox check and the ``n-``/``t-`` id gate are inherited,
-not re-implemented. Their return shape is a JSON-serializable dict (or list of
-dicts), matching what the socket will eventually return.
+**The wired read verbs.** :meth:`~DaemonClient.note_list`,
+:meth:`~DaemonClient.task_list`, :meth:`~DaemonClient.vault_status` and
+:meth:`~DaemonClient.tag_pull` are the list-shaped reads the daemon can actually
+accelerate: each is an O(vault) walk plus a YAML parse per file over metadata the
+warm :class:`~shards.index.warm.VaultIndex` already holds in RAM. Each ships a
+*normalized filter spec* (built and validated on this side, so a bad ``--sort`` or
+``--since`` fails identically with the daemon down) and each binds the identical
+on-disk selector as its fallback — the same predicate the daemon applies to index
+rows, never a second copy. Point reads (``note.get`` / ``task.get``) are
+deliberately **not** here: the id already determines the path, so a point read is
+one ``open()``, and since the index holds no bodies a warm ``get`` would hit disk
+anyway — the socket round-trip would buy nothing.
+
+**List rows carry no body.** The index holds frontmatter only, so the views these
+verbs return have ``body=""`` on *both* the warm and the fallback path (parity is
+the point). No list consumer reads a list row's body; a caller that needs one
+reads it per id, which is what ``session-start`` does for its live queue.
 """
 
 from __future__ import annotations
@@ -31,15 +40,20 @@ import json
 import os
 import socket
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from shards.core.notes import get_note, list_notes
-from shards.core.tasks import get_task, list_tasks
+import msgspec
+
+from shards.core.notes import NoteFilter, NoteView, list_notes
+from shards.core.tasks import TaskFilter, TaskView, list_tasks
+from shards.index.tagpull import TagPullFilter, tagpull
 from shards.index.warm import DEFAULT_RECENT_LIMIT, scan_recent
 from shards.schemas.config import Config
 from shards.schemas.note import Note
+from shards.schemas.search import SearchResult
+from shards.schemas.task import Task
 
 _SOCKET_NAME = "shards.sock"
 _DEFAULT_TIMEOUT = 5.0
@@ -48,8 +62,25 @@ _RECV_CHUNK = 4096
 # ``503`` marks a method that is reserved but not yet wired to the daemon, so the
 # CLI degrades to the file-op fallback. Domain errors (2/3/4) are never in here.
 _FALLBACK_CODES: frozenset[int] = frozenset({503})
+# The wired read verbs widen the fallback set to every *server-state* code:
+# ``404`` (the daemon does not know this method — an older binary still running
+# after an upgrade, or a config-less server with no warm index), ``500`` (its
+# handler failed) and ``503``. All three mean "the daemon cannot serve this",
+# which is precisely the condition the file-op fallback exists for; a read must
+# never fail because the accelerator did. Domain codes (2/3/4) stay out — these
+# handlers never raise one, and a genuine domain error must still propagate.
+_READ_FALLBACK_CODES: frozenset[int] = frozenset({404, 500, 503})
 
 Fallback = Callable[[], Any]
+
+# Returned by the wired read verbs' inner fallback to mean "the daemon could not
+# serve this" — a sentinel rather than ``None`` so it can never be confused with a
+# legitimate ``null`` result off the wire.
+_UNSERVED: Any = object()
+# The keys ``shards status`` renders straight out of the ``vault.status`` payload.
+_STATUS_KEYS: frozenset[str] = frozenset(
+    {"notes", "tasks", "tasks_total", "freshness", "dangling_links", "stale_locks"}
+)
 
 
 def default_socket_path() -> Path:
@@ -78,12 +109,49 @@ class DaemonError(Exception):
         self.message = message
 
 
-def _serialize(model: Note, body: str, path: Path) -> dict[str, Any]:
-    """Render a note/task view as a JSON-safe dict: frontmatter + body + path."""
-    data: dict[str, Any] = model.model_dump(mode="json")
-    data["body"] = body
-    data["path"] = str(path)
-    return data
+# --------------------------------------------------------------------------- #
+# Wire codec for list rows                                                     #
+# --------------------------------------------------------------------------- #
+#
+# A list row is ``{"meta": <frontmatter dict>, "path": <str>}``. The frontmatter
+# is kept *nested* rather than merged with ``path`` because ``Note``/``Task``
+# round-trip unknown frontmatter keys through an ``extra`` stash — a merged
+# ``path`` key would be stashed as a foreign frontmatter key and then reappear in
+# every ``--json`` payload. The daemon server imports :func:`entity_row` so the
+# two ends of the codec are written once, in the module that owns the protocol.
+
+
+def entity_row(model: Note, path: Path) -> dict[str, Any]:
+    """Encode one list row for the wire: frontmatter under ``meta``, location under ``path``."""
+    return {"meta": model.model_dump(mode="json"), "path": str(path)}
+
+
+def _rows(result: Any, key: str) -> list[Any]:
+    """The row list under ``key`` in a reply, or empty for any unexpected shape."""
+    if not isinstance(result, dict):
+        return []
+    rows = result.get(key)
+    return rows if isinstance(rows, list) else []
+
+
+def _decode_rows(result: Any, model: type[Note] | type[Task]) -> Iterable[tuple[Any, Path]]:
+    """Decode ``{"entries": [...]}`` into ``(model, path)`` pairs, skipping bad rows.
+
+    A row the running daemon shaped differently (version skew) or that fails
+    validation is dropped rather than raised — the same silent-skip tolerance
+    every on-disk scanner applies to a foreign or malformed file.
+    """
+    for row in _rows(result, "entries"):
+        if not isinstance(row, dict):
+            continue
+        meta = row.get("meta")
+        path = row.get("path")
+        if not isinstance(meta, dict) or not isinstance(path, str):
+            continue
+        try:
+            yield model.model_validate(meta), Path(path)
+        except (msgspec.ValidationError, TypeError):
+            continue
 
 
 class DaemonClient:
@@ -155,6 +223,15 @@ class DaemonClient:
                 return fallback()
             raise
 
+    def _warm(self, method: str, params: dict[str, Any]) -> Any:
+        """Ask the daemon for a wired read; :data:`_UNSERVED` when it cannot answer.
+
+        Wraps :meth:`call` with the read verbs' wider fallback-code set and a
+        sentinel fallback, so each verb decides *how* to compute its own on-disk
+        result instead of building it eagerly for a call that will usually succeed.
+        """
+        return self.call(method, params, lambda: _UNSERVED, fallback_codes=_READ_FALLBACK_CODES)
+
     # -- verbs ------------------------------------------------------------- #
 
     def ping(self) -> Any:
@@ -174,32 +251,162 @@ class DaemonClient:
             return False
         return True
 
-    def note_get(self, config: Config, id_or_slug: str) -> Any:
-        return self.call(
-            "note.get",
-            {"id": id_or_slug},
-            lambda: _serialize(*_note_get_view(config, id_or_slug)),
-        )
+    def note_list(
+        self,
+        config: Config,
+        *,
+        tags: list[str] | None = None,
+        any_tag: bool = False,
+        owner: str | None = None,
+        note_type: str | None = None,
+        since: str | None = None,
+        sort: str = "updated",
+        limit: int | None = None,
+    ) -> list[NoteView]:
+        """List notes — warm-index served when the daemon is up, disk-walked when down.
 
-    def note_list(self, config: Config) -> Any:
-        return self.call(
-            "note.list",
-            {},
-            lambda: [_serialize(v.note, v.body, v.path) for v in list_notes(config, limit=None)],
+        The spec is built (and validated) here, so an invalid ``sort``/``since``
+        raises ``ValueError`` on both paths before any socket call. The fallback
+        is :func:`~shards.core.notes.list_notes` — the same
+        :func:`~shards.core.notes.select_notes` predicate the daemon applies to
+        index rows, over the on-disk walk instead — so the two results are
+        identical. Returned views carry ``body=""`` (see the module docstring).
+        """
+        spec = NoteFilter.build(
+            tags=tags,
+            any_tag=any_tag,
+            owner=owner,
+            note_type=note_type,
+            since=since,
+            sort=sort,
+            limit=limit,
         )
+        result = self._warm("note.list", spec.to_params())
+        if result is _UNSERVED:
+            return list_notes(
+                config,
+                tags=tags,
+                any_tag=any_tag,
+                owner=owner,
+                note_type=note_type,
+                since=since,
+                sort=sort,
+                limit=limit,
+            )
+        return [
+            NoteView(note=note, body="", path=path) for note, path in _decode_rows(result, Note)
+        ]
 
-    def task_get(self, config: Config, task_id: str) -> Any:
-        return self.call(
-            "task.get",
-            {"id": task_id},
-            lambda: _serialize(*_task_get_view(config, task_id)),
+    def task_list(
+        self,
+        config: Config,
+        *,
+        status: str | None = None,
+        owner: str | None = None,
+        mine: bool = False,
+        tags: list[str] | None = None,
+        any_tag: bool = False,
+        project: str | None = None,
+        since: str | None = None,
+        sort: str = "updated",
+        limit: int | None = None,
+    ) -> list[TaskView]:
+        """List tasks — warm-index served when the daemon is up, disk-walked when down.
+
+        Mirrors :meth:`note_list`; ``mine`` is resolved against ``config.agent``
+        here and travels with the request, because the daemon's own configured
+        identity is not the calling agent's.
+        """
+        spec = TaskFilter.build(
+            config,
+            status=status,
+            owner=owner,
+            mine=mine,
+            tags=tags,
+            any_tag=any_tag,
+            project=project,
+            since=since,
+            sort=sort,
+            limit=limit,
         )
+        result = self._warm("task.list", spec.to_params())
+        if result is _UNSERVED:
+            return list_tasks(
+                config,
+                status=status,
+                owner=owner,
+                mine=mine,
+                tags=tags,
+                any_tag=any_tag,
+                project=project,
+                since=since,
+                sort=sort,
+                limit=limit,
+            )
+        return [
+            TaskView(task=task, body="", path=path) for task, path in _decode_rows(result, Task)
+        ]
 
-    def task_list(self, config: Config) -> Any:
-        return self.call(
-            "task.list",
-            {},
-            lambda: [_serialize(v.task, v.body, v.path) for v in list_tasks(config, limit=None)],
+    def tag_pull(
+        self,
+        config: Config,
+        *,
+        tags: list[str] | None = None,
+        type_filter: str | None = None,
+        owner: str | None = None,
+        status: str | None = None,
+        limit: int = 10,
+    ) -> list[SearchResult]:
+        """Frontmatter tag pull — warm-index served when up, corpus-walked when down.
+
+        The tag pull is a pure metadata filter over the *whole* corpus (foreign
+        files included, surfacing with ``id=None``), which is exactly what the
+        index holds — so the warm answer is exact, not approximate.
+        """
+        spec = TagPullFilter.build(
+            tags=tags,
+            type_filter=type_filter,
+            owner=owner,
+            status=status,
+            limit=limit,
+        )
+        result = self._warm("search.tag_pull", spec.to_params())
+        if result is _UNSERVED:
+            return tagpull(
+                config,
+                tags=tags,
+                type_filter=type_filter,
+                owner=owner,
+                status=status,
+                limit=limit,
+            )
+        return _decode_results(result)
+
+    def vault_status(self, config: Config) -> dict[str, Any]:
+        """Vault health — warm-index counts when up, a direct triple scan when down.
+
+        Same payload either way: note count, tasks-by-status, freshness, dangling
+        links, stale locks. The fallback is
+        :func:`shards.core.lenses.status_report` over disk-scanned lenses, which
+        is the identical assembly the daemon's handler runs over index rows.
+
+        A reply missing any declared key is treated as unserved rather than
+        returned: the renderer indexes the payload directly, and a partial dict
+        off a skewed daemon would surface as a ``KeyError`` traceback instead of
+        the answer the caller can always compute locally.
+        """
+        result = self._warm("vault.status", {})
+        if isinstance(result, dict) and set(result) >= _STATUS_KEYS:
+            return result
+        # Imported lazily: ``core.lenses`` imports this module (for the project
+        # lens's task list), so a module-level import here would be circular.
+        from shards.core.lenses import status_report
+
+        return status_report(
+            config,
+            notes=list_notes(config, limit=None),
+            tasks=list_tasks(config, limit=None),
+            newest=scan_recent(config, 1),
         )
 
     def activity_recent(self, config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> Any:
@@ -210,10 +417,10 @@ class DaemonClient:
         mtime-sorted scan of ``notes/`` and ``tasks/``. Both return the same
         ``{"entries": [...]}`` shape.
 
-        ``fallback_codes`` is empty here: a config-less daemon answers
-        ``activity.recent`` with a ``503`` stub that must *propagate* (it is a
-        server-state signal, not a reserved read verb), so only a genuine
-        socket-down error triggers the scan fallback.
+        ``fallback_codes`` is empty here: a config-less daemon does not register
+        ``activity.recent`` at all and answers ``404``, which must *propagate* (it
+        is a server-state signal the ``recent-activity`` lens reports on), so only
+        a genuine socket-down error triggers the scan fallback.
         """
         return self.call(
             "activity.recent",
@@ -223,11 +430,12 @@ class DaemonClient:
         )
 
 
-def _note_get_view(config: Config, id_or_slug: str) -> tuple[Note, str, Path]:
-    view = get_note(config, id_or_slug)
-    return view.note, view.body, view.path
-
-
-def _task_get_view(config: Config, task_id: str) -> tuple[Note, str, Path]:
-    view = get_task(config, task_id)
-    return view.task, view.body, view.path
+def _decode_results(result: Any) -> list[SearchResult]:
+    """Decode ``{"results": [...]}`` into hits, skipping rows that fail validation."""
+    hits: list[SearchResult] = []
+    for row in _rows(result, "results"):
+        try:
+            hits.append(msgspec.convert(row, SearchResult))
+        except (msgspec.ValidationError, TypeError):
+            continue
+    return hits

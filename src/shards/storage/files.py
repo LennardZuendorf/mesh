@@ -90,6 +90,18 @@ def read_post(path: Path) -> frontmatter.Post | None:
         return None
 
 
+def read_body(path: Path) -> str:
+    """The Markdown body at ``path``, or ``""`` when it is unreadable/malformed.
+
+    A thin projection of :func:`read_post` for the callers that want only the
+    body and treat "cannot read it" as "no body" — the ``--full`` search hit and
+    the ``session-start`` payload both need exactly this, and neither should
+    grow its own reader.
+    """
+    post = read_post(path)
+    return post.content if post is not None else ""
+
+
 def note_folder(note_type: str, tolaria_path: Path) -> Path:
     """Return the vault folder for ``note_type`` (raises ``ValueError`` if unknown)."""
     try:

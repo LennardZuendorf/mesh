@@ -3,17 +3,20 @@
 Two halves, matching the unit's acceptance criteria:
 
 * **Server** — an ``asyncio`` unix socket at ``$XDG_RUNTIME_DIR/shards.sock`` (mode
-  ``0600``) speaking NDJSON. ``ping`` returns ``{"pong": true}``; unknown methods
-  yield a ``404`` error; the five not-yet-built methods yield a ``503`` stub. Error
+  ``0600``) speaking NDJSON. ``ping`` returns ``{"pong": true}``; every other
+  method on a *config-less* server is unknown and yields a ``404`` error (the
+  ``503`` stub table was culled in core-hardening/5 — a handler is either wired
+  over the warm index at config-ful startup, or the method is unknown). Error
   envelopes carry **no** ``id`` field (only success echoes the request id). These
   are exercised end-to-end over a real blocking socket against a daemon run in a
   background event-loop thread.
 * **Client** — :class:`~shards.daemon.client.DaemonClient` connects, and on a
   connection failure (``ConnectionRefusedError`` / ``FileNotFoundError``) invokes
-  the caller's fallback instead of raising. ``note.get`` / ``task.get`` fall back
-  to a single-file ``python-frontmatter`` read; ``note.list`` / ``task.list`` fall
-  back to a recursive scan returning only shards-id-bearing files. Writes never go
-  through the client at all — there is no write method on it.
+  the caller's fallback instead of raising. The wired read verbs
+  (``note.list`` / ``task.list`` / ``vault.status`` / ``search.tag_pull``) fall
+  back to the identical on-disk selector, and treat a server-state error code
+  (``404``/``500``/``503``) as fallback-eligible too. Writes never go through the
+  client at all — there is no write method on it.
 
 Sockets live under a short ``/tmp`` dir because ``AF_UNIX`` paths are capped near
 104 bytes and ``tmp_path`` is too long; the real default paths are short.
@@ -22,15 +25,10 @@ Sockets live under a short ``/tmp`` dir because ``AF_UNIX`` paths are capped nea
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
-import shutil
 import socket
 import stat
-import tempfile
-import threading
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,12 +39,20 @@ from shards.daemon.client import DaemonClient, DaemonError, default_socket_path
 from shards.daemon.server import DaemonServer
 from shards.schemas.config import Config, load_config
 from shards.storage.files import note_folder, task_folder
+from tests.daemon.conftest import running_daemon
 
-_STUB_METHODS = (
-    "search.query",
+# Methods a *config-less* server does not serve: the four wired reads (registered
+# only at config-ful startup, over a warm index) plus the three the daemon does
+# not serve at all — point reads and the ``indexed`` passthroughs.
+_UNSERVED_METHODS = (
+    "note.list",
+    "task.list",
+    "vault.status",
     "search.tag_pull",
     "activity.recent",
-    "vault.status",
+    "note.get",
+    "task.get",
+    "search.query",
     "index.reindex",
 )
 
@@ -59,27 +65,6 @@ _STUB_METHODS = (
 @pytest.fixture
 def cfg(shards_config: Path) -> Config:
     return load_config()
-
-
-@pytest.fixture
-def sock_dir() -> Iterator[Path]:
-    """A short-lived ``/tmp`` dir for unix sockets (AF_UNIX path-length limit)."""
-    path = Path(tempfile.mkdtemp(prefix="brn-", dir="/tmp"))
-    try:
-        yield path
-    finally:
-        shutil.rmtree(path, ignore_errors=True)
-
-
-@pytest.fixture
-def socket_path(sock_dir: Path) -> Path:
-    return sock_dir / "d.sock"
-
-
-@pytest.fixture
-def missing_socket(sock_dir: Path) -> Path:
-    """A socket path guaranteed not to exist → connect raises FileNotFoundError."""
-    return sock_dir / "absent.sock"
 
 
 def _seed_note(
@@ -140,45 +125,6 @@ def _seed_task(
     path = folder / f"{task_id}.md"
     path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
     return path
-
-
-@contextlib.contextmanager
-def running_daemon(path: Path) -> Iterator[None]:
-    """Run a :class:`DaemonServer` on its own event loop in a daemon thread."""
-    loop = asyncio.new_event_loop()
-    stop_future: asyncio.Future[None] = loop.create_future()
-    server = DaemonServer(path)
-    ready = threading.Event()
-    start_error: list[BaseException] = []
-
-    async def main() -> None:
-        try:
-            await server.start()
-        except BaseException as exc:  # noqa: BLE001 - surfaced to the test thread
-            start_error.append(exc)
-            return
-        finally:
-            ready.set()
-        await stop_future
-        await server.stop()
-
-    def run() -> None:
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
-        loop.close()
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    if not ready.wait(timeout=5):
-        raise RuntimeError("daemon did not become ready")
-    if start_error:
-        thread.join(timeout=5)
-        raise start_error[0]
-    try:
-        yield
-    finally:
-        loop.call_soon_threadsafe(stop_future.set_result, None)
-        thread.join(timeout=5)
 
 
 def _roundtrip(path: Path, request: dict[str, object]) -> dict[str, object]:
@@ -242,12 +188,34 @@ def test_unknown_method_returns_404_without_id(socket_path: Path) -> None:
     assert "id" not in resp
 
 
-@pytest.mark.parametrize("method", _STUB_METHODS)
-def test_stub_methods_return_503(socket_path: Path, method: str) -> None:
+@pytest.mark.parametrize("method", _UNSERVED_METHODS)
+def test_unserved_methods_return_404_not_503(socket_path: Path, method: str) -> None:
+    """No dispatch entry answers 503: a method is wired, or it is unknown."""
     with running_daemon(socket_path):
         resp = _roundtrip(socket_path, {"id": "s", "method": method, "params": {}})
-    assert resp == {"ok": False, "error": {"code": 503, "message": "not yet available"}}
+    assert resp == {"ok": False, "error": {"code": 404, "message": "unknown method"}}
     assert "id" not in resp
+
+
+def test_no_dispatch_entry_ever_raises_503(socket_path: Path, cfg: Config) -> None:
+    """The binary gate: every registered handler answers, none stubs out.
+
+    Covers both tables — the config-less transport table and the config-ful one
+    with the warm handlers bound — by calling each registered method with empty
+    params and asserting no reply carries a ``503``.
+    """
+    for config in (None, cfg):
+        server = DaemonServer(socket_path, config=config)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(server.start())
+            for method in server._handlers:
+                line = (json.dumps({"id": "g", "method": method, "params": {}}) + "\n").encode()
+                reply = server._dispatch(line)
+                assert reply.get("ok") is True, (method, reply)
+        finally:
+            loop.run_until_complete(server.stop())
+            loop.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -305,20 +273,8 @@ def test_ping_has_no_fallback_and_propagates_when_down(missing_socket: Path) -> 
 
 
 # --------------------------------------------------------------------------- #
-# Client — note.get / note.list / task.get / task.list fallbacks              #
+# Client — note.list / task.list fallbacks                                     #
 # --------------------------------------------------------------------------- #
-
-
-def test_note_get_falls_back_to_single_file_read(
-    cfg: Config, vault: Path, missing_socket: Path
-) -> None:
-    _seed_note(vault, note_id="n-fall", title="Fallback Note", body="hello there")
-    client = DaemonClient(socket_path=missing_socket)
-    result = client.note_get(cfg, "n-fall")
-    assert result["id"] == "n-fall"
-    assert result["title"] == "Fallback Note"
-    assert result["body"] == "hello there"
-    assert str(result["path"]).endswith("n-fall.md")
 
 
 def test_note_list_falls_back_to_recursive_id_scan(
@@ -331,18 +287,7 @@ def test_note_list_falls_back_to_recursive_id_scan(
     foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
     client = DaemonClient(socket_path=missing_socket)
     results = client.note_list(cfg)
-    assert {r["id"] for r in results} == {"n-a", "n-b"}
-
-
-def test_task_get_falls_back_to_single_file_read(
-    cfg: Config, vault: Path, missing_socket: Path
-) -> None:
-    _seed_task(vault, task_id="t-fall", title="Fallback Task", body="do the thing")
-    client = DaemonClient(socket_path=missing_socket)
-    result = client.task_get(cfg, "t-fall")
-    assert result["id"] == "t-fall"
-    assert result["status"] == "open"
-    assert result["body"] == "do the thing"
+    assert {v.note.id for v in results} == {"n-a", "n-b"}
 
 
 def test_task_list_falls_back_scanning_open_and_done(
@@ -351,8 +296,20 @@ def test_task_list_falls_back_scanning_open_and_done(
     _seed_task(vault, task_id="t-open", status="open")
     _seed_task(vault, task_id="t-done", status="done")
     client = DaemonClient(socket_path=missing_socket)
-    ids = {r["id"] for r in client.task_list(cfg)}
+    ids = {v.task.id for v in client.task_list(cfg)}
     assert ids == {"t-open", "t-done"}
+
+
+def test_client_exposes_no_point_read_methods() -> None:
+    """core-hardening/5 deleted ``note_get``/``task_get``: dead, and unwarmable.
+
+    The id already determines the path, so a point read is one ``open()``; the
+    warm index holds no bodies, so a warm ``get`` would hit disk anyway. Neither
+    method had a production caller.
+    """
+    attrs = set(dir(DaemonClient))
+    assert "note_get" not in attrs
+    assert "task_get" not in attrs
 
 
 # --------------------------------------------------------------------------- #
@@ -439,37 +396,44 @@ def test_dispatch_wraps_handler_exception_in_500(socket_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("method", ["note.get", "note.list", "task.get", "task.list"])
-def test_read_methods_are_503_stubs(socket_path: Path, method: str) -> None:
-    """note/task reads are reserved-but-unwired → 503 (fallback-eligible), not 404."""
-    with running_daemon(socket_path):
-        resp = _roundtrip(socket_path, {"id": "r", "method": method, "params": {}})
-    assert resp == {"ok": False, "error": {"code": 503, "message": "not yet available"}}
-
-
-def test_note_get_falls_back_to_file_when_daemon_returns_503(
+def test_note_list_falls_back_to_disk_when_daemon_returns_404(
     cfg: Config, vault: Path, socket_path: Path
 ) -> None:
-    """A live (config-less) daemon answers note.get with 503 → client reads the file."""
-    _seed_note(vault, note_id="n-503", title="From Disk", body="disk body")
+    """A live *config-less* daemon does not know note.list → the client walks disk.
+
+    This is the version-skew / no-warm-index case: the accelerator cannot serve
+    the read, so the read still succeeds. Invariant 1 by construction.
+    """
+    _seed_note(vault, note_id="n-404", title="From Disk", body="disk body")
     with running_daemon(socket_path):
         client = DaemonClient(socket_path=socket_path)
-        result = client.note_get(cfg, "n-503")
-    assert result["id"] == "n-503"
-    assert result["title"] == "From Disk"
-    assert result["body"] == "disk body"
+        results = client.note_list(cfg)
+    assert [v.note.id for v in results] == ["n-404"]
 
 
-def test_task_get_falls_back_to_file_when_daemon_returns_503(
+def test_task_list_falls_back_to_disk_when_daemon_returns_404(
     cfg: Config, vault: Path, socket_path: Path
 ) -> None:
-    _seed_task(vault, task_id="t-503", title="Disk Task", body="disk task body")
+    _seed_task(vault, task_id="t-404", title="Disk Task", body="disk task body")
     with running_daemon(socket_path):
         client = DaemonClient(socket_path=socket_path)
-        result = client.task_get(cfg, "t-503")
-    assert result["id"] == "t-503"
-    assert result["status"] == "open"
-    assert result["body"] == "disk task body"
+        results = client.task_list(cfg)
+    assert [v.task.id for v in results] == ["t-404"]
+
+
+@pytest.mark.parametrize("code", [404, 500, 503])
+def test_wired_reads_fall_back_on_every_server_state_code(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config, vault: Path, code: int
+) -> None:
+    """404 (unknown), 500 (handler failed) and 503 all degrade to the disk path."""
+    _seed_note(vault, note_id="n-degrade", title="Degrade")
+    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+
+    def boom(method: str, params: dict[str, object]) -> object:
+        raise DaemonError(code, "server state")
+
+    monkeypatch.setattr(client, "_request", boom)
+    assert [v.note.id for v in client.note_list(cfg)] == ["n-degrade"]
 
 
 def test_call_falls_back_on_503_daemon_error(monkeypatch: pytest.MonkeyPatch) -> None:

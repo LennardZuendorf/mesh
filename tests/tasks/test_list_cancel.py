@@ -150,7 +150,10 @@ def test_list_returns_taskviews(cfg: Config, vault: Path) -> None:
     views = list_tasks(cfg)
     assert all(isinstance(v, TaskView) for v in views)
     assert views[0].task.id == "t-one"
-    assert views[0].body == "Hello."
+    # core-hardening/5: a *list* row carries no body. The daemon's warm index
+    # holds frontmatter only, so a list result that carried a body on disk would
+    # silently empty whenever the daemon came up. ``get_task`` still returns one.
+    assert views[0].body == ""
 
 
 def test_list_skips_non_task_files(cfg: Config, vault: Path) -> None:

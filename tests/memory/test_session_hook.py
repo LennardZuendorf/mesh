@@ -38,11 +38,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import frontmatter
 import pytest
 from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
 from shards.core.tasks import TaskView
+from shards.daemon.client import DaemonClient
 from shards.schemas.config import Config, load_config
 from shards.schemas.task import Task
 
@@ -134,13 +136,16 @@ def _patch_sources(
             calls["recent"] = {"since": since, "owner": owner, "mine": mine, "limit": limit}
         return list(activity)
 
-    def _fake_list_tasks(config: Config, **kwargs: Any) -> list[TaskView]:
+    def _fake_task_list(_self: Any, config: Config, **kwargs: Any) -> list[TaskView]:
         if calls is not None:
             calls["list_tasks"] = kwargs
         return list(tasks)
 
     monkeypatch.setattr("shards.cli.session.recent_activity", _fake_recent)
-    monkeypatch.setattr("shards.cli.session.list_tasks", _fake_list_tasks)
+    # The live queue is fetched through the daemon client (core-hardening/5): warm
+    # index when it is up, the identical disk walk when it is down. Faking the
+    # client verb keeps this suite about the *composition*, not either source.
+    monkeypatch.setattr(DaemonClient, "task_list", _fake_task_list)
 
 
 def _invoke(args: list[str]) -> Any:
@@ -278,11 +283,27 @@ def test_only_open_and_claimed_tasks_surface(cfg: Config, monkeypatch: pytest.Mo
 # --------------------------------------------------------------------------- #
 
 
-def test_full_output_carries_task_body(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_full_output_carries_task_body(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``--meta-only`` each live task carries its body, read off disk.
+
+    core-hardening/5: a *list* row no longer carries a body (the warm index holds
+    frontmatter only), so the composite reads the body per surviving task from the
+    row's ``path``. The task file therefore has to exist on disk — which is the
+    behaviour under test, not a fixture detail.
+    """
+    view = _task_view(task_id="t-1", status="open", body="the body text")
+    path = vault / "tasks" / "open" / "t-1.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        frontmatter.dumps(frontmatter.Post("the body text", **view.task.model_dump())),
+        encoding="utf-8",
+    )
     _patch_sources(
         monkeypatch,
         activity=[],
-        tasks=[_task_view(task_id="t-1", status="open", body="the body text")],
+        tasks=[TaskView(task=view.task, body="", path=path)],
     )
 
     arr = json.loads(_invoke(["session-start", "--json"]).stdout)

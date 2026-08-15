@@ -31,7 +31,7 @@ from shards.index import indexed_client
 from shards.index.fallback import search_fallback
 from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
-from shards.storage.files import read_post
+from shards.storage.files import read_body
 
 __all__ = ["hit_dict", "query_search", "resolve_effective_threshold", "search_health"]
 
@@ -174,12 +174,6 @@ def _iso_z(value: datetime) -> str:
     return f"{text[:-6]}Z" if text.endswith("+00:00") else text
 
 
-def _read_body(path: str) -> str:
-    """Return the Markdown body at ``path`` (empty on a read/parse failure)."""
-    post = read_post(Path(path))
-    return post.content if post is not None else ""
-
-
 def hit_dict(result: SearchResult, *, meta_only: bool, full: bool) -> dict[str, Any]:
     """Render one hit to the JSON shape, honouring ``--meta-only`` / ``--full``.
 
@@ -204,7 +198,7 @@ def hit_dict(result: SearchResult, *, meta_only: bool, full: bool) -> dict[str, 
     if meta_only:
         return hit
     if full:
-        hit["snippet"] = _read_body(result.path)
+        hit["snippet"] = read_body(Path(result.path))
     elif result.snippet is not None:
         hit["snippet"] = result.snippet
     return hit

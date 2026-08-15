@@ -19,6 +19,10 @@ warm-index-or-fallback shape, so they are grouped here as one layer that surface
   project and its work in one call" — as a :class:`ProjectResult`.
 * **session-start** — :func:`session_start_entries`: the warm-start *composite*
   that merges a recent-activity window with the caller's live task queue.
+* **vault-status** — :func:`status_report`: the vault-health composite behind
+  ``shards status`` and the daemon's ``vault.status`` handler, assembled from
+  already-fetched note/task/recency lenses so the warm and on-disk paths share
+  one shape.
 
 The session-start composition and the project lens are defined here;
 ``recent_activity``, ``build_context``, and ``graph_query`` keep their existing
@@ -30,16 +34,25 @@ source lenses independently testable and lets a surface substitute its own input
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from shards.core.activity import recent_activity
 from shards.core.context import GraphResult, SeedNotFoundError, build_context, graph_query
 from shards.core.errors import ShardsError
-from shards.core.notes import NoteError, get_note
-from shards.core.tasks import TaskView, list_tasks
+from shards.core.notes import NoteError, NoteView, get_note
+from shards.core.tasks import TaskView
+from shards.core.wikilinks import find_dangling
+from shards.daemon.client import DaemonClient
 from shards.schemas.config import Config
+from shards.storage.files import read_body
+
+# Reuse the canonical liveness + staleness rule rather than re-deriving it: a lock
+# is stale iff its PID is dead OR its age exceeds LOCK_TTL_SECONDS (300 s).
+from shards.storage.locks import _is_stale
 
 __all__ = [
     "GraphResult",
@@ -50,8 +63,13 @@ __all__ = [
     "graph_query",
     "project_view",
     "recent_activity",
+    "scan_stale_locks",
     "session_start_entries",
+    "status_report",
 ]
+
+# Zero-filled in every report so the ``tasks`` payload has a stable shape.
+TASK_STATUSES: tuple[str, ...] = ("open", "claimed", "done", "cancelled")
 
 # session-start only surfaces the caller's *live* queue — the non-terminal
 # statuses. Terminal (done/cancelled) tasks are dropped from the task section.
@@ -93,6 +111,12 @@ def session_start_entries(
     already in the task section — re-sorted newest-first (``updated`` proxied by
     ``mtime``). The result is *tasks first* (what the agent still owes) then the
     remaining activity, de-duplicated by id.
+
+    Bodies are read here, per surviving task, rather than taken off the passed
+    views: a list-shaped read is served from the daemon's warm index, which holds
+    frontmatter only, so its rows carry no body. Reading them here keeps the
+    payload identical daemon-up and daemon-down, and costs one ``open()`` per
+    *live* task instead of a body-carrying walk of the whole vault.
     """
     open_views = [view for view in task_views if view.task.status in _OPEN_STATUSES]
     task_ids = {view.task.id for view in open_views}
@@ -101,13 +125,82 @@ def session_start_entries(
         entry = view.task.model_dump(mode="json")
         entry["path"] = str(view.path)
         if not meta_only:
-            entry["body"] = view.body
+            entry["body"] = read_body(view.path)
         task_entries.append(entry)
 
     remaining = [entry for entry in activity if entry.get("id") not in task_ids]
     remaining.sort(key=_updated_key, reverse=True)
 
     return task_entries + remaining
+
+
+# --------------------------------------------------------------------------- #
+# vault-status lens — counts + freshness + dangling links + stale locks          #
+# --------------------------------------------------------------------------- #
+
+
+def scan_stale_locks(config: Config) -> list[Path]:
+    """Every stale ``O_EXCL`` lock under ``notes/.locks`` and ``tasks/.locks``.
+
+    A lock is stale iff its PID is dead **or** its age exceeds the 300 s TTL — the
+    exact rule enforced on acquire (:func:`shards.storage.locks._is_stale`), reused
+    here so ``shards status`` and the locker never disagree. Lock files are not
+    vault Markdown, so the warm index does not track them; this stays a directory
+    listing on both the warm and the on-disk path (a listing, not a parse).
+    """
+    vault = config.core.tolaria_path
+    stale: list[Path] = []
+    for kind in ("notes", "tasks"):
+        locks = vault / kind / ".locks"
+        if not locks.is_dir():
+            continue
+        for lock in sorted(locks.glob("*.lock")):
+            if _is_stale(lock):
+                stale.append(lock)
+    return stale
+
+
+def status_report(
+    config: Config,
+    *,
+    notes: list[NoteView],
+    tasks: list[TaskView],
+    newest: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble the vault-health payload from already-fetched lenses.
+
+    Like :func:`session_start_entries`, this composes sources the *caller* fetched
+    rather than fetching them itself — which is exactly what lets ``shards
+    status`` feed it disk-scanned rows and the daemon's ``vault.status`` handler
+    feed it warm-index rows, from one implementation of the shape. ``newest`` is a
+    one-row recency window (:meth:`~shards.index.warm.VaultIndex.recent` or
+    :func:`~shards.index.warm.scan_recent`) whose ``mtime`` drives freshness.
+
+    Two fields are *not* index projections and are computed on disk by whichever
+    side calls this: ``dangling_links`` needs note/task **bodies**, which the warm
+    index deliberately does not hold, and ``stale_locks`` is a lock-directory
+    listing. Both are cheap relative to the three full-vault frontmatter parses
+    the counts used to cost. Strictly read-only: nothing here writes.
+    """
+    task_counts = dict.fromkeys(TASK_STATUSES, 0)
+    for view in tasks:
+        status = view.task.status
+        task_counts[status] = task_counts.get(status, 0) + 1
+
+    mtime: float | None = None
+    age: float | None = None
+    if newest:
+        mtime = float(newest[0]["mtime"])
+        age = max(0.0, time.time() - mtime)
+
+    return {
+        "notes": len(notes),
+        "tasks": task_counts,
+        "tasks_total": len(tasks),
+        "freshness": {"mtime": mtime, "age_seconds": age},
+        "dangling_links": find_dangling(config.core.tolaria_path),
+        "stale_locks": [str(p) for p in scan_stale_locks(config)],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -156,8 +249,12 @@ def project_view(config: Config, project_id: str) -> ProjectResult:
     :func:`shards.core.tasks.list_tasks`'s ``project``-filtered result (all
     statuses, newest-first). The ``project:`` link is *soft* — the note need not
     be ``type: project`` and tasks may reference a project id freely — so the lens
-    resolves whatever note the id names. It is entirely daemon-independent (nodes
-    read straight off disk). An id that resolves to no note raises
+    resolves whatever note the id names. The project note is a *point* read
+    straight off disk (one ``open()`` the id already determines — a socket hop
+    would buy nothing); its task list is the list-shaped read, so it goes through
+    :meth:`DaemonClient.task_list <shards.daemon.client.DaemonClient.task_list>`
+    and is served from the warm index when the daemon is up, from the identical
+    disk walk when it is down. An id that resolves to no note raises
     :class:`ProjectNotFoundError` (the CLI maps it to exit 3); a project with no
     scoped tasks yields an empty ``tasks`` list, never an error.
     """
@@ -167,6 +264,6 @@ def project_view(config: Config, project_id: str) -> ProjectResult:
         raise ProjectNotFoundError(project_id) from exc
 
     project_entry = {**note_view.note.model_dump(mode="json"), "path": str(note_view.path)}
-    task_views = list_tasks(config, project=project_id, limit=None)
+    task_views = DaemonClient().task_list(config, project=project_id, limit=None)
     tasks = [{**view.task.model_dump(mode="json"), "path": str(view.path)} for view in task_views]
     return ProjectResult(project=project_entry, tasks=tasks)

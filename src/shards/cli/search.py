@@ -4,8 +4,10 @@
 callback *is* the command: ``shards search "<q>"`` and ``shards search --tags x``
 both land here. Routing (product R2/R4):
 
-* no query, ``--tags`` (or nothing) → :func:`~shards.index.tagpull.tagpull`
-  (frontmatter-only, ``score=1.0``, meta-only);
+* no query, ``--tags`` (or nothing) → the frontmatter tag pull via
+  :meth:`~shards.daemon.client.DaemonClient.tag_pull` (``score=1.0``, meta-only) —
+  served from the daemon's warm index when it is up, from the identical corpus
+  walk (:func:`~shards.index.tagpull.tagpull`) when it is down;
 * a query → hybrid recall via :func:`~shards.index.indexed_client.search` **when**
   ``[search].hybrid`` is on *and* the warm daemon is up (the search/tech.md
   degradation matrix); otherwise, or if ``indexed`` is unavailable
@@ -34,7 +36,7 @@ import typer
 
 from shards.cli._errors import cli_errors
 from shards.core.search import hit_dict, query_search, resolve_effective_threshold, search_health
-from shards.index.tagpull import tagpull
+from shards.daemon.client import DaemonClient
 from shards.schemas.config import load_config
 
 search_app = typer.Typer(
@@ -90,7 +92,10 @@ def search_command(
     with cli_errors():
         if query is None:
             # No query → frontmatter tag pull (meta-only by nature; score 1.0).
-            results = tagpull(
+            # Served from the daemon's warm index when it is up — a tag pull is a
+            # pure metadata filter, so the warm answer is exact — and from the
+            # identical corpus walk when it is down.
+            results = DaemonClient().tag_pull(
                 config,
                 tags=tag_list,
                 type_filter=type_filter,

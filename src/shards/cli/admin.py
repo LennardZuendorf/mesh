@@ -16,11 +16,14 @@ a no-op notice, so both work with the daemon down.
 * **``shards status``** — note count, tasks-by-status, freshness (newest vault
   mtime + age), dangling wikilinks (via :func:`shards.core.wikilinks.find_dangling`),
   and stale ``O_EXCL`` locks (PID dead **or** age > 300 s, reusing the canonical
-  rule from :mod:`shards.storage.locks`). Strictly read-only — it never bumps
-  ``updated`` nor rewrites a file.
-* **``shards reindex``** — delegates to the search feature's ``indexed`` client.
-  That module is unbuilt, so this degrades gracefully: one stderr notice, exit 0,
-  suppressed under ``--quiet``. Wiring in the real delegate later is a one-liner.
+  rule from :mod:`shards.storage.locks`). Served from the daemon's warm index when
+  it is up and from a direct scan when it is down — same payload either way, via
+  :meth:`shards.daemon.client.DaemonClient.vault_status`. Strictly read-only — it
+  never bumps ``updated`` nor rewrites a file.
+* **``shards reindex``** — delegates to the search feature's ``indexed`` client
+  (:func:`shards.index.indexed_client.reindex`). A missing binary or a non-zero
+  exit degrades gracefully: one stderr notice, exit 0, suppressed under
+  ``--quiet``.
 
 Output follows the design language: ``--json`` for machines, terse text for
 humans, infrastructure notices on stderr (hidden by ``--quiet``).
@@ -34,27 +37,21 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 import typer
 
 from shards.cli._errors import cli_errors
-from shards.core.notes import list_notes
-from shards.core.tasks import list_tasks
-from shards.core.wikilinks import find_dangling
-from shards.daemon.client import default_socket_path
-from shards.index.warm import scan_recent
-from shards.schemas.config import Config, load_config
+from shards.core.lenses import TASK_STATUSES
+from shards.daemon.client import DaemonClient, default_socket_path
+from shards.schemas.config import load_config
 from shards.storage.files import atomic_write
 
-# Reuse the canonical liveness + staleness rule rather than re-deriving it: a lock
-# is stale iff its PID is dead OR its age exceeds LOCK_TTL_SECONDS (300 s).
-from shards.storage.locks import _is_stale, _pid_alive
+# Reuse the canonical liveness rule rather than re-deriving it.
+from shards.storage.locks import _pid_alive
 
 _PID_NAME = "shards.pid"
-_TASK_STATUSES: tuple[str, ...] = ("open", "claimed", "done", "cancelled")
 
 
 # --------------------------------------------------------------------------- #
@@ -125,62 +122,6 @@ def terminate_process(pid: int) -> None:
 def _remove(path: Path) -> None:
     with contextlib.suppress(FileNotFoundError, IsADirectoryError):
         path.unlink()
-
-
-# --------------------------------------------------------------------------- #
-# Vault health (direct scan — daemon-independent)                             #
-# --------------------------------------------------------------------------- #
-
-
-def scan_stale_locks(config: Config) -> list[Path]:
-    """Every stale ``O_EXCL`` lock under ``notes/.locks`` and ``tasks/.locks``.
-
-    A lock is stale iff its PID is dead **or** its age exceeds the 300 s TTL — the
-    exact rule enforced on acquire (:func:`shards.storage.locks._is_stale`), reused
-    here so ``shards status`` and the locker never disagree.
-    """
-    vault = config.core.tolaria_path
-    stale: list[Path] = []
-    for kind in ("notes", "tasks"):
-        locks = vault / kind / ".locks"
-        if not locks.is_dir():
-            continue
-        for lock in sorted(locks.glob("*.lock")):
-            if _is_stale(lock):
-                stale.append(lock)
-    return stale
-
-
-def vault_status(config: Config) -> dict[str, Any]:
-    """Compute vault health by direct scan (no daemon required).
-
-    Returns note count, tasks-by-status (zero-filled for a stable shape),
-    freshness (newest shards-file mtime + its age in seconds), dangling wikilink
-    targets, and stale lock paths. Strictly read-only: nothing here writes.
-    """
-    notes = list_notes(config, limit=None)
-    tasks = list_tasks(config, limit=None)
-
-    task_counts = dict.fromkeys(_TASK_STATUSES, 0)
-    for view in tasks:
-        status = view.task.status
-        task_counts[status] = task_counts.get(status, 0) + 1
-
-    recent = scan_recent(config, 1)
-    mtime: float | None = None
-    age: float | None = None
-    if recent:
-        mtime = float(recent[0]["mtime"])
-        age = max(0.0, time.time() - mtime)
-
-    return {
-        "notes": len(notes),
-        "tasks": task_counts,
-        "tasks_total": len(tasks),
-        "freshness": {"mtime": mtime, "age_seconds": age},
-        "dangling_links": find_dangling(config.core.tolaria_path),
-        "stale_locks": [str(p) for p in scan_stale_locks(config)],
-    }
 
 
 # --------------------------------------------------------------------------- #
@@ -283,12 +224,15 @@ def daemon_status_command(ctx: typer.Context) -> None:
 def status_command(ctx: typer.Context) -> None:
     """Report vault health (counts, freshness, dangling links, stale locks).
 
-    Computed by direct scan, so it works with the daemon down; the daemon's
-    liveness is reported from its PID file (no socket dependency).
+    Counts and freshness come from the daemon's warm index when it is up and from
+    a direct scan when it is down — identical payload either way, so this works
+    with the daemon down. The daemon's *liveness* line is still read from its PID
+    file (no socket dependency), so a daemon that is running but unresponsive is
+    reported as running.
     """
     config = load_config()
     with cli_errors():
-        report = vault_status(config)
+        report = DaemonClient().vault_status(config)
         running = daemon_running(default_pid_path())
         report["daemon"] = {"running": running is not None, "pid": running}
 
@@ -302,7 +246,7 @@ def status_command(ctx: typer.Context) -> None:
 def _status_lines(report: dict[str, Any]) -> list[str]:
     """Render the human-readable ``shards status`` block."""
     tasks = report["tasks"]
-    task_line = " ".join(f"{status}={tasks[status]}" for status in _TASK_STATUSES)
+    task_line = " ".join(f"{status}={tasks[status]}" for status in TASK_STATUSES)
     fresh = report["freshness"]["age_seconds"]
     freshness = f"{fresh:.1f}s ago" if fresh is not None else "(no vault files)"
     dangling = report["dangling_links"]

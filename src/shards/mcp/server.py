@@ -2,21 +2,25 @@
 
 This is the MCP mirror of the *safe* CLI verbs. It is deliberately thin: every
 tool loads the config, routes straight through the existing ``core`` domain logic
-(and ``daemon/client.py`` for the recent-activity lens and search), and returns a
-JSON-serialisable dict. There is **no** parallel re-implementation of note, task,
-or search behaviour — the tools call the same functions the CLI does.
+(and ``daemon/client.py`` for the list-shaped reads, the recent-activity lens and
+search), and returns a JSON-serialisable dict. There is **no** parallel
+re-implementation of note, task, or search behaviour — the tools call the same
+functions the CLI does, including the same warm-index-or-fallback client verbs, so
+the two surfaces cannot drift.
 
 Unlike the CLI, MCP parameters are *typed fields*, not flag strings: ``shards_note_get``
 takes ``id: str``, not ``--id <id>``. Each tool carries an MCP annotation
 declaring its effect, so an agent runtime can reason about safety before calling:
 
-* **read-only** (``readOnlyHint``) — ``note_get`` / ``note_list`` / ``task_get`` /
-  ``task_list`` / ``search`` / ``recent_activity`` / ``build_context`` / ``graph`` /
-  ``project``;
-* **idempotent** (``idempotentHint``) — ``note_update`` / ``task_claim`` /
-  ``task_finish`` / ``task_update`` (re-running lands the same state);
-* **write** (no special hint) — ``note_new`` / ``note_append`` / ``task_new``;
-* **destructive** (``destructiveHint``) — ``task_cancel`` (a one-way lifecycle move).
+* **read-only** (``readOnlyHint``) — ``shards_note_get`` / ``shards_note_list`` /
+  ``shards_task_get`` / ``shards_task_list`` / ``shards_search`` /
+  ``shards_recent_activity`` / ``shards_build_context`` / ``shards_graph`` /
+  ``shards_project``;
+* **idempotent** (``idempotentHint``) — ``shards_note_update`` / ``shards_task_claim`` /
+  ``shards_task_finish`` / ``shards_task_update`` (re-running lands the same state);
+* **write** (no special hint) — ``shards_note_new`` / ``shards_note_append`` /
+  ``shards_task_new``;
+* **destructive** (``destructiveHint``) — ``shards_task_cancel`` (a one-way lifecycle move).
 
 The unsafe / administrative surface is **withheld**: neither delete verb, no daemon
 controls, no ``reindex`` or ``status``, and not the Phase-3 ``task_release``. Those
@@ -43,7 +47,6 @@ from shards.core.notes import (
     append_note,
     create_note,
     get_note,
-    list_notes,
     update_note,
 )
 from shards.core.search import hit_dict, query_search, resolve_effective_threshold
@@ -54,10 +57,9 @@ from shards.core.tasks import (
     create_task,
     finish_task,
     get_task,
-    list_tasks,
     update_task,
 )
-from shards.index.tagpull import tagpull
+from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.schemas.config import load_config
 from shards.schemas.note import Note
@@ -109,7 +111,7 @@ def shards_note_list(
 ) -> list[dict[str, Any]]:
     """List shards notes with tag/owner/type/recency filters, sorted and capped."""
     config = load_config()
-    views = list_notes(
+    views = DaemonClient().note_list(
         config,
         tags=tags,
         any_tag=any_tag,
@@ -141,7 +143,7 @@ def shards_task_list(
 ) -> list[dict[str, Any]]:
     """List shards tasks (open and done) with status/owner/mine/project filters, sorted."""
     config = load_config()
-    views = list_tasks(
+    views = DaemonClient().task_list(
         config,
         status=status,
         owner=owner,
@@ -170,7 +172,7 @@ def shards_search(
     """Recall across notes + tasks: tag pull (no query) or scored match (query)."""
     config = load_config()
     if query is None:
-        results = tagpull(
+        results = DaemonClient().tag_pull(
             config,
             tags=tags,
             type_filter=type_filter,

@@ -50,7 +50,6 @@ from shards.core.lenses import (
     recent_activity,
     session_start_entries,
 )
-from shards.core.tasks import list_tasks
 from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.schemas.config import load_config
@@ -146,7 +145,8 @@ def session_start_command(
 
     with cli_errors():
         # Source A — my live queue: every open/claimed task I own or have claimed.
-        task_views = list_tasks(config, mine=True, limit=None)
+        # Warm-index served when the daemon is up, disk-walked when it is down.
+        task_views = DaemonClient().task_list(config, mine=True, limit=None)
         # Source B — my recent changes (dedup happens in the compose step below).
         activity = recent_activity(
             config, since=_SESSION_SINCE, owner=None, mine=True, limit=DEFAULT_RECENT_LIMIT

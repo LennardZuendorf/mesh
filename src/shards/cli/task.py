@@ -30,9 +30,9 @@ from shards.core.tasks import (
     delete_task,
     finish_task,
     get_task,
-    list_tasks,
     update_task,
 )
+from shards.daemon.client import DaemonClient
 from shards.schemas.config import load_config
 from shards.schemas.task import Task
 
@@ -256,7 +256,9 @@ def list_command(
     # Honour --mine whether it lands on this command or as a global flag.
     mine_flag = mine or getattr(ctx.obj, "mine", False)
     with cli_errors():
-        views = list_tasks(
+        # Served from the daemon's warm index when it is up, from the identical
+        # on-disk walk when it is down — one predicate, either way.
+        views = DaemonClient().task_list(
             config,
             status=status,
             owner=owner,

@@ -38,15 +38,28 @@ from shards.cli.admin import (
     daemon_running,
     default_pid_path,
     read_pid,
-    scan_stale_locks,
-    vault_status,
     write_pid,
 )
+from shards.core.lenses import scan_stale_locks
+from shards.daemon.client import DaemonClient
 from shards.schemas.config import Config, load_config
 from shards.storage.files import note_folder, task_folder
 from shards.storage.locks import LOCK_TTL_SECONDS
 
 _STALE_AGE = LOCK_TTL_SECONDS + 100.0  # comfortably past the 300 s TTL
+
+
+def vault_status(config: Config) -> dict[str, object]:
+    """The daemon-down ``vault.status`` payload: the client's own file-op fallback.
+
+    core-hardening/5 moved the report assembly into
+    :func:`shards.core.lenses.status_report` and wired ``shards status`` through
+    :meth:`DaemonClient.vault_status`. Pointing this helper at a socket that
+    cannot exist keeps every assertion below on the *fallback* path — the one the
+    original direct-scan tests pinned — while exercising the shipped code path
+    rather than a retired helper.
+    """
+    return DaemonClient(socket_path=Path("/nonexistent/shards-status.sock")).vault_status(config)
 
 
 # --------------------------------------------------------------------------- #
