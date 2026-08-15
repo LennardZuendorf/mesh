@@ -361,14 +361,18 @@ def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
     """The one MCP-boundary exception mapper (core-hardening/3), applied at
     registration — the tool error mirror of the CLI's ``cli_errors()``.
 
-    Same exception families (``ShardsError`` — ``LockError`` included — and any
-    other ``OSError``), same one-line message, but MCP has no process exit code
-    to map to, so this raises a clean ``fastmcp.exceptions.ToolError`` instead of
-    letting FastMCP's own generic catch-all re-wrap an arbitrary traceback string.
-    The full structured-error payload (codes, fields) is agent-usability/5's
-    contract; this stays a plain message. The module-level ``shards_*`` functions
-    are left unwrapped so they stay directly importable/unit-testable (see the
-    module docstring) — only the registered tool goes through this wrapper.
+    Same exception families, same catch order, same one-line messages as the CLI
+    mapper (``shards.cli._errors.cli_errors``): ``ShardsError`` (``LockError``
+    included) first, then a bare ``ValueError`` (also covers msgspec's
+    ``ValidationError``, a ``ValueError`` subclass — e.g. an unknown owner or an
+    invalid ``note_type``/sort field), then any other ``OSError``. MCP has no
+    process exit code to map to, so each branch raises a clean
+    ``fastmcp.exceptions.ToolError`` instead of letting FastMCP's own generic
+    catch-all re-wrap an arbitrary traceback string. The full structured-error
+    payload (codes, fields) is agent-usability/5's contract; this stays a plain
+    message. The module-level ``shards_*`` functions are left unwrapped so they
+    stay directly importable/unit-testable (see the module docstring) — only the
+    registered tool goes through this wrapper.
     """
 
     @wraps(fn)
@@ -376,6 +380,8 @@ def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
         try:
             return fn(*args, **kwargs)
         except ShardsError as exc:
+            raise ToolError(str(exc)) from exc
+        except ValueError as exc:
             raise ToolError(str(exc)) from exc
         except OSError as exc:
             raise ToolError(f"io error: {exc}") from exc

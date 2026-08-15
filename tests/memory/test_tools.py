@@ -293,3 +293,41 @@ def test_write_oserror_surfaces_as_clean_tool_error(
 
     assert "io error:" in str(exc_info.value)
     assert "Traceback" not in str(exc_info.value)
+
+
+def test_invalid_owner_surfaces_as_clean_tool_error(cfg: Config) -> None:
+    """A bare ``ValueError`` (unknown owner, outside ``[tasks].collections``) also
+    becomes a clean ``ToolError`` — not FastMCP's generic catch-all fallback.
+
+    Drives the real (unmocked) ``create_note`` -> ``_validate_owner`` path, the
+    exact asymmetry the review flagged: ``_guarded`` used to catch only
+    ``ShardsError``/``OSError``, so this bare ``ValueError`` fell through to
+    FastMCP's own wrapping instead of the boundary mapper.
+    """
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(
+            server.app.call_tool(
+                "shards_note_new", {"title": "x", "owner": "ghost-agent", "body": "y"}
+            )
+        )
+
+    assert "unknown owner" in str(exc_info.value)
+    assert "Traceback" not in str(exc_info.value)
+
+
+def test_invalid_note_type_surfaces_as_clean_tool_error(cfg: Config) -> None:
+    """A bare ``ValueError`` (invalid ``note_type``) also becomes a clean
+    ``ToolError`` — the same real, unmocked path via ``create_note``."""
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(
+            server.app.call_tool(
+                "shards_note_new", {"title": "x", "note_type": "bogus", "body": "y"}
+            )
+        )
+
+    assert "invalid note type" in str(exc_info.value)
+    assert "Traceback" not in str(exc_info.value)
