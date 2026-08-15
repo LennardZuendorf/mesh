@@ -3,8 +3,9 @@
 These are *admin* commands (spec R4), not new verbs — the three-verb rule
 (``note`` / ``task`` / ``search``) is untouched. Everything here honours the
 daemon's founding rule: it is an **accelerator, never a gate**. ``shards status``
-computes vault health from a *direct filesystem scan* and ``reindex`` degrades to
-a no-op notice, so both work with the daemon down.
+reads vault health from the warm index when the daemon is up and falls back to
+the identical direct filesystem scan when it is down, and ``reindex`` degrades to
+a notice, so both work with the daemon down.
 
 * **``daemon start|stop|status``** — supervise a detached socket server. Its PID
   lives in a state file beside the socket (``$XDG_RUNTIME_DIR/shards.pid``, else

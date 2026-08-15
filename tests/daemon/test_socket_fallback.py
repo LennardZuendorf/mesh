@@ -392,7 +392,7 @@ def test_dispatch_wraps_handler_exception_in_500(socket_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# FIX 4 — reserved read verbs are 503 stubs; the client falls back on 503      #
+# FIX 4 — a daemon that cannot serve a wired read degrades, never errors      #
 # --------------------------------------------------------------------------- #
 
 
