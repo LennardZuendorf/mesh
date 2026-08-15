@@ -13,7 +13,10 @@ warm-index-or-fallback shape, so they are grouped here as one layer that surface
 * **graph-query** — :func:`graph_query` (re-exported from
   :mod:`shards.core.context`): the same BFS promoted to a first-class "what's
   connected to X" query, returning a :class:`GraphResult` that renders as both
-  machine JSON and a readable tree from one traversal.
+  machine JSON and a readable tree from one traversal. ``direction`` (out /
+  in / both — team-awareness/1) selects forward ``related``, inverted
+  (:func:`~shards.core.context.inbound_ids`, the backlink/notify view), or
+  their union.
 * **project** — :func:`project_view`: given a ``type: project`` note id, returns
   that note plus every task whose ``project`` soft link points at it — "my
   project and its work in one call" — as a :class:`ProjectResult`.

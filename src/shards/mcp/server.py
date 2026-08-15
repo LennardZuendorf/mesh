@@ -216,10 +216,14 @@ def shards_build_context(seed_id: str, depth: int = 1) -> list[dict[str, Any]]:
     return build_context(config, seed_id, depth=depth)
 
 
-def shards_graph(seed_id: str, depth: int = 1) -> dict[str, Any]:
-    """Query what's connected to a seed id: ``{seed, nodes, edges}`` (BFS to depth)."""
+def shards_graph(seed_id: str, depth: int = 1, direction: str = "out") -> dict[str, Any]:
+    """Query what's connected to a seed id: ``{seed, nodes, edges}`` (BFS to depth).
+
+    ``direction`` is ``"out"`` (default, forward ``related``), ``"in"`` (who
+    mentions this node — backlinks/notify), or ``"both"``.
+    """
     config = load_config()
-    return graph_query(config, seed_id, depth=depth).to_dict()
+    return graph_query(config, seed_id, depth=depth, direction=direction).to_dict()
 
 
 def shards_project(project_id: str) -> dict[str, Any]:

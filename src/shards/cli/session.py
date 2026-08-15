@@ -33,7 +33,10 @@ agent session.
 "what's connected to X" query. ``--json`` emits ``{seed, nodes, edges}``; the
 default text is a readable indented tree; ``--quiet`` is ids only. Like
 ``build-context`` it never touches the daemon or hybrid search, so it has no
-degradation notice.
+degradation notice. ``--direction out|in|both`` (team-awareness/1) selects
+which way the BFS walks ``related``: ``in`` inverts it at read time to surface
+backlinks (mentions) — the primitive that makes ``@agent — [[t-184G]]`` in
+someone else's note deliverable from ``t-184G`` itself.
 """
 
 from __future__ import annotations
@@ -205,10 +208,22 @@ def graph_command(
     ctx: typer.Context,
     seed_id: str = typer.Argument(..., help="Seed note/task id (n-… or t-…) to expand from."),
     depth: int = typer.Option(1, "--depth", help="Hops to walk (0 = seed only; 1 = direct)."),
+    direction: str = typer.Option(
+        "out",
+        "--direction",
+        help="Edge direction to walk: out (related, default), in (backlinks), both.",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable {seed, nodes, edges}."),
     quiet: bool = typer.Option(False, "--quiet", help="IDs only, one per line."),
 ) -> None:
-    """Query what's connected to a seed id: readable tree, or JSON nodes+edges."""
+    """Query what's connected to a seed id: readable tree, or JSON nodes+edges.
+
+    ``--direction in`` inverts ``related`` at read time — every node whose own
+    ``related`` names the seed, i.e. every mention of it — so a reply that links
+    ``[[t-184G]]`` becomes visible *from* ``t-184G`` even though nothing was
+    ever written to ``t-184G`` itself (team-awareness/1). ``--direction both``
+    is the union, each node and edge reported once.
+    """
     config = load_config()
 
     # Coalesce the leaf flags with the root callback's global flags so a flag given
@@ -217,7 +232,7 @@ def graph_command(
     json_out, quiet = _coalesce(ctx, json_out, quiet)
 
     with cli_errors():
-        result = graph_query(config, seed_id, depth=depth)
+        result = graph_query(config, seed_id, depth=depth, direction=direction)
 
     # Both branches below render the one already-computed `result` — no second
     # traversal for JSON vs. tree output.
