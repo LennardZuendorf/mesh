@@ -344,13 +344,45 @@ def append_note(
     return note
 
 
-def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
-    """Apply a ``--tags`` spec to ``existing``.
+# agent-usability/3 — the one semantics sentence, verbatim in three surfaces:
+# the MCP `tags` parameter description (note_update/task_update, mcp/server.py),
+# the instructions block's tag-mutation section (mcp/instructions.py), and the
+# CLI `--tags` help on `note update` / `task update` (cli/note.py, cli/task.py).
+# A test asserts byte-identical text in all of them so they cannot drift —
+# change it here, once, and it propagates everywhere it is imported.
+TAG_SPEC_SEMANTICS = (
+    "Bare 'x,y' adds tags (additive, idempotent); '+x,-y' adds/removes; "
+    "'=x,y' replaces the whole list."
+)
 
-    ``+x,-y`` (every token prefixed) is a delta: add ``x``, remove ``y``. Any
-    unprefixed token makes the whole spec a replacement of the tag list. Both
-    forms dedupe while preserving order.
+
+def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
+    """Apply a ``--tags`` spec to ``existing`` — see :data:`TAG_SPEC_SEMANTICS`.
+
+    Three forms, checked in this order:
+
+    1. A leading ``=`` replaces the whole list: ``=x,y`` sets the tags to
+       exactly ``[x, y]``; a bare ``=`` clears them. This is the **only** path
+       that replaces — the explicit opt-in agent-usability/3 requires.
+    2. ``+x,-y`` (every token prefixed ``+``/``-``) is a delta: add ``x``,
+       remove ``y``. Adding a tag already present, or removing one that is
+       absent, is a no-op.
+    3. Anything else — a bare comma list with no prefixes — is **additive**:
+       each named tag is appended if missing, existing tags are left alone.
+       (Before agent-usability/3 this form replaced the whole list; that was
+       the silent-wipe bug this contract exists to kill.)
+
+    All three forms dedupe while preserving order.
     """
+    stripped = spec.strip()
+    if stripped.startswith("="):
+        tokens = [t.strip() for t in stripped[1:].split(",") if t.strip()]
+        result: list[str] = []
+        for token in tokens:
+            if token not in result:
+                result.append(token)
+        return result
+
     tokens = [t.strip() for t in spec.split(",") if t.strip()]
     is_delta = bool(tokens) and all(t[0] in "+-" for t in tokens)
     if is_delta:
@@ -365,7 +397,9 @@ def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
                 result.remove(name)
         return result
 
-    result = []
+    # Bare comma list: additive. Keep every existing tag, append newly named
+    # ones that aren't already there (idempotent — no duplicates).
+    result = list(existing)
     for token in tokens:
         if token not in result:
             result.append(token)
@@ -381,7 +415,8 @@ def update_note(
 ) -> Note:
     """Update a note's fields and bump ``updated``.
 
-    ``tags`` mutates the tag list (delta or replace, see :func:`apply_tag_spec`).
+    ``tags`` mutates the tag list (additive, delta, or explicit replace — see
+    :func:`apply_tag_spec` / :data:`TAG_SPEC_SEMANTICS`).
     ``new_type`` rewrites the ``type`` field and moves the file into the matching
     folder via ``os.replace`` (atomic rename); the old path stops existing. Runs
     under the entity lock; writes are atomic. The re-read inside the lock goes

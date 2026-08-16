@@ -23,6 +23,7 @@ from msgspec import ValidationError
 from shards.cli import _output
 from shards.cli._errors import cli_errors
 from shards.core.notes import (
+    TAG_SPEC_SEMANTICS,
     NoteNotFoundError,
     NoteView,
     append_note,
@@ -137,9 +138,7 @@ def append_command(
 def update_command(
     ctx: typer.Context,
     target: str = typer.Argument(..., help="Note id or slug."),
-    tags: str | None = typer.Option(
-        None, "--tags", help="Delta (+x,-y) or replacement (x,y) tag list."
-    ),
+    tags: str | None = typer.Option(None, "--tags", help=TAG_SPEC_SEMANTICS),
     new_type: str | None = typer.Option(
         None, "--type", help="Move the note to this type's folder."
     ),

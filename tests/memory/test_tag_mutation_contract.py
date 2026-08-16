@@ -1,0 +1,181 @@
+"""agent-usability/3 — Tag mutation contract.
+
+Acceptance coverage (brief: ``.superpowers/sdd/shards-3track/agent-usability-3-brief.md``):
+
+* **The silent-wipe regression, locked** — a note tagged ``["infra", "urgent", "q3"]``
+  updated with ``tags="urgent"`` retains all three, driven end to end through the
+  *registered* MCP tool (``server.app.call_tool``), not just the bare core function
+  (``tests/notes/test_append_update.py`` / ``tests/tasks/test_new_update.py`` cover the
+  core layer directly).
+* **Delta still works** — ``+x,-y`` still adds and removes; removing an absent tag is a
+  no-op.
+* **Explicit replace, and only that path replaces** — ``=x,y`` replaces the whole list;
+  neither the additive bare-list form nor the delta form ever does.
+* **One sentence, three surfaces, asserted identical** — the same
+  :data:`shards.core.notes.TAG_SPEC_SEMANTICS` sentence appears verbatim in the MCP
+  ``tags`` parameter description (``note_update``/``task_update``), the server-level
+  ``instructions`` block, and the CLI ``--tags`` help (``note update``/``task update``) —
+  so the four call sites cannot drift from each other.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+import pytest
+import typer
+
+import shards.mcp.server as server
+from shards.core.notes import TAG_SPEC_SEMANTICS
+from shards.core.tasks import create_task as core_create_task
+from shards.mcp.instructions import build_instructions
+from shards.schemas.config import Config, load_config
+
+# --------------------------------------------------------------------------- #
+# Fixtures                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def cfg(shards_config: Path) -> Config:
+    return load_config()
+
+
+def _registered() -> dict[str, Any]:
+    tools = asyncio.run(server.app.list_tools())
+    return {tool.name: tool for tool in tools}
+
+
+def _cli_tags_help(sub_app: typer.Typer, command: str) -> str:
+    """The exact ``--tags`` help string typer stores for ``<sub_app> <command>``,
+    read off the click ``Parameter`` directly — bypasses Rich's line-wrapped
+    ``--help`` rendering, which would otherwise fracture the sentence across
+    box-drawing lines and defeat a substring check."""
+    click_command = typer.main.get_command(sub_app).commands[command]
+    for param in click_command.params:
+        if param.name == "tags":
+            assert param.help is not None
+            return param.help
+    raise AssertionError(f"no --tags option on {sub_app} {command}")
+
+
+# --------------------------------------------------------------------------- #
+# One sentence, three surfaces — cannot drift                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_semantics_sentence_identical_in_mcp_schema_note_update() -> None:
+    props = _registered()["shards_note_update"].parameters["properties"]
+    assert props["tags"]["description"] == TAG_SPEC_SEMANTICS
+
+
+def test_semantics_sentence_identical_in_mcp_schema_task_update() -> None:
+    props = _registered()["shards_task_update"].parameters["properties"]
+    assert props["tags"]["description"] == TAG_SPEC_SEMANTICS
+
+
+def test_semantics_sentence_identical_in_instructions_block(cfg: Config) -> None:
+    block = build_instructions(cfg)
+    assert TAG_SPEC_SEMANTICS in block
+
+
+def test_semantics_sentence_identical_in_cli_note_update_help() -> None:
+    from shards.cli.note import note_app
+
+    assert _cli_tags_help(note_app, "update") == TAG_SPEC_SEMANTICS
+
+
+def test_semantics_sentence_identical_in_cli_task_update_help() -> None:
+    from shards.cli.task import task_app
+
+    assert _cli_tags_help(task_app, "update") == TAG_SPEC_SEMANTICS
+
+
+# --------------------------------------------------------------------------- #
+# The silent-wipe regression, locked (MCP layer)                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_mcp_note_update_bare_tags_is_additive_not_replace(cfg: Config, vault: Path) -> None:
+    dispatched = asyncio.run(
+        server.app.call_tool(
+            "shards_note_new",
+            {"title": "Silent Wipe Regression", "tags": ["infra", "urgent", "q3"]},
+        )
+    )
+    note_id = dispatched.structured_content["id"]
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "urgent"})
+    )
+
+    assert dispatched.structured_content["tags"] == ["infra", "urgent", "q3"]
+
+
+def test_mcp_task_update_bare_tags_is_additive_not_replace(cfg: Config, vault: Path) -> None:
+    oracle = core_create_task(cfg, "Silent Wipe Regression")
+    # Seed the tag list through the core layer (create_task takes tags too) so
+    # this test exercises only the update path's semantics.
+    dispatched = asyncio.run(
+        server.app.call_tool(
+            "shards_task_new", {"title": "Silent Wipe Twin", "tags": ["infra", "urgent", "q3"]}
+        )
+    )
+    task_id = dispatched.structured_content["id"]
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_task_update", {"task_id": task_id, "tags": "urgent"})
+    )
+
+    assert dispatched.structured_content["tags"] == ["infra", "urgent", "q3"]
+    assert oracle.id != task_id  # oracle only exists to keep the vault non-empty
+
+
+# --------------------------------------------------------------------------- #
+# Delta and explicit replace, over the same MCP surface                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_mcp_note_update_delta_adds_and_removes(cfg: Config, vault: Path) -> None:
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_new", {"title": "Delta Note", "tags": ["ndc", "stale"]})
+    )
+    note_id = dispatched.structured_content["id"]
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "+flights,-stale"})
+    )
+    assert dispatched.structured_content["tags"] == ["ndc", "flights"]
+
+
+def test_mcp_note_update_delta_remove_absent_is_noop(cfg: Config, vault: Path) -> None:
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_new", {"title": "Delta Noop Note", "tags": ["ndc"]})
+    )
+    note_id = dispatched.structured_content["id"]
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "-nope"})
+    )
+    assert dispatched.structured_content["tags"] == ["ndc"]
+
+
+def test_mcp_note_update_explicit_replace_only_path_that_replaces(cfg: Config, vault: Path) -> None:
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_new", {"title": "Replace Note", "tags": ["ndc", "stale"]})
+    )
+    note_id = dispatched.structured_content["id"]
+
+    # Bare list: additive, does not replace.
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "x"})
+    )
+    assert dispatched.structured_content["tags"] == ["ndc", "stale", "x"]
+
+    # Explicit "=" prefix: the only path that replaces.
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "=y,z"})
+    )
+    assert dispatched.structured_content["tags"] == ["y", "z"]

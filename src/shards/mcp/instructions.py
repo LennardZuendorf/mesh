@@ -28,6 +28,7 @@ skill. ``tests/memory/test_instructions.py`` asserts the byte ceiling directly.
 
 from __future__ import annotations
 
+from shards.core.notes import TAG_SPEC_SEMANTICS
 from shards.schemas.config import Config
 
 BUDGET_BYTES = 2048
@@ -41,11 +42,9 @@ _WHAT_SHARDS_IS = (
 )
 
 _TAG_TRAP = (
-    "## Tag mutation trap\n"
-    "`tags` is a list on note_new/task_new (additive). On note_update/"
-    'task_update it is instead a comma string: "+x,-y" adds/removes, but a '
-    'bare "x,y" REPLACES the whole list — tags="urgent" wipes every other tag. '
-    "Prefer the delta form."
+    "## Tag mutation\n"
+    "`tags` is a list on note_new/task_new. On note_update/task_update it is a "
+    "comma string: " + TAG_SPEC_SEMANTICS
 )
 
 _COORDINATION = (

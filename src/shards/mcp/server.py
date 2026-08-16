@@ -69,6 +69,7 @@ from shards.core.lenses import (
     session_start_entries,
 )
 from shards.core.notes import (
+    TAG_SPEC_SEMANTICS,
     NoteView,
     append_note,
     create_note,
@@ -822,15 +823,7 @@ def shards_task_append(
 
 def shards_note_update(
     target: Annotated[str, Field(description="Note id (n-...) or title slug.")],
-    tags: Annotated[
-        str | None,
-        Field(
-            description=(
-                "'+x,-y' adds/removes tags (delta). A bare 'x,y' with no +/- prefixes "
-                "REPLACES the whole tag list."
-            )
-        ),
-    ] = None,
+    tags: Annotated[str | None, Field(description=TAG_SPEC_SEMANTICS)] = None,
     new_type: Annotated[
         NoteType | None,
         Field(
@@ -928,15 +921,7 @@ def shards_task_update(
         Literal["high", "normal", "low"] | None,
         Field(description="Sort weight; unset ranks last under sort='priority'."),
     ] = None,
-    tags: Annotated[
-        str | None,
-        Field(
-            description=(
-                "'+x,-y' adds/removes tags (delta). A bare 'x,y' with no +/- prefixes "
-                "REPLACES the whole tag list."
-            )
-        ),
-    ] = None,
+    tags: Annotated[str | None, Field(description=TAG_SPEC_SEMANTICS)] = None,
     title: Annotated[
         str | None,
         Field(description="New title. Only renames the task; the id never changes."),

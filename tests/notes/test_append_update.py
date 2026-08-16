@@ -90,12 +90,44 @@ def test_apply_tag_spec_delta_is_idempotent() -> None:
     assert apply_tag_spec(["a"], "+a,-z") == ["a"]
 
 
-def test_apply_tag_spec_replace_replaces_whole_list() -> None:
-    assert apply_tag_spec(["a", "b"], "x,y") == ["x", "y"]
+def test_apply_tag_spec_delta_remove_absent_is_noop() -> None:
+    assert apply_tag_spec(["a"], "-nope") == ["a"]
 
 
-def test_apply_tag_spec_replace_dedupes_preserving_order() -> None:
-    assert apply_tag_spec(["a"], "x,x,y") == ["x", "y"]
+def test_apply_tag_spec_bare_list_is_additive_not_replace() -> None:
+    """agent-usability/3 — the silent-wipe regression, locked. A bare comma list
+    keeps every existing tag and adds the named ones; it must never replace."""
+    assert apply_tag_spec(["infra", "urgent", "q3"], "urgent") == [
+        "infra",
+        "urgent",
+        "q3",
+    ]
+
+
+def test_apply_tag_spec_bare_list_add_is_idempotent_no_dupes() -> None:
+    assert apply_tag_spec(["a", "b"], "a,c,c") == ["a", "b", "c"]
+
+
+def test_apply_tag_spec_explicit_replace_replaces_whole_list() -> None:
+    """Only the leading ``=`` opt-in replaces — a bare list never does."""
+    assert apply_tag_spec(["a", "b"], "=x,y") == ["x", "y"]
+
+
+def test_apply_tag_spec_explicit_replace_dedupes_preserving_order() -> None:
+    assert apply_tag_spec(["a"], "=x,x,y") == ["x", "y"]
+
+
+def test_apply_tag_spec_explicit_replace_bare_equals_clears_all_tags() -> None:
+    assert apply_tag_spec(["a", "b"], "=") == []
+
+
+def test_apply_tag_spec_only_explicit_replace_path_replaces() -> None:
+    """Neither the additive bare-list path nor the delta path ever replaces —
+    replacement is reachable only through the leading ``=``."""
+    existing = ["a", "b"]
+    assert apply_tag_spec(existing, "c") != ["c"]  # additive, not replace
+    assert apply_tag_spec(existing, "+c") != ["c"]  # delta, not replace
+    assert apply_tag_spec(existing, "=c") == ["c"]  # explicit replace only
 
 
 # --------------------------------------------------------------------------- #
@@ -362,10 +394,50 @@ def test_update_tags_delta_add_remove(cfg: Config, vault: Path) -> None:
     assert meta["updated"] > _OLD
 
 
-def test_update_tags_replace(cfg: Config, vault: Path) -> None:
+def test_update_tags_delta_remove_absent_is_noop(cfg: Config, vault: Path) -> None:
     path = _seed_note(vault, tags=["ndc", "stale"])
-    update_note(cfg, "n-seed", tags="x,y")
+    update_note(cfg, "n-seed", tags="-nope")
+    assert _reload(path).metadata["tags"] == ["ndc", "stale"]
+
+
+def test_update_tags_bare_list_is_additive(cfg: Config, vault: Path) -> None:
+    """agent-usability/3 — the silent-wipe regression, locked end to end through
+    ``update_note``: a note tagged ["infra", "urgent", "q3"] updated with
+    tags="urgent" retains all three."""
+    path = _seed_note(vault, tags=["infra", "urgent", "q3"])
+    note = update_note(cfg, "n-seed", tags="urgent")
+    meta = _reload(path).metadata
+    assert meta["tags"] == ["infra", "urgent", "q3"]
+    assert note.tags == ["infra", "urgent", "q3"]
+
+
+def test_update_tags_bare_list_adds_new_tag_without_dropping_others(
+    cfg: Config, vault: Path
+) -> None:
+    path = _seed_note(vault, tags=["ndc", "stale"])
+    update_note(cfg, "n-seed", tags="flights")
+    assert _reload(path).metadata["tags"] == ["ndc", "stale", "flights"]
+
+
+def test_update_tags_explicit_replace(cfg: Config, vault: Path) -> None:
+    path = _seed_note(vault, tags=["ndc", "stale"])
+    update_note(cfg, "n-seed", tags="=x,y")
     assert _reload(path).metadata["tags"] == ["x", "y"]
+
+
+def test_update_tags_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
+    """Root tech.md Invariant 3 — a tag mutation on the update path must not
+    disturb foreign frontmatter keys the msgspec ``_Frontmatter`` stash keeps."""
+    path = _seed_note(
+        vault,
+        tags=["infra", "urgent", "q3"],
+        extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"},
+    )
+    update_note(cfg, "n-seed", tags="urgent")
+    meta = _reload(path).metadata
+    assert meta["tolaria_pinned"] is True
+    assert meta["custom_ref"] == "PROJ-1"
+    assert meta["tags"] == ["infra", "urgent", "q3"]
 
 
 def test_update_type_moves_file(cfg: Config, vault: Path) -> None:

@@ -312,8 +312,10 @@ def update_task(
     """Update a task's fields in place and bump ``updated`` (R1, R3).
 
     Only the supplied fields change: ``priority``, ``title``, ``project`` and
-    ``owner`` are set directly, ``tags`` mutates the tag list (delta ``+x,-y`` or
-    replacement — see :func:`shards.core.notes.apply_tag_spec`), and
+    ``owner`` are set directly, ``tags`` mutates the tag list (additive, delta
+    ``+x,-y``, or explicit ``=x,y`` replace — see
+    :func:`shards.core.notes.apply_tag_spec` /
+    :data:`shards.core.notes.TAG_SPEC_SEMANTICS`), and
     ``blocks``/``blocked_by`` are replaced verbatim (inert — no readiness
     logic). The read-modify-write runs under the per-entity ``O_EXCL`` lock and
     mutates the parsed metadata in place (never rebuilding it), so ``status``,

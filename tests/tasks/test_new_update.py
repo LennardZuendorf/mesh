@@ -313,6 +313,27 @@ def test_update_task_tags_delta(cfg: Config, vault: Path) -> None:
     assert _reload(path).metadata["tags"] == ["ndc", "flights"]
 
 
+def test_update_task_tags_delta_remove_absent_is_noop(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, tags=["ndc", "stale"])
+    update_task(cfg, "t-seed", tags="-nope")
+    assert _reload(path).metadata["tags"] == ["ndc", "stale"]
+
+
+def test_update_task_tags_bare_list_is_additive(cfg: Config, vault: Path) -> None:
+    """agent-usability/3 — the silent-wipe regression, locked for tasks too: a
+    task tagged ["infra", "urgent", "q3"] updated with tags="urgent" keeps all
+    three; the mechanic is shared with notes via apply_tag_spec."""
+    path = _seed_task(vault, tags=["infra", "urgent", "q3"])
+    update_task(cfg, "t-seed", tags="urgent")
+    assert _reload(path).metadata["tags"] == ["infra", "urgent", "q3"]
+
+
+def test_update_task_tags_explicit_replace(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, tags=["ndc", "stale"])
+    update_task(cfg, "t-seed", tags="=x,y")
+    assert _reload(path).metadata["tags"] == ["x", "y"]
+
+
 def test_update_task_blocks_blocked_by_stored_inert(cfg: Config, vault: Path) -> None:
     path = _seed_task(vault, status="open")
     update_task(cfg, "t-seed", blocks=["t-a"], blocked_by=["t-b"])
@@ -347,6 +368,21 @@ def test_update_task_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
     meta = _reload(path).metadata
     assert meta["tolaria_pinned"] is True
     assert meta["custom_ref"] == "PROJ-1"
+
+
+def test_update_task_tags_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
+    """Root tech.md Invariant 3 — a tag mutation on the update path must not
+    disturb foreign frontmatter keys the msgspec ``_Frontmatter`` stash keeps."""
+    path = _seed_task(
+        vault,
+        tags=["infra", "urgent", "q3"],
+        extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"},
+    )
+    update_task(cfg, "t-seed", tags="urgent")
+    meta = _reload(path).metadata
+    assert meta["tolaria_pinned"] is True
+    assert meta["custom_ref"] == "PROJ-1"
+    assert meta["tags"] == ["infra", "urgent", "q3"]
 
 
 def test_update_task_not_found_raises(cfg: Config, vault: Path) -> None:

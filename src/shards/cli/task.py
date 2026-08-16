@@ -21,6 +21,7 @@ from msgspec import ValidationError
 
 from shards.cli import _output
 from shards.cli._errors import cli_errors
+from shards.core.notes import TAG_SPEC_SEMANTICS
 from shards.core.tasks import (
     TaskNotFoundError,
     TaskView,
@@ -108,9 +109,7 @@ def update_command(
     ctx: typer.Context,
     task_id: str = typer.Argument(..., help="Task id."),
     priority: str | None = typer.Option(None, "--priority", help="Set the priority label."),
-    tags: str | None = typer.Option(
-        None, "--tags", help="Delta (+x,-y) or replacement (x,y) tag list."
-    ),
+    tags: str | None = typer.Option(None, "--tags", help=TAG_SPEC_SEMANTICS),
     title: str | None = typer.Option(None, "--title", help="Rewrite the task title."),
     project: str | None = typer.Option(
         None, "--project", help="Set the project soft link (a project note id)."
