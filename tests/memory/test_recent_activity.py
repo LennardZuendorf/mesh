@@ -180,7 +180,7 @@ def test_recent_activity_scans_when_daemon_down(cfg: Config, vault: Path) -> Non
 
     assert {e["id"] for e in out} == {"n-a", "t-b"}
     for e in out:
-        assert set(e.keys()) == {"id", "type", "title", "path", "mtime"}
+        assert set(e.keys()) == {"id", "type", "title", "path", "mtime", "owner", "claimed_by"}
 
 
 def test_recent_activity_fallback_is_scan_recent(
@@ -289,6 +289,100 @@ def test_filters_apply_before_limit_cap(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# core: identity on the row (team-awareness/6)                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_row_carries_peers_identity_not_callers(cfg: Config, vault: Path) -> None:
+    """A peer's row carries *their* owner/claimed_by, not the calling agent's.
+
+    ``cfg.agent`` is ``test-agent`` (the ``shards_config`` fixture); the row for a
+    note owned by someone else must say so, not silently inherit the caller.
+    """
+    _seed_note(vault, note_id="n-peer", title="Peer's Note", owner="other-agent")
+    _seed_task(
+        vault,
+        task_id="t-peer",
+        title="Peer's Task",
+        status="claimed",
+        owner="other-agent",
+        claimed_by="third-agent",
+    )
+
+    out = recent_activity(cfg, since=None, owner=None, mine=False, limit=20)
+
+    rows = {e["id"]: e for e in out}
+    assert rows["n-peer"]["owner"] == "other-agent"
+    assert rows["n-peer"]["claimed_by"] is None  # notes never carry claimed_by
+    assert rows["t-peer"]["owner"] == "other-agent"
+    assert rows["t-peer"]["claimed_by"] == "third-agent"
+    assert cfg.agent == "test-agent"  # sanity: neither row is the caller's identity
+
+
+def test_json_dumps_survives_owner_and_claimed_by(cfg: Config, vault: Path) -> None:
+    """The row (with its new identity keys) still round-trips through ``json.dumps``."""
+    _seed_task(
+        vault, task_id="t-x", title="X", status="claimed", owner="other-agent", claimed_by="me"
+    )
+
+    out = recent_activity(cfg, since=None, owner=None, mine=False, limit=20)
+
+    encoded = json.dumps(out)  # no datetime leak, no TypeError
+    decoded = json.loads(encoded)
+    assert decoded == out
+
+
+def test_mine_filter_reads_the_row_not_disk_when_owner_key_present(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mine`` costs no per-row disk read once the row already carries ``owner``."""
+    import shards.core.activity as activity_mod
+
+    _seed_note(vault, note_id="n-mine", title="Mine", owner="test-agent")
+    _seed_note(vault, note_id="n-other", title="Theirs", owner="other-agent")
+
+    def _boom(path: str) -> dict[str, object] | None:
+        raise AssertionError("must not re-read frontmatter when the row carries owner")
+
+    monkeypatch.setattr(activity_mod, "_read_meta", _boom)
+
+    out = recent_activity(cfg, since=None, owner=None, mine=True, limit=20)
+
+    assert {e["id"] for e in out} == {"n-mine"}
+
+
+def test_legacy_row_missing_owner_key_falls_back_to_disk(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row from an older peer daemon (no ``owner`` key at all) still filters
+    correctly — via a per-row frontmatter read, exactly like before this unit."""
+    mine_path = _seed_note(vault, note_id="n-mine", title="Mine", owner="test-agent")
+    other_path = _seed_note(vault, note_id="n-other", title="Theirs", owner="other-agent")
+
+    legacy_entries = [
+        {"id": "n-mine", "type": "note", "title": "Mine", "path": str(mine_path), "mtime": _NOW},
+        {
+            "id": "n-other",
+            "type": "note",
+            "title": "Theirs",
+            "path": str(other_path),
+            "mtime": _NOW,
+        },
+    ]
+    for entry in legacy_entries:
+        assert "owner" not in entry  # simulating an old daemon's reply, verbatim
+
+    def _fake(self: DaemonClient, config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> object:
+        return {"entries": legacy_entries}
+
+    monkeypatch.setattr(DaemonClient, "activity_recent", _fake)
+
+    out = recent_activity(cfg, since=None, owner=None, mine=True, limit=20)
+
+    assert {e["id"] for e in out} == {"n-mine"}  # resolved by re-reading disk
+
+
+# --------------------------------------------------------------------------- #
 # CLI: shards recent-activity                                                   #
 # --------------------------------------------------------------------------- #
 
@@ -310,7 +404,7 @@ def test_cli_json_shape(cfg: Config, vault: Path) -> None:
     assert isinstance(arr, list)
     assert {e["id"] for e in arr} == {"n-a", "t-b"}
     for e in arr:
-        assert set(e.keys()) == {"id", "type", "title", "path", "mtime"}
+        assert set(e.keys()) == {"id", "type", "title", "path", "mtime", "owner", "claimed_by"}
 
 
 def test_cli_exit_2_on_bad_since(cfg: Config, vault: Path) -> None:

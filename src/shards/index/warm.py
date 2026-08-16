@@ -72,11 +72,15 @@ def iter_vault_md(vault: Path) -> Iterator[Path]:
 
 
 def _entry_dict(path: Path, meta: dict[str, Any], mtime: float) -> dict[str, Any]:
-    """A JSON-serializable ``activity.recent`` row.
+    """A JSON-serializable ``activity.recent`` row (team-awareness/6).
 
     Deliberately excludes ``created``/``updated`` (which ``frontmatter`` parses
     back into ``datetime`` objects) so the payload survives ``json.dumps`` over
-    the socket unmodified.
+    the socket unmodified. ``owner``/``claimed_by`` are read straight off the
+    ``meta`` dict already in hand from the parse — no extra disk read — so
+    identity-aware filters (``--owner``/``--mine``) can read the row instead of
+    re-opening the file. ``claimed_by`` is ``None`` for notes (only tasks carry
+    the key); both are already JSON-safe (``str | None``).
     """
     return {
         "id": meta.get("id"),
@@ -84,6 +88,8 @@ def _entry_dict(path: Path, meta: dict[str, Any], mtime: float) -> dict[str, Any
         "title": meta.get("title"),
         "path": str(path),
         "mtime": mtime,
+        "owner": meta.get("owner"),
+        "claimed_by": meta.get("claimed_by"),
     }
 
 

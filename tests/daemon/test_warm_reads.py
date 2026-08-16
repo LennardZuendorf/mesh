@@ -303,6 +303,9 @@ def _read_matrix(client: DaemonClient, cfg: Config) -> dict[str, Any]:
         "tag_pull/status": [_hit(h) for h in client.tag_pull(cfg, status="done", limit=-1)],
         "tag_pull/limit": [_hit(h) for h in client.tag_pull(cfg, limit=2)],
         "vault.status": status,
+        # team-awareness/6: the row-shape change (owner/claimed_by) belongs in
+        # the parity matrix like every other wired read.
+        "activity.recent": client.activity_recent(cfg, limit=-1)["entries"],
     }
 
 
@@ -334,6 +337,22 @@ def test_warm_and_cold_read_matrices_are_identical(
     assert set(warm_matrix) == set(cold_matrix)
     for key in sorted(cold_matrix):
         assert warm_matrix[key] == cold_matrix[key], key
+
+
+def test_activity_recent_rows_carry_owner_and_claimed_by(reads: DaemonClient, cfg: Config) -> None:
+    """team-awareness/6: identity travels on the row, warm and cold alike.
+
+    ``n-beta`` is owned by a peer (``_OTHER``); ``t-claim`` is owned by ``_OTHER``
+    and claimed by ``_AGENT`` (the caller) — the row must say so, not the caller's
+    own identity, on *either* transport.
+    """
+    rows = {e["id"]: e for e in reads.activity_recent(cfg, limit=-1)["entries"]}
+    assert rows["n-beta"]["owner"] == _OTHER
+    assert rows["n-beta"]["claimed_by"] is None
+    assert rows["t-claim"]["owner"] == _OTHER
+    assert rows["t-claim"]["claimed_by"] == _AGENT
+    for row in rows.values():
+        assert set(row.keys()) == {"id", "type", "title", "path", "mtime", "owner", "claimed_by"}
 
 
 def test_note_list_surfaces_only_shards_notes(reads: DaemonClient, cfg: Config) -> None:

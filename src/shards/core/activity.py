@@ -13,13 +13,16 @@ contract already routes to :func:`shards.index.warm.scan_recent` on a socket-dow
 error. So this module inherits the daemon-up/daemon-down behaviour for free and
 never speaks to the socket itself.
 
-Each activity row is the minimal JSON-serializable shape
-``{id, type, title, path, mtime}`` — note there is **no** ``owner`` key. The
-``--owner`` / ``--mine`` filters therefore re-read each candidate's frontmatter
-from disk (owner + ``claimed_by``), and ``--since`` is applied as an *mtime*
-cutoff on those same rows. When any filter is active the fetch is unbounded and
-``limit`` is applied last, as a display cap — so a filter is a true filter, not
-something the daemon's own row cap can starve.
+Each activity row is the JSON-serializable shape
+``{id, type, title, path, mtime, owner, claimed_by}`` (team-awareness/6) — identity
+travels with the row, read off frontmatter already in hand at index/scan time, so
+the common ``--owner`` / ``--mine`` path costs no extra disk read. A row that
+predates this change (an older peer's daemon, or any other source missing the
+``owner`` key entirely) falls back to a fresh per-row frontmatter read, exactly as
+before — see :func:`_owner_match`. ``--since`` is applied as an *mtime* cutoff on
+the same rows. When any filter is active the fetch is unbounded and ``limit`` is
+applied last, as a display cap — so a filter is a true filter, not something the
+daemon's own row cap can starve.
 """
 
 from __future__ import annotations
@@ -44,15 +47,18 @@ def recent_activity(
     mine: bool,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Return recent vault changes as ``{id, type, title, path, mtime}`` rows.
+    """Return recent vault changes as ``{id, type, title, path, mtime, owner,
+    claimed_by}`` rows.
 
     Delegates to :meth:`DaemonClient.activity_recent` (which scans on a daemon-down
     socket error), newest-first. ``since`` (``7d`` / ``12h`` / ISO) is applied as an
-    mtime cutoff; ``owner`` and ``mine`` re-read each row's frontmatter (the row
-    carries no owner) — ``mine`` keeps rows whose ``owner`` **or** ``claimed_by``
-    equals ``config.agent``. When any filter is active the fetch is unbounded and
-    ``limit`` is applied afterwards as a display cap (``limit < 0`` → uncapped);
-    with no filter, ``limit`` is forwarded to the fetch as-is.
+    mtime cutoff; ``owner`` and ``mine`` read identity straight off each row
+    (falling back to a fresh frontmatter read only for a row missing the
+    ``owner`` key — see :func:`_owner_match`) — ``mine`` keeps rows whose
+    ``owner`` **or** ``claimed_by`` equals ``config.agent``. When any filter is
+    active the fetch is unbounded and ``limit`` is applied afterwards as a
+    display cap (``limit < 0`` → uncapped); with no filter, ``limit`` is
+    forwarded to the fetch as-is.
 
     Raises ``ValueError`` on an unparseable ``since`` (the CLI maps it to exit 2).
     """
@@ -97,18 +103,27 @@ def _read_meta(path: str) -> dict[str, Any] | None:
 
 
 def _owner_match(config: Config, entry: dict[str, Any], *, owner: str | None, mine: bool) -> bool:
-    """Whether ``entry`` passes the ``owner`` / ``mine`` filters (via re-read frontmatter).
+    """Whether ``entry`` passes the ``owner`` / ``mine`` filters.
 
-    The activity row has no ``owner`` key, so ownership is read fresh from the
-    file. A row whose file cannot be read/parsed fails an active owner/mine filter.
+    Reads identity straight off ``entry`` (``owner``/``claimed_by``) — the
+    common case costs no disk read. A row missing the ``owner`` key entirely
+    predates this change (an older daemon's row, or any other legacy source) and
+    falls back to a fresh frontmatter read; a row whose file then cannot be
+    read/parsed fails an active owner/mine filter.
     """
-    meta = _read_meta(str(entry.get("path", "")))
-    if meta is None:
-        return False
-    if owner is not None and meta.get("owner") != owner:
+    if "owner" in entry:
+        row_owner = entry.get("owner")
+        row_claimed = entry.get("claimed_by")
+    else:
+        meta = _read_meta(str(entry.get("path", "")))
+        if meta is None:
+            return False
+        row_owner = meta.get("owner")
+        row_claimed = meta.get("claimed_by")
+    if owner is not None and row_owner != owner:
         return False
     if mine:
         me = config.agent
-        if meta.get("owner") != me and meta.get("claimed_by") != me:
+        if row_owner != me and row_claimed != me:
             return False
     return True

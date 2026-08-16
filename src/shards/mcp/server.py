@@ -205,7 +205,10 @@ def shards_recent_activity(
     mine: bool = False,
     limit: int = DEFAULT_RECENT_LIMIT,
 ) -> list[dict[str, Any]]:
-    """Recent vault changes (newest first) as {id, type, title, path, mtime} rows."""
+    """Recent vault changes (newest first), each row carrying identity.
+
+    ``{id, type, title, path, mtime, owner, claimed_by}`` — team-awareness/6.
+    """
     config = load_config()
     return recent_activity(config, since=since, owner=owner, mine=mine, limit=limit)
 
