@@ -77,14 +77,32 @@ def query_search(
     limit: int,
     threshold: float | None,
     quiet: bool,
-) -> list[SearchResult]:
+) -> tuple[list[SearchResult], str]:
     """Route a query to hybrid ``indexed`` recall or the substring fallback.
 
-    Hybrid runs only when ``[search].hybrid`` is on *and* the daemon is up; any
-    ``indexed`` failure (missing binary or non-zero exit) degrades to the substring
-    fallback, which prints its own stderr notice. Every filter — ``type`` / ``tags``
-    / ``owner`` / ``status`` — is applied post-retrieval by both paths; ``quiet`` is
-    forwarded so a degradation notice honours ``--quiet`` whichever path emits it.
+    Returns ``(results, mode)`` — ``mode`` is ``"indexed"`` only when
+    ``indexed`` actually answered, ``"fallback"`` otherwise (agent-usability/4,
+    round-1 review Finding 1). This is the branch *actually taken*, not a
+    prediction from :func:`search_health`'s static gates: those gates cannot
+    see a genuine runtime failure — a non-zero ``indexed`` exit for a reason
+    other than "binary absent" (corrupt collection, resource exhaustion, an
+    internal crash) — so a caller computing mode from the gates alone would
+    confidently mislabel a substring hit as ranked recall. Reusing this
+    return value is now the only supported way to know which engine answered;
+    computing it independently via a second :func:`search_health` call is the
+    bug this replaces.
+
+    Hybrid is attempted only when ``[search].hybrid`` is on, the daemon is up,
+    *and* ``[search].collection`` is set (hoisted here from
+    ``indexed_client.search``'s own internal check, so an unset collection
+    short-circuits to the fallback branch below directly, structurally
+    mirroring the gates :func:`search_health` reports, rather than round-
+    tripping through ``indexed_client.search``'s own silent redirect and
+    risking a mode mismatch). Any ``indexed`` failure (missing binary or
+    non-zero exit) degrades to the substring fallback, which prints its own
+    stderr notice. Every filter — ``type`` / ``tags`` / ``owner`` / ``status``
+    — is applied post-retrieval by both paths; ``quiet`` is forwarded so a
+    degradation notice honours ``--quiet`` whichever path emits it.
 
     ``threshold`` is ``None`` when the caller has no *explicit* value (neither
     ``--threshold`` nor an explicit ``[search].threshold`` in config) — the
@@ -93,9 +111,9 @@ def query_search(
     rule: it always gets a concrete value, defaulting to ``[search].threshold``
     when the caller left it unset.
     """
-    if config.search.hybrid and _daemon_up():
+    if config.search.hybrid and config.search.collection is not None and _daemon_up():
         try:
-            return indexed_client.search(
+            results = indexed_client.search(
                 config,
                 query,
                 limit=limit,
@@ -106,9 +124,10 @@ def query_search(
                 status=status,
                 quiet=quiet,
             )
+            return results, "indexed"
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass  # indexed unavailable → fall through to the substring scan below
-    return search_fallback(
+    results = search_fallback(
         config,
         query,
         type_filter=type_filter,
@@ -119,6 +138,7 @@ def query_search(
         threshold=threshold,
         quiet=quiet,
     )
+    return results, "fallback"
 
 
 def search_health(config: Config) -> dict[str, Any]:

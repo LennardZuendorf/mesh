@@ -46,16 +46,23 @@ needs in order to *interpret* its own search results correctly, the same
 reachability signal the CLI already exposes via ``shards search --health``. It
 carries no vault contents, no daemon control verb, and no way to mutate
 anything — a pure read of :func:`~shards.core.search.search_health`'s four
-gates. ``shards_search`` results also carry the same signal per hit, via a
-``mode`` field (``"indexed"`` / ``"fallback"``) added only when a query ran a
-real recall (never on a tag-only pull, which is warm-index-vs-cold-scan, an
-unrelated and non-degrading distinction) — so an agent that already has a
-result set does not need a second ``shards_health`` call just to know whether
-to trust it. The marker is MCP-only: the CLI's ``hit_dict`` shape
-(:func:`shards.core.search.hit_dict`) stays unchanged for existing scripts, and
-a CLI caller already has ``shards search --health`` and stderr degradation
-notices — this surface never had that second channel, which is the whole
-reason the field exists here.
+static gates, used *without* running a query. ``shards_search`` results carry
+a related but distinct signal per hit: a ``mode`` field (``"indexed"`` /
+``"fallback"``) added only when a query ran a real recall (never on a
+tag-only pull, which is warm-index-vs-cold-scan, an unrelated and
+non-degrading distinction). Unlike ``shards_health``'s gate prediction, the
+per-hit ``mode`` is *observed* — :func:`~shards.core.search.query_search`
+reports the branch it actually took, not the branch the static gates predict
+it would take (round-1 review, Finding 1: the gates alone cannot see a
+genuine ``indexed`` runtime failure that isn't a missing binary, so a
+prediction could confidently mislabel a substring hit as ranked recall) — so
+an agent that already has a result set does not need a second
+``shards_health`` call just to know whether to trust it, and gets a stronger
+guarantee than that second call could give anyway. The marker is MCP-only:
+the CLI's ``hit_dict`` shape (:func:`shards.core.search.hit_dict`) stays
+unchanged for existing scripts, and a CLI caller already has ``shards search
+--health`` and stderr degradation notices — this surface never had that
+second channel, which is the whole reason the field exists here.
 
 Tool functions are defined as plain module-level callables and registered on the
 app afterwards, so they stay directly importable and unit-testable while the app
@@ -428,13 +435,17 @@ def shards_search(
     has no stderr an agent reads, so this is the only channel a degraded
     substring result has to identify itself as degraded (``query_search``
     already suppresses its own notice here via ``quiet=True``; without this
-    field a fallback hit was indistinguishable from a ranked one). Computed
-    from the same gates :func:`~shards.core.search.search_health` reports —
-    call ``shards_health`` for the standalone reachability check this predicts
-    from. A tag-only pull (no ``query``) never carries ``mode``: it is served
-    from the warm daemon index or an equivalent cold folder scan, a
-    daemon-liveness distinction that never degrades recall quality, unlike the
-    indexed/fallback split a real query makes.
+    field a fallback hit was indistinguishable from a ranked one). ``mode`` is
+    the branch :func:`~shards.core.search.query_search` *actually took* for
+    this call, not a prediction from :func:`~shards.core.search.search_health`'s
+    static gates — those cannot see a genuine ``indexed`` runtime failure
+    (round-1 review, Finding 1), so this stays observed, never recomputed
+    independently. Call ``shards_health`` for the standalone reachability
+    check (no query, no results, just the gates). A tag-only pull (no
+    ``query``) never carries ``mode``: it is served from the warm daemon index
+    or an equivalent cold folder scan, a daemon-liveness distinction that
+    never degrades recall quality, unlike the indexed/fallback split a real
+    query makes.
     """
     config = load_config()
     if query is None:
@@ -452,7 +463,15 @@ def shards_search(
     # threshold explicitly, so the substring fallback applies its own floor
     # rather than a silently-defaulted cutoff (root tech.md § B5).
     effective_threshold = resolve_effective_threshold(threshold, config)
-    results = query_search(
+    # ``mode`` is the engine ``query_search`` actually took (agent-usability/4,
+    # round-1 review Finding 1) — observed from its return value, not
+    # predicted from ``search_health``'s static gates. The gates cannot see a
+    # genuine ``indexed`` runtime failure (corrupt collection, resource
+    # exhaustion, a non-"binary absent" non-zero exit); a value computed from
+    # them alone could report "indexed" over a hit that actually came from the
+    # substring fallback — a second, independent call to ``search_health``
+    # here was exactly that bug.
+    results, mode = query_search(
         config,
         query,
         type_filter=type_filter,
@@ -463,11 +482,6 @@ def shards_search(
         threshold=effective_threshold,
         quiet=True,
     )
-    # Predicts the engine `query_search` just took via the identical gates
-    # (hybrid enabled, daemon up, collection set, indexed on PATH) that
-    # `search_health` already reports standalone — not a second, independent
-    # implementation of the routing decision.
-    mode = search_health(config)["mode"]
     hits = [hit_dict(result, meta_only=meta_only, full=full) for result in results]
     for hit in hits:
         hit["mode"] = mode

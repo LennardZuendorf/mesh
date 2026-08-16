@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -926,6 +927,41 @@ def test_mcp_search_marks_hits_indexed_when_hybrid_runs(
     hits = dispatched.structured_content["result"]
 
     assert hits and all(h["mode"] == "indexed" for h in hits)
+
+
+def test_mcp_search_marks_hits_fallback_on_indexed_runtime_failure(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (round-1 review, Finding 1): every gate ``search_health``
+    checks reports healthy (daemon up, binary on PATH, hybrid + collection
+    configured) but the real ``indexed`` subprocess exits non-zero for an
+    unrelated runtime reason — corrupt collection, resource exhaustion,
+    whatever. ``query_search`` genuinely falls back and returns the seeded
+    note via the substring scorer; the hit must be marked ``fallback``, never
+    ``indexed`` — a marker that is *wrong in the confident direction* is worse
+    than no marker, since it tells an agent to trust output it should hedge
+    on. This was RED before the fix (mode reported "indexed", predicted from
+    static gates rather than observed from the branch `query_search` actually
+    took) and is GREEN after (`query_search` now returns the mode it actually
+    used)."""
+    path = _seed_note_for_search(vault, title="Zephyr Marker Probe Runtime Failure")
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
+    monkeypatch.setattr(indexed_client, "indexed_available", lambda: True)
+
+    def _raise(*_a: object, **_k: object) -> str:
+        raise subprocess.CalledProcessError(1, ["indexed"])
+
+    monkeypatch.setattr(indexed_client, "_run_indexed_search", _raise)
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_search", {"query": "Zephyr Marker Probe Runtime Failure"})
+    )
+    hits = dispatched.structured_content["result"]
+
+    # The substring fallback genuinely found the note (proves the fallback
+    # really ran, not just that the mode field happens to read "fallback").
+    assert {h["id"] for h in hits} == {path.stem}
+    assert all(h["mode"] == "fallback" for h in hits)
 
 
 def test_mcp_search_tag_pull_carries_no_mode_marker(cfg: Config, vault: Path) -> None:

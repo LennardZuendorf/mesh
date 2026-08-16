@@ -128,7 +128,13 @@ def search_command(
             # explicitly, so the substring fallback applies its own floor rather than
             # a silently-defaulted cutoff (root tech.md § B5).
             effective_threshold = resolve_effective_threshold(threshold, config)
-            results = query_search(
+            # ``query_search`` now also reports which engine actually answered
+            # (agent-usability/4) — the CLI hit shape stays unchanged for
+            # existing scripts (``--health`` and the stderr degradation notice
+            # are this surface's own two channels for the same fact; the mode
+            # marker on ``shards_search`` hits is MCP's replacement for having
+            # neither), so ``_mode`` is deliberately discarded here.
+            results, _mode = query_search(
                 config,
                 query,
                 type_filter=type_filter,
