@@ -116,8 +116,9 @@ CLI: `note {new,get,list,append,update,delete}`,
 lenses `recent-activity`, `build-context`, `graph --direction out|in|both`, `project`,
 `session-start --team`, and admin `shards init` (never exposed over MCP). `task list` takes
 `--stale`/`--available` alongside `--status`/`--owner`/`--mine`/`--tags`. `--tags` on
-`note update`/`task update` merges by default (bare `x,y` adds; `+x,-y` is a delta; `=x,y`
-replaces — the only form that drops anything).
+`note update`/`task update` merges by default (bare `x,y` adds; `+x,-y` is a delta — `-y`
+removes exactly the tags you name; `=x,y` is the only form that can drop tags you *didn't*
+name, since anything left out of the new list is discarded).
 
 MCP mirrors the safe subset as typed `shards_*` tools — this skill's `allowed-tools` list, plus
 `shards_task_cancel`, which is destructive and left out of that pre-approved list on purpose so

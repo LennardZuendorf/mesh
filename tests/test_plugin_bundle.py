@@ -341,6 +341,20 @@ def test_skill_tags_help_matches_the_real_merge_semantics() -> None:
     assert "=x,y" in body and "=x,y" in TAG_SPEC_SEMANTICS
 
 
+def test_tag_paragraph_correctly_distinguishes_delta_from_replace() -> None:
+    """Regression (review round 1, finding 1): "=x,y — the only form that drops
+    anything" was false and self-contradictory — the delta form's own `-y` also
+    drops (removes) whatever it names. The corrected wording must state delta's
+    removal explicitly and scope replace's danger to tags the caller *didn't*
+    name, and the old blanket claim must never reappear.
+    """
+    body = _skill_body()
+    lowered = body.lower()
+    assert "only form that drops anything" not in lowered
+    assert "removes exactly the tags you name" in lowered
+    assert "left out of the new list is discarded" in lowered
+
+
 def test_allowed_tools_are_all_real_registered_mcp_tools() -> None:
     fm = _skill_frontmatter()
     allowed = fm["allowed-tools"]
