@@ -27,29 +27,41 @@ itself (it is already on disk); that is allowed and harmless.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Iterator
 from pathlib import Path
 
-from shards.storage.files import read_post
+from shards.storage.files import iter_md, read_post
 
 # A ``[[…]]`` link: capture the inner text, excluding brackets and newlines.
 _WIKILINK = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 # Id-form link: a shards id prefix (``n-``/``t-``) followed by id characters.
 _ID_FORM = re.compile(r"^[nt]-[0-9A-Za-z]+$")
 _SHARDS_ID_PREFIX = "n-"
+_SHARDS_ID_PREFIXES = ("n-", "t-")
 
 
 def _notes_root(vault_path: Path) -> Path:
     return vault_path / "notes"
 
 
+def _tasks_root(vault_path: Path) -> Path:
+    return vault_path / "tasks"
+
+
 def _iter_note_files(vault_path: Path) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``notes/`` (``.locks/`` holds no ``.md``)."""
-    root = _notes_root(vault_path)
-    if not root.is_dir():
-        return
-    yield from sorted(root.rglob("*.md"))
+    """Yield every ``*.md`` under ``notes/``, sorted.
+
+    A thin, deterministically-ordered call onto the one shared vault walk
+    (:func:`shards.storage.files.iter_md`).
+    """
+    yield from sorted(iter_md(_notes_root(vault_path)))
+
+
+def _iter_task_files(vault_path: Path) -> Iterator[Path]:
+    """Yield every ``*.md`` under ``tasks/`` (both ``open/`` and ``done/``), sorted."""
+    yield from sorted(iter_md(_tasks_root(vault_path)))
 
 
 def _link_targets(body: str) -> list[str]:
@@ -111,21 +123,26 @@ def resolve_wikilinks(body: str, vault_path: Path) -> tuple[str, list[str]]:
 
 
 def find_dangling(vault_path: Path) -> list[str]:
-    """Return the unresolvable ``[[Title]]`` link texts across all shards notes.
+    """Return the unresolvable ``[[Title]]`` link texts across the whole vault.
 
-    Scans every shards note's body for title-form links whose title matches no
-    shards note, de-duplicated in first-seen order (sorted file scan, body order
-    within a file). Id-form links are never dangling. Consumed by ``shards
-    status`` to surface broken references.
+    Scans every shards note **and task** body (``notes/**`` + ``tasks/{open,done}/``,
+    reusing the same per-root walk :func:`_iter_note_files` / :func:`_iter_task_files`
+    share) for title-form links whose title matches no shards note, de-duplicated
+    in first-seen order (sorted file scan per root, notes before tasks, body order
+    within a file). Id-form links are never dangling. The title *index* itself
+    stays notes-only — titles resolve to notes by contract (see module docstring)
+    — only the scan for link *targets* widens to cover tasks. Consumed by
+    ``shards status`` to surface broken references across the whole corpus (root
+    tech.md § B6).
     """
     index = _title_index(vault_path)
     dangling: list[str] = []
-    for path in _iter_note_files(vault_path):
+    for path in itertools.chain(_iter_note_files(vault_path), _iter_task_files(vault_path)):
         post = read_post(path)
         if post is None:
             continue
         note_id = post.metadata.get("id")
-        if not (isinstance(note_id, str) and note_id.startswith(_SHARDS_ID_PREFIX)):
+        if not (isinstance(note_id, str) and note_id.startswith(_SHARDS_ID_PREFIXES)):
             continue
         for target in _link_targets(post.content):
             if _ID_FORM.match(target):

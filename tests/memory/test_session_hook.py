@@ -29,22 +29,49 @@ Acceptance coverage:
 * **hook config** — ``hooks/session_start.json`` matches the product.md UX spec:
   a single SessionStart ``command`` hook running ``shards session-start
   --meta-only --json``.
+
+team-awareness/7 widens the composite with a third source — inbound mentions of
+the caller's own nodes — and two flags:
+
+* **mentions delivery (end-to-end)** — a note by one agent linking a task
+  another agent holds surfaces in the holder's payload, ``reason=mention``,
+  ordered after tasks and before remaining activity.
+* **exclusions** — a mention *by* me of my own node, and a mention outside the
+  7-day window, are both excluded from the mentions section (a self-authored
+  mention may still surface as plain ``reason=activity``).
+* **dedupe precedence** — a mentioner that is also one of my own open/claimed
+  tasks appears exactly once, under ``reason="task"`` (the earlier section
+  wins).
+* **``--owner``** drives every composed source — task queue, mention targets,
+  and activity — and is honoured on both sides of the command name.
+* **``--team``** widens the activity half only; the task half (and the mention
+  target set built from it) stays the effective agent's own.
+* **daemon parity** — the same payload, byte-identical, warm and cold, with no
+  infrastructure notice either way.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import frontmatter
 import pytest
 from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
+from shards.core.notes import NoteView
 from shards.core.tasks import TaskView
+from shards.daemon.client import DaemonClient
 from shards.schemas.config import Config, load_config
+from shards.schemas.note import Note
 from shards.schemas.task import Task
+from shards.storage.files import note_folder, task_folder
+from tests.daemon.conftest import running_daemon
 
 # The hook config file, located relative to this test (repo-root/hooks/…), never
 # the process cwd — the suite may run from anywhere.
@@ -118,29 +145,91 @@ def _activity(
     }
 
 
+def _note_view(
+    *,
+    note_id: str,
+    title: str = "A Note",
+    owner: str = "test-agent",
+    body: str = "Note body.",
+) -> NoteView:
+    """Build a real :class:`NoteView` (validated ``Note`` + body + path)."""
+    when = datetime.now(UTC)
+    note = Note.model_validate(
+        {
+            "id": note_id,
+            "type": "note",
+            "title": title,
+            "tags": [],
+            "owner": owner,
+            "created": when,
+            "updated": when,
+            "related": [],
+        }
+    )
+    return NoteView(note=note, body=body, path=Path(f"/vault/notes/{note_id}.md"))
+
+
 def _patch_sources(
     monkeypatch: pytest.MonkeyPatch,
     *,
     activity: list[dict[str, Any]],
     tasks: list[TaskView],
+    notes: list[NoteView] | None = None,
+    mentions: list[dict[str, Any]] | None = None,
     calls: dict[str, Any] | None = None,
 ) -> None:
-    """Replace both composed lenses with fakes; optionally record their call args."""
+    """Replace every composed lens with a fake; optionally record their call args.
+
+    ``notes``/``mentions`` default to ``[]`` — a test that does not care about
+    the mentions half (most of the pre-team-awareness/7 suite) gets an empty
+    mentions section for free, never a real disk walk of the (empty) test vault.
+    Every fake also records the ``config.agent`` it was called with, so a test
+    can assert ``--owner``/``--team`` actually reached each source.
+    """
 
     def _fake_recent(
         config: Config, *, since: str | None, owner: str | None, mine: bool, limit: int
     ) -> list[dict[str, Any]]:
         if calls is not None:
-            calls["recent"] = {"since": since, "owner": owner, "mine": mine, "limit": limit}
+            calls["recent"] = {
+                "since": since,
+                "owner": owner,
+                "mine": mine,
+                "limit": limit,
+                "agent": config.agent,
+            }
         return list(activity)
 
-    def _fake_list_tasks(config: Config, **kwargs: Any) -> list[TaskView]:
+    def _fake_task_list(_self: Any, config: Config, **kwargs: Any) -> list[TaskView]:
         if calls is not None:
-            calls["list_tasks"] = kwargs
+            calls["list_tasks"] = {**kwargs, "agent": config.agent}
         return list(tasks)
 
+    def _fake_note_list(_self: Any, config: Config, **kwargs: Any) -> list[NoteView]:
+        if calls is not None:
+            calls["list_notes"] = {**kwargs, "agent": config.agent}
+        return list(notes or [])
+
+    def _fake_mentions(
+        config: Config,
+        task_views: list[TaskView],
+        note_views: list[NoteView],
+        *,
+        me: str | None,
+        since: str,
+    ) -> list[dict[str, Any]]:
+        if calls is not None:
+            calls["mentions"] = {"me": me, "since": since}
+        return list(mentions or [])
+
     monkeypatch.setattr("shards.cli.session.recent_activity", _fake_recent)
-    monkeypatch.setattr("shards.cli.session.list_tasks", _fake_list_tasks)
+    # The live queue and note ownership are fetched through the daemon client
+    # (core-hardening/5): warm index when it is up, the identical disk walk when
+    # it is down. Faking the client verbs keeps this suite about the
+    # *composition*, not any one source.
+    monkeypatch.setattr(DaemonClient, "task_list", _fake_task_list)
+    monkeypatch.setattr(DaemonClient, "note_list", _fake_note_list)
+    monkeypatch.setattr("shards.cli.session.session_mentions", _fake_mentions)
 
 
 def _invoke(args: list[str]) -> Any:
@@ -149,6 +238,79 @@ def _invoke(args: list[str]) -> Any:
 
 def _ids(entries: list[dict[str, Any]]) -> list[str]:
     return [str(e["id"]) for e in entries]
+
+
+# --------------------------------------------------------------------------- #
+# Real-vault seeding — the end-to-end delivery / dedupe / window / daemon-      #
+# parity tests below need actual files an inbound scan can walk, not fakes.    #
+# --------------------------------------------------------------------------- #
+
+
+def _seed_note(
+    vault: Path,
+    *,
+    note_id: str,
+    title: str = "A Note",
+    owner: str = "test-agent",
+    related: list[str] | None = None,
+    updated: datetime | None = None,
+    body: str = "Body line.",
+) -> Path:
+    when = updated or datetime.now(UTC)
+    meta: dict[str, Any] = {
+        "id": note_id,
+        "type": "note",
+        "title": title,
+        "tags": [],
+        "owner": owner,
+        "created": when,
+        "updated": when,
+        "related": list(related or []),
+    }
+    folder = note_folder("note", vault)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{note_id}.md"
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    return path
+
+
+def _seed_task(
+    vault: Path,
+    *,
+    task_id: str,
+    title: str = "A Task",
+    status: str = "open",
+    owner: str | None = "test-agent",
+    claimed_by: str | None = None,
+    related: list[str] | None = None,
+    updated: datetime | None = None,
+    body: str = "Task body.",
+) -> Path:
+    when = updated or datetime.now(UTC)
+    meta: dict[str, Any] = {
+        "id": task_id,
+        "type": "task",
+        "title": title,
+        "tags": [],
+        "owner": owner,
+        "created": when,
+        "updated": when,
+        "related": list(related or []),
+        "status": status,
+        "priority": None,
+        "claimed_by": claimed_by,
+        "blocks": [],
+        "blocked_by": [],
+    }
+    folder = task_folder(status, vault)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    return path
 
 
 # --------------------------------------------------------------------------- #
@@ -278,11 +440,27 @@ def test_only_open_and_claimed_tasks_surface(cfg: Config, monkeypatch: pytest.Mo
 # --------------------------------------------------------------------------- #
 
 
-def test_full_output_carries_task_body(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_full_output_carries_task_body(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``--meta-only`` each live task carries its body, read off disk.
+
+    core-hardening/5: a *list* row no longer carries a body (the warm index holds
+    frontmatter only), so the composite reads the body per surviving task from the
+    row's ``path``. The task file therefore has to exist on disk — which is the
+    behaviour under test, not a fixture detail.
+    """
+    view = _task_view(task_id="t-1", status="open", body="the body text")
+    path = vault / "tasks" / "open" / "t-1.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        frontmatter.dumps(frontmatter.Post("the body text", **view.task.model_dump())),
+        encoding="utf-8",
+    )
     _patch_sources(
         monkeypatch,
         activity=[],
-        tasks=[_task_view(task_id="t-1", status="open", body="the body text")],
+        tasks=[TaskView(task=view.task, body="", path=path)],
     )
 
     arr = json.loads(_invoke(["session-start", "--json"]).stdout)
@@ -331,6 +509,449 @@ def test_command_is_invocable_by_hyphenated_name(
     _patch_sources(monkeypatch, activity=[], tasks=[])
     result = _invoke(["session-start", "--json"])
     assert result.exit_code == 0, result.output
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 — end-to-end mention delivery (the headline claim)          #
+# --------------------------------------------------------------------------- #
+
+
+def test_mention_delivered_across_two_agent_identities(cfg: Config, vault: Path) -> None:
+    """A note by one agent linking a task another agent holds reaches that agent.
+
+    The simulation case the unit exists to fix: research-agent writes a note
+    that mentions a task flights-agent holds (owned by a third party,
+    ops-agent, and claimed by flights-agent — so "holds" exercises the
+    ``claimed_by`` half of "my nodes", not just ``owner``). Nothing ever writes
+    to the task itself; the mention is only findable by inverting ``related``.
+    ``--owner`` puts the CLI in flights-agent's seat from a session whose own
+    configured identity (``test-agent``, from ``shards_config``) is a third
+    identity again — four distinct agents appear across this module's fixtures.
+    """
+    _seed_task(
+        vault,
+        task_id="t-184g",
+        title="Book flights",
+        status="open",
+        owner="ops-agent",
+        claimed_by="flights-agent",
+    )
+    _seed_note(
+        vault,
+        note_id="n-9qq2",
+        title="Overlap heads-up",
+        owner="research-agent",
+        related=["t-184g"],
+    )
+
+    result = _invoke(["session-start", "--owner", "flights-agent", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    by_id = {e["id"]: e for e in arr}
+    assert by_id["t-184g"]["reason"] == "task"
+    assert by_id["n-9qq2"]["reason"] == "mention"
+    ids = _ids(arr)
+    assert ids.index("t-184g") < ids.index("n-9qq2")  # tasks before mentions
+
+
+def test_session_start_with_no_identity_delivers_no_mentions_of_others_work(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX2 (final review): with no configured identity and no ``--owner``,
+    ``session-start`` must not deliver mentions of other agents' work.
+
+    Before the fix, ``select_tasks``'s unsound ``spec.mine`` (an unset ``me``
+    passed both inequality checks against an ``owner: null`` task) put a task
+    nobody claims-as-mine into the effective agent's queue, and the mentions
+    target set built from that queue then surfaced a mention of it — exactly
+    the plugin's ``session-start --meta-only --json`` boot hook path, run on
+    every install whose config lacks ``[core].agent``.
+    """
+    _seed_task(vault, task_id="t-nullowner", status="open", owner=None, claimed_by="other-agent")
+    _seed_note(
+        vault,
+        note_id="n-mentions-null",
+        owner="third-agent",
+        related=["t-nullowner"],
+    )
+    cfg_file = tmp_path / "noagent.toml"
+    cfg_file.write_text("\n".join(("[core]", f'tolaria_path = "{vault}"', "")), encoding="utf-8")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    reasons = {e["id"]: e["reason"] for e in arr}
+    assert "t-nullowner" not in reasons or reasons["t-nullowner"] != "task"
+    assert reasons.get("n-mentions-null") != "mention"
+
+
+def test_mentions_ordered_between_tasks_and_activity(cfg: Config, vault: Path) -> None:
+    """Full section order: tasks, then mentions, then remaining activity."""
+    _seed_task(vault, task_id="t-a", status="open", owner="flights-agent")
+    _seed_note(vault, note_id="n-mention", owner="research-agent", related=["t-a"])
+    # A task of mine that is not open/claimed: absent from the task section,
+    # present in the activity remainder instead.
+    _seed_task(vault, task_id="t-done", status="done", owner="flights-agent")
+
+    result = _invoke(["session-start", "--owner", "flights-agent", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    reasons = {e["id"]: e["reason"] for e in arr}
+    assert reasons["t-a"] == "task"
+    assert reasons["n-mention"] == "mention"
+    assert reasons["t-done"] == "activity"
+    ids = _ids(arr)
+    assert ids.index("t-a") < ids.index("n-mention") < ids.index("t-done")
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 — mention exclusions                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_self_authored_mention_is_excluded(cfg: Config, vault: Path) -> None:
+    """A mention *by* me of my own node is not surfaced as a mention.
+
+    It may still appear under ``reason="activity"`` (it is a real recent change
+    of mine) — only the mentions section excludes it, per R7's "mentions by me
+    of my own nodes are excluded".
+    """
+    _seed_task(vault, task_id="t-a", status="open", owner="flights-agent")
+    _seed_note(vault, note_id="n-self", owner="flights-agent", related=["t-a"])
+
+    result = _invoke(["session-start", "--owner", "flights-agent", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    assert {e["id"]: e["reason"] for e in arr}.get("n-self") == "activity"
+
+
+def test_mention_outside_window_is_excluded(cfg: Config, vault: Path) -> None:
+    """A mentioner last touched outside the 7-day window never surfaces at all."""
+    _seed_task(vault, task_id="t-a", status="open", owner="flights-agent")
+    _seed_note(
+        vault,
+        note_id="n-old",
+        owner="research-agent",
+        related=["t-a"],
+        updated=datetime.now(UTC) - timedelta(days=10),
+    )
+
+    result = _invoke(["session-start", "--owner", "flights-agent", "--json"])
+    assert result.exit_code == 0, result.output
+    assert "n-old" not in _ids(json.loads(result.stdout))
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 fix round 1 — the note-owned half of the target set,         #
+# and the unset-identity guard that half needs (review findings 1 & 2)         #
+# --------------------------------------------------------------------------- #
+
+
+def test_mention_of_my_note_surfaces_as_mention(cfg: Config, vault: Path) -> None:
+    """The target set is nodes I own *or* have claimed, not tasks only.
+
+    A note I own (no task involved at all) gets mentioned by someone else; the
+    mention must surface exactly like a mentioned task does. This is the one
+    path team-awareness/7 went beyond the brief's own (task-only) scenarios on
+    — tech.md's literal "owner == me or claimed_by == me" — and it needs its
+    own direct coverage, not just inference from the task-mention tests.
+    """
+    _seed_note(vault, note_id="n-my-note", owner="test-agent", title="My idea")
+    _seed_note(
+        vault,
+        note_id="n-reply",
+        owner="other-agent",
+        title="Following up",
+        related=["n-my-note"],
+    )
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    assert {e["id"]: e["reason"] for e in arr}.get("n-reply") == "mention"
+
+
+def test_no_identity_configured_never_floods_mentions_with_the_whole_vault(
+    vault: Path, config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``[core].agent`` and no ``$SHARDS_AGENT``: the note half degrades to
+    empty, exactly like the task half already did — never to "every note in
+    the vault is mine" (review finding 1).
+
+    ``note_list``'s ``owner=None`` means *unfiltered* to ``select_notes``
+    (``if spec.owner is not None and note.owner != spec.owner: continue`` —
+    core/notes.py), unlike ``task_list``'s ``mine``, whose ``task.owner !=
+    spec.me`` degrades to matching nothing when ``spec.me`` is ``None``. Before
+    the fix, an unset identity made ``session_mentions`` treat *every* note as
+    one of "my nodes", so a note mentioning any other note would wrongly
+    surface as ``reason=mention`` even though nothing is actually "mine".
+    """
+    config_path.write_text(
+        "\n".join(
+            (
+                "[core]",
+                f'tolaria_path = "{vault}"',
+                "",
+                "[tasks]",
+                'collections = ["research-agent", "ops-agent"]',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+
+    # Adversarial fixture: a note mentioning another note, neither owned by any
+    # particular caller — with the pre-fix bug, an unset identity would still
+    # have swept the target note into "my nodes" (owner=None fetched *every*
+    # note) and surfaced the mentioner.
+    _seed_note(vault, note_id="n-target", owner="research-agent")
+    _seed_note(vault, note_id="n-mentioner", owner="ops-agent", related=["n-target"])
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    # The mentions section specifically must stay empty — the property this fix
+    # restores. (``recent_activity``'s own ``mine`` matching against an unset
+    # identity is a separate, pre-existing quirk — out of scope here — so
+    # ``n-mentioner``/``n-target`` may still surface under ``reason="activity"``;
+    # what must never happen again is either one tagged ``reason="mention"``.)
+    assert [e for e in arr if e.get("reason") == "mention"] == []
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 — dedupe precedence across all three sections               #
+# --------------------------------------------------------------------------- #
+
+
+def test_mention_matching_own_task_appears_once_under_task(cfg: Config, vault: Path) -> None:
+    """A mentioner that is also one of my own open/claimed tasks: one entry, ``task``.
+
+    Dedupe precedence: tasks are composed first (unchanged from before this
+    unit), so a node that is *both* one of my open/claimed tasks *and* an
+    inbound mentioner of another of my nodes keeps its earlier, task-section
+    slot rather than appearing a second time as a mention.
+    """
+    _seed_task(vault, task_id="t-target", status="open", owner="flights-agent")
+    _seed_task(
+        vault,
+        task_id="t-x",
+        status="open",
+        owner="ops-agent",
+        claimed_by="flights-agent",
+        related=["t-target"],
+    )
+
+    result = _invoke(["session-start", "--owner", "flights-agent", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    matches = [e for e in arr if e["id"] == "t-x"]
+    assert len(matches) == 1
+    assert matches[0]["reason"] == "task"
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 — --team widens activity, never the task queue              #
+# --------------------------------------------------------------------------- #
+
+
+def test_team_widens_activity_half_only(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_sources(monkeypatch, activity=[], tasks=[], calls=calls)
+
+    result = _invoke(["session-start", "--team", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert calls["list_tasks"]["mine"] is True  # task half stays mine
+    assert calls["recent"]["mine"] is False  # activity half widens
+
+
+def test_without_team_activity_stays_mine(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_sources(monkeypatch, activity=[], tasks=[], calls=calls)
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert calls["recent"]["mine"] is True
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 — --owner drives every composed source                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_owner_flag_drives_every_source(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_sources(monkeypatch, activity=[], tasks=[], calls=calls)
+
+    result = _invoke(["session-start", "--owner", "flights-agent", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert calls["list_tasks"]["agent"] == "flights-agent"
+    assert calls["list_notes"]["agent"] == "flights-agent"
+    assert calls["recent"]["agent"] == "flights-agent"
+    assert calls["mentions"]["me"] == "flights-agent"
+
+
+def test_owner_honoured_on_root_side_of_command_name(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``shards --owner X session-start`` is equivalent to ``session-start --owner X``."""
+    calls: dict[str, Any] = {}
+    _patch_sources(monkeypatch, activity=[], tasks=[], calls=calls)
+
+    result = _invoke(["--owner", "flights-agent", "session-start", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert calls["list_tasks"]["agent"] == "flights-agent"
+
+
+def test_no_owner_flag_uses_configured_agent(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, Any] = {}
+    _patch_sources(monkeypatch, activity=[], tasks=[], calls=calls)
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert calls["list_tasks"]["agent"] == cfg.agent == "test-agent"
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 — mentions carry no body under --meta-only                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_meta_only_mention_entries_have_no_body(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mention = {
+        "id": "n-m",
+        "type": "note",
+        "title": "Mention",
+        "path": "/vault/notes/n-m.md",
+        "owner": "research-agent",
+        "claimed_by": None,
+        "updated": datetime.now(UTC).isoformat(),
+    }
+    _patch_sources(monkeypatch, activity=[], tasks=[], mentions=[mention])
+
+    arr = json.loads(_invoke(["session-start", "--meta-only", "--json"]).stdout)
+
+    entry = next(e for e in arr if e["id"] == "n-m")
+    assert entry["reason"] == "mention"
+    assert "body" not in entry
+
+
+def test_full_output_mention_entries_have_no_body_either(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mentions never carry a body — even *without* ``--meta-only``.
+
+    ``_resolve_entry`` reads frontmatter only; there is no body-reading branch
+    for the mentions section to skip in the first place.
+    """
+    mention = {
+        "id": "n-m",
+        "type": "note",
+        "title": "Mention",
+        "path": "/vault/notes/n-m.md",
+        "owner": "research-agent",
+        "claimed_by": None,
+        "updated": datetime.now(UTC).isoformat(),
+    }
+    _patch_sources(monkeypatch, activity=[], tasks=[], mentions=[mention])
+
+    arr = json.loads(_invoke(["session-start", "--json"]).stdout)
+
+    assert "body" not in next(e for e in arr if e["id"] == "n-m")
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 — daemon parity: mentions are daemon-free by construction   #
+# --------------------------------------------------------------------------- #
+
+
+def test_daemon_up_and_down_produce_identical_payload_with_a_mention(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real vault with a live mention: identical JSON, no notice, warm or cold."""
+    _seed_task(vault, task_id="t-target", status="open", claimed_by="test-agent")
+    _seed_note(vault, note_id="n-mentioner", owner="other-agent", related=["t-target"])
+
+    sock_root = Path(tempfile.mkdtemp(prefix="ses-", dir="/tmp"))
+    try:
+        cold_dir = sock_root / "cold"
+        cold_dir.mkdir()
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(cold_dir))
+        cold = _invoke(["session-start", "--json"])
+        assert cold.exit_code == 0, cold.output
+
+        warm_dir = sock_root / "warm"
+        warm_dir.mkdir()
+        with running_daemon(warm_dir / "shards.sock", config=cfg):
+            monkeypatch.setenv("XDG_RUNTIME_DIR", str(warm_dir))
+            warm = _invoke(["session-start", "--json"])
+        assert warm.exit_code == 0, warm.output
+
+        assert warm.stdout == cold.stdout
+        assert json.loads(cold.stdout)  # sanity: the mention actually landed
+        assert "daemon" not in cold.stderr.lower()
+        assert "daemon" not in warm.stderr.lower()
+    finally:
+        shutil.rmtree(sock_root, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/7 carry-over — identity in session-start's text rows          #
+# --------------------------------------------------------------------------- #
+
+
+def test_text_rows_carry_reason_and_identity(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``id / type / reason / owner / claimed_by / title / path`` — one convention.
+
+    Follows ``35f7301``'s ``claimed_by or "-"`` fallback rather than inventing a
+    second text-row style (the carry-over this unit owns: ``recent-activity``'s
+    text rows, and now ``session-start``'s, both render identity).
+    """
+    _patch_sources(
+        monkeypatch,
+        activity=[],
+        tasks=[
+            _task_view(task_id="t-1", status="open", owner="ops-agent", claimed_by="test-agent")
+        ],
+    )
+
+    result = _invoke(["session-start"])
+    assert result.exit_code == 0, result.output
+
+    fields = result.stdout.strip().splitlines()[0].split("\t")
+    assert fields[0] == "t-1"
+    assert fields[2] == "task"
+    assert fields[3] == "ops-agent"
+    assert fields[4] == "test-agent"
+
+
+def test_text_rows_use_dash_for_absent_claimed_by(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_sources(monkeypatch, activity=[], tasks=[_task_view(task_id="t-1", status="open")])
+
+    result = _invoke(["session-start"])
+    assert result.exit_code == 0, result.output
+
+    fields = result.stdout.strip().splitlines()[0].split("\t")
+    assert fields[4] == "-"  # unclaimed
 
 
 # --------------------------------------------------------------------------- #

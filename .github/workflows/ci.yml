@@ -1,18 +1,63 @@
 name: CI
 
 # Minimal gate for cli-toolset-rework/2, extended by cli-toolset-rework/5 with
-# a `ruff format --check` gate. The spec-test-count drift check listed in the
-# gaps table is deliberately NOT added here — the count is still settling and
-# the controller syncs it in the spec during the branch's finishing phase.
+# a `ruff format --check` gate, and hardened by core-hardening/7: a real
+# 3.11/3.12/3.13 matrix, a measured coverage floor, `ty` over tests/ as well as
+# src/, a `uv.lock` freshness check, and a packaging job that actually builds
+# the wheel and exercises both console scripts. The spec-test-count drift
+# check listed in the gaps table is deliberately NOT added here — the count is
+# still settling and the controller syncs it in the spec during the branch's
+# finishing phase.
 
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies (uv.lock must be current)
+        run: uv sync --all-groups --locked --python ${{ matrix.python-version }}
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format (ruff format --check)
+        run: uv run ruff format --check .
+
+      - name: Type-check (ty, src + tests)
+        run: uv run ty check src/ tests/
+
+      - name: Test (pytest, coverage floor enforced via pyproject.toml)
+        run: uv run pytest -q --cov=src --cov-report=term-missing
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -24,20 +69,31 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
-      - name: Install dependencies
-        run: uv sync --all-groups
+      - name: Build sdist + wheel
+        run: uv build
 
-      - name: Lint (ruff check)
-        run: uv run ruff check .
+      - name: Install the built wheel into a clean venv
+        run: |
+          uv venv /tmp/wheel-smoke-venv
+          uv pip install --python /tmp/wheel-smoke-venv/bin/python dist/*.whl
 
-      - name: Format (ruff format --check)
-        run: uv run ruff format --check .
+      - name: Smoke-test the `shards` console script
+        run: |
+          /tmp/wheel-smoke-venv/bin/shards --version
+          /tmp/wheel-smoke-venv/bin/shards --help
 
-      - name: Type-check (ty)
-        run: uv run ty check src/
-
-      - name: Test (pytest)
-        run: uv run pytest -q
-
-      - name: Startup guard (heavy deps off the CLI fast path)
-        run: uv run pytest tests/test_startup_guard.py -q
+      - name: Smoke-test the `shards-mcp` entry point resolves
+        # `shards-mcp` has no arg parsing at all (`main()` is a bare `app.run()`),
+        # so `--help` doesn't print help and exit — it boots the stdio MCP server
+        # and blocks on stdin (core-hardening/7 finding, reported not fixed: an
+        # out-of-scope src/ behaviour change). Resolving the declared
+        # `[project.scripts]` target via importlib.metadata, without calling it,
+        # still catches the exact defect this job exists for — a renamed/removed
+        # entry point — without the hang risk.
+        run: |
+          /tmp/wheel-smoke-venv/bin/python -c "
+          from importlib.metadata import entry_points
+          ep = next(e for e in entry_points(group='console_scripts') if e.name == 'shards-mcp')
+          fn = ep.load()
+          print(f'shards-mcp entry point resolves: {ep.value} -> {fn!r}')
+          "

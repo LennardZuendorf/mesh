@@ -31,7 +31,7 @@ from pathlib import Path
 
 import frontmatter
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 import shards.daemon.client as daemon_client
 from shards.cli.__main__ import app
@@ -92,7 +92,9 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
@@ -127,13 +129,15 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("body", **meta)), encoding="utf-8")
+    post = frontmatter.Post("body")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
 
 
-def _invoke(args: list[str]) -> object:
+def _invoke(args: list[str]) -> Result:
     return CliRunner().invoke(app, args)
 
 
@@ -180,14 +184,16 @@ def test_recent_activity_scans_when_daemon_down(cfg: Config, vault: Path) -> Non
 
     assert {e["id"] for e in out} == {"n-a", "t-b"}
     for e in out:
-        assert set(e.keys()) == {"id", "type", "title", "path", "mtime"}
+        assert set(e.keys()) == {"id", "type", "title", "path", "mtime", "owner", "claimed_by"}
 
 
 def test_recent_activity_fallback_is_scan_recent(
     cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The daemon-down path routes through ``shards.index.warm.scan_recent``."""
-    sentinel = [{"id": "n-z", "type": "note", "title": "Z", "path": "/z.md", "mtime": _NOW}]
+    sentinel: list[dict[str, object]] = [
+        {"id": "n-z", "type": "note", "title": "Z", "path": "/z.md", "mtime": _NOW}
+    ]
     seen: dict[str, object] = {}
 
     def _spy(config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> list[dict[str, object]]:
@@ -289,6 +295,100 @@ def test_filters_apply_before_limit_cap(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# core: identity on the row (team-awareness/6)                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_row_carries_peers_identity_not_callers(cfg: Config, vault: Path) -> None:
+    """A peer's row carries *their* owner/claimed_by, not the calling agent's.
+
+    ``cfg.agent`` is ``test-agent`` (the ``shards_config`` fixture); the row for a
+    note owned by someone else must say so, not silently inherit the caller.
+    """
+    _seed_note(vault, note_id="n-peer", title="Peer's Note", owner="other-agent")
+    _seed_task(
+        vault,
+        task_id="t-peer",
+        title="Peer's Task",
+        status="claimed",
+        owner="other-agent",
+        claimed_by="third-agent",
+    )
+
+    out = recent_activity(cfg, since=None, owner=None, mine=False, limit=20)
+
+    rows = {e["id"]: e for e in out}
+    assert rows["n-peer"]["owner"] == "other-agent"
+    assert rows["n-peer"]["claimed_by"] is None  # notes never carry claimed_by
+    assert rows["t-peer"]["owner"] == "other-agent"
+    assert rows["t-peer"]["claimed_by"] == "third-agent"
+    assert cfg.agent == "test-agent"  # sanity: neither row is the caller's identity
+
+
+def test_json_dumps_survives_owner_and_claimed_by(cfg: Config, vault: Path) -> None:
+    """The row (with its new identity keys) still round-trips through ``json.dumps``."""
+    _seed_task(
+        vault, task_id="t-x", title="X", status="claimed", owner="other-agent", claimed_by="me"
+    )
+
+    out = recent_activity(cfg, since=None, owner=None, mine=False, limit=20)
+
+    encoded = json.dumps(out)  # no datetime leak, no TypeError
+    decoded = json.loads(encoded)
+    assert decoded == out
+
+
+def test_mine_filter_reads_the_row_not_disk_when_owner_key_present(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mine`` costs no per-row disk read once the row already carries ``owner``."""
+    import shards.core.activity as activity_mod
+
+    _seed_note(vault, note_id="n-mine", title="Mine", owner="test-agent")
+    _seed_note(vault, note_id="n-other", title="Theirs", owner="other-agent")
+
+    def _boom(path: str) -> dict[str, object] | None:
+        raise AssertionError("must not re-read frontmatter when the row carries owner")
+
+    monkeypatch.setattr(activity_mod, "_read_meta", _boom)
+
+    out = recent_activity(cfg, since=None, owner=None, mine=True, limit=20)
+
+    assert {e["id"] for e in out} == {"n-mine"}
+
+
+def test_legacy_row_missing_owner_key_falls_back_to_disk(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row from an older peer daemon (no ``owner`` key at all) still filters
+    correctly — via a per-row frontmatter read, exactly like before this unit."""
+    mine_path = _seed_note(vault, note_id="n-mine", title="Mine", owner="test-agent")
+    other_path = _seed_note(vault, note_id="n-other", title="Theirs", owner="other-agent")
+
+    legacy_entries = [
+        {"id": "n-mine", "type": "note", "title": "Mine", "path": str(mine_path), "mtime": _NOW},
+        {
+            "id": "n-other",
+            "type": "note",
+            "title": "Theirs",
+            "path": str(other_path),
+            "mtime": _NOW,
+        },
+    ]
+    for entry in legacy_entries:
+        assert "owner" not in entry  # simulating an old daemon's reply, verbatim
+
+    def _fake(self: DaemonClient, config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> object:
+        return {"entries": legacy_entries}
+
+    monkeypatch.setattr(DaemonClient, "activity_recent", _fake)
+
+    out = recent_activity(cfg, since=None, owner=None, mine=True, limit=20)
+
+    assert {e["id"] for e in out} == {"n-mine"}  # resolved by re-reading disk
+
+
+# --------------------------------------------------------------------------- #
 # CLI: shards recent-activity                                                   #
 # --------------------------------------------------------------------------- #
 
@@ -310,7 +410,7 @@ def test_cli_json_shape(cfg: Config, vault: Path) -> None:
     assert isinstance(arr, list)
     assert {e["id"] for e in arr} == {"n-a", "t-b"}
     for e in arr:
-        assert set(e.keys()) == {"id", "type", "title", "path", "mtime"}
+        assert set(e.keys()) == {"id", "type", "title", "path", "mtime", "owner", "claimed_by"}
 
 
 def test_cli_exit_2_on_bad_since(cfg: Config, vault: Path) -> None:
@@ -367,3 +467,46 @@ def test_cli_no_notice_when_daemon_up(
     result = _invoke(["recent-activity", "--json"])
     assert result.exit_code == 0, result.output
     assert "daemon" not in result.stderr.lower()
+
+
+# --------------------------------------------------------------------------- #
+# CLI text rows: identity carry-over (team-awareness/7)                        #
+# --------------------------------------------------------------------------- #
+#
+# team-awareness/6 put owner/claimed_by on every activity row (JSON, MCP); its
+# brief scoped it to index/warm.py + core/activity.py, leaving the human text
+# rows still silent on "who did that?". team-awareness/7 closes that gap here,
+# following 35f7301's ``claimed_by or "-"`` convention rather than inventing a
+# second text-row style: ``id / type / owner / claimed_by / title / path``.
+
+
+def test_cli_text_rows_carry_owner_and_claimed_by(cfg: Config, vault: Path) -> None:
+    _seed_task(
+        vault,
+        task_id="t-peer",
+        title="Peer's Task",
+        status="claimed",
+        owner="other-agent",
+        claimed_by="third-agent",
+    )
+
+    result = _invoke(["recent-activity"])
+    assert result.exit_code == 0, result.output
+
+    fields = result.stdout.strip().splitlines()[0].split("\t")
+    assert fields[0] == "t-peer"
+    assert fields[1] == "task"
+    assert fields[2] == "other-agent"
+    assert fields[3] == "third-agent"
+    assert fields[4] == "Peer's Task"
+
+
+def test_cli_text_rows_use_dash_for_absent_claimed_by(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-a", title="Alpha", owner="test-agent")
+
+    result = _invoke(["recent-activity"])
+    assert result.exit_code == 0, result.output
+
+    fields = result.stdout.strip().splitlines()[0].split("\t")
+    assert fields[2] == "test-agent"
+    assert fields[3] == "-"  # notes never carry claimed_by

@@ -27,6 +27,12 @@ Acceptance coverage mirrors ``tests/memory/test_build_context.py``:
   seed exits 3.
 * **MCP** — ``shards_graph`` is registered read-only and delegates to
   ``core.context.graph_query``.
+
+``--direction`` (team-awareness/1) adds backlink traversal on top of the same
+BFS — see ``tests/memory/test_inbound.py`` for the ``inbound_ids``/``_inbound_index``
+unit coverage; the direction cases here exercise it through ``graph_query`` and
+the CLI, mirroring the cycle/diamond acceptance shape above one direction at a
+time (``in``, then ``both``).
 """
 
 from __future__ import annotations
@@ -83,7 +89,9 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -117,7 +125,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -212,6 +222,143 @@ def test_diamond_has_no_duplicates(cfg: Config, vault: Path) -> None:
 
     assert out.ids == ["n-a", "n-b", "n-c", "n-d"]
     assert out.edges == [("n-a", "n-b"), ("n-a", "n-c"), ("n-b", "n-d")]
+
+
+# --------------------------------------------------------------------------- #
+# core: --direction — inbound derivation wired into the BFS (team-awareness/1) #
+# --------------------------------------------------------------------------- #
+
+
+def test_direction_in_finds_backlink_with_no_forward_link(cfg: Config, vault: Path) -> None:
+    """The load-bearing case: X's own body/frontmatter names nothing, yet a
+    mention elsewhere is still found — this is the whole point of the unit."""
+    _seed_task(vault, task_id="t-target", title="Target", related=[])
+    _seed_note(vault, note_id="n-mentioner", title="Reply", related=["t-target"])
+
+    out = graph_query(cfg, "t-target", depth=1, direction="in")
+    assert out.ids == ["t-target", "n-mentioner"]
+
+    # The forward query on the mentioner is unaffected by being an inbound source.
+    forward = graph_query(cfg, "n-mentioner", depth=1, direction="out")
+    assert forward.ids == ["n-mentioner", "t-target"]
+
+
+def test_direction_in_edge_is_source_to_target(cfg: Config, vault: Path) -> None:
+    """Inbound edges are emitted source→target (mentioner→mentioned), matching
+    the underlying link direction — never (target, source)."""
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+
+    out = graph_query(cfg, "n-b", depth=1, direction="in")
+    assert out.edges == [("n-a", "n-b")]
+
+
+def test_direction_out_is_unchanged_by_direction_default(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+
+    default = graph_query(cfg, "n-a", depth=1)
+    explicit_out = graph_query(cfg, "n-a", depth=1, direction="out")
+    assert default.ids == explicit_out.ids == ["n-a", "n-b"]
+    assert default.edges == explicit_out.edges == [("n-a", "n-b")]
+
+
+def test_direction_both_diamond_no_duplicates(cfg: Config, vault: Path) -> None:
+    """A→B (out), C→A (in): querying A with both reaches B and C, each once."""
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+    _seed_note(vault, note_id="n-c", title="Cee", related=["n-a"])
+
+    out = graph_query(cfg, "n-a", depth=1, direction="both")
+    assert sorted(out.ids) == ["n-a", "n-b", "n-c"]
+    assert len(out.ids) == 3  # each node exactly once
+    assert set(out.edges) == {("n-a", "n-b"), ("n-c", "n-a")}
+    assert len(out.edges) == 2  # each edge exactly once
+
+
+def test_direction_both_mutual_link_is_one_edge_not_two(cfg: Config, vault: Path) -> None:
+    """A mutual link (A→B and B→A) must not be double-counted under 'both'."""
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+    _seed_note(vault, note_id="n-b", title="Bee", related=["n-a"])
+
+    out = graph_query(cfg, "n-a", depth=5, direction="both")
+    assert out.ids == ["n-a", "n-b"]
+    assert out.edges == [("n-a", "n-b")]  # not also (n-b, n-a)
+
+
+def test_direction_both_self_reference_is_deduplicated(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-a"])
+
+    out = graph_query(cfg, "n-a", depth=3, direction="both")
+    assert out.ids == ["n-a"]
+    assert out.edges == []
+
+
+def test_direction_in_tree_lines_nest_by_discovery_not_link_direction(
+    cfg: Config, vault: Path
+) -> None:
+    """tree_lines() nests the mentioner under the seed it was discovered from,
+    even though the link-direction edge (in ``to_dict()``) points the other way."""
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+
+    out = graph_query(cfg, "n-b", depth=1, direction="in")
+    lines = out.tree_lines()
+    assert len(lines) == 2
+    assert lines[0].startswith("n-b")
+    assert lines[1].split("\t", 1)[0].strip() == "n-a"
+    assert lines[1] != lines[1].lstrip()  # nested under the seed
+    # But the JSON/edge contract still reports the true link direction.
+    assert out.to_dict()["edges"] == [["n-a", "n-b"]]
+
+
+def test_direction_invalid_raises_value_error(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-a", title="Ay")
+    with pytest.raises(ValueError, match="direction"):
+        graph_query(cfg, "n-a", depth=1, direction="sideways")
+
+
+@pytest.mark.parametrize("direction", ["out", "in", "both"])
+def test_direction_unknown_seed_raises_in_every_direction(cfg: Config, direction: str) -> None:
+    with pytest.raises(SeedNotFoundError):
+        graph_query(cfg, "n-nope", depth=1, direction=direction)
+
+
+def test_direction_in_diamond_collapses_shared_source(cfg: Config, vault: Path) -> None:
+    """D→d, B→D and C→D (out), A→{B,C} (out): inbound(D, depth=2) reaches B, C,
+    then A once each — the mirror image of test_diamond_has_no_duplicates."""
+    _seed_note(vault, note_id="n-d", title="Dee")
+    _seed_note(vault, note_id="n-b", title="Bee", related=["n-d"])
+    _seed_note(vault, note_id="n-c", title="Cee", related=["n-d"])
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b", "n-c"])
+
+    out = graph_query(cfg, "n-d", depth=2, direction="in")
+    assert out.ids == ["n-d", "n-b", "n-c", "n-a"]
+    assert set(out.edges) == {("n-b", "n-d"), ("n-c", "n-d"), ("n-a", "n-b")}
+    assert len(out.edges) == 3  # n-a discovered once, not twice
+
+
+def test_direction_in_covers_notes_and_tasks_both_ways(cfg: Config, vault: Path) -> None:
+    """Inbound derivation works with a task mentioning a note and vice versa."""
+    _seed_note(vault, note_id="n-target", title="Target Note")
+    _seed_task(vault, task_id="t-mentioner", title="Mentioning Task", related=["n-target"])
+
+    out = graph_query(cfg, "n-target", depth=1, direction="in")
+    assert out.ids == ["n-target", "t-mentioner"]
+
+
+def test_direction_in_does_not_walk_vault_at_depth_zero(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """depth=0 never expands the seed, so the whole-vault inbound pass is skipped."""
+    _seed_note(vault, note_id="n-a", title="Ay")
+
+    def _boom(config: Config) -> dict[str, list[str]]:
+        raise AssertionError("inbound index built despite depth=0")
+
+    monkeypatch.setattr(context_module, "_inbound_index", _boom)
+    out = graph_query(cfg, "n-a", depth=0, direction="in")
+    assert out.ids == ["n-a"]
 
 
 # --------------------------------------------------------------------------- #
@@ -421,6 +568,80 @@ def test_cli_quiet_emits_ids_only(cfg: Config, vault: Path) -> None:
     assert lines == ["n-a", "n-b"]
 
 
+def test_cli_direction_in_finds_backlink(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+
+    result = _invoke(["graph", "n-b", "--direction", "in", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [n["id"] for n in payload["nodes"]] == ["n-b", "n-a"]
+    assert payload["edges"] == [["n-a", "n-b"]]
+
+
+def test_cli_direction_both_union(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+    _seed_note(vault, note_id="n-c", title="Cee", related=["n-a"])
+
+    result = _invoke(["graph", "n-a", "--direction", "both", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert sorted(n["id"] for n in payload["nodes"]) == ["n-a", "n-b", "n-c"]
+
+
+def test_cli_direction_defaults_to_out(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+
+    result = _invoke(["graph", "n-a", "--json"])
+    assert result.exit_code == 0, result.output
+    assert [n["id"] for n in json.loads(result.stdout)["nodes"]] == ["n-a", "n-b"]
+
+
+def test_cli_direction_invalid_exits_2(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-a", title="Ay")
+
+    result = _invoke(["graph", "n-a", "--direction", "sideways"])
+    assert result.exit_code == 2
+
+
+def test_cli_direction_in_unknown_seed_exits_3(cfg: Config) -> None:
+    result = _invoke(["graph", "n-nope", "--direction", "in"])
+    assert result.exit_code == 3
+
+
+# --------------------------------------------------------------------------- #
+# Daemon-up vs daemon-down parity — no degradation path, so identical either way #
+# --------------------------------------------------------------------------- #
+
+
+def test_direction_in_identical_daemon_up_and_down(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """Inbound derivation never touches the daemon; a running daemon must not
+    change the answer (constraint: "the daemon never gates")."""
+    import shutil
+    import tempfile
+
+    from tests.daemon.conftest import running_daemon
+
+    _seed_task(vault, task_id="t-target", title="Target", related=[])
+    _seed_note(vault, note_id="n-mentioner", title="Reply", related=["t-target"])
+
+    cold = graph_query(cfg, "t-target", depth=2, direction="both").to_dict()
+
+    sock_dir = Path(tempfile.mkdtemp(prefix="brn-inbound-", dir="/tmp"))
+    try:
+        socket_path = sock_dir / "d.sock"
+        with running_daemon(socket_path, config=cfg):
+            warm = graph_query(cfg, "t-target", depth=2, direction="both").to_dict()
+    finally:
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+    assert warm == cold
+
+
 # --------------------------------------------------------------------------- #
 # MCP: shards_graph                                                            #
 # --------------------------------------------------------------------------- #
@@ -439,12 +660,14 @@ def test_mcp_tool_delegates_to_graph_query(cfg: Config, monkeypatch: pytest.Monk
     import shards.mcp.server as server
 
     sentinel = GraphResult(
-        entries=[{"id": "n-seed", "type": "note", "title": "Seed", "path": "/p"}], edges=[]
+        entries=[{"id": "n-seed", "type": "note", "title": "Seed", "path": "/p"}],
+        edges=[],
+        tree_edges=[],
     )
     seen: dict[str, Any] = {}
 
-    def _spy(config: Config, seed_id: str, depth: int = 1) -> GraphResult:
-        seen["seed_id"], seen["depth"] = seed_id, depth
+    def _spy(config: Config, seed_id: str, depth: int = 1, direction: str = "out") -> GraphResult:
+        seen["seed_id"], seen["depth"], seen["direction"] = seed_id, depth, direction
         return sentinel
 
     monkeypatch.setattr(server, "graph_query", _spy)
@@ -452,4 +675,17 @@ def test_mcp_tool_delegates_to_graph_query(cfg: Config, monkeypatch: pytest.Monk
     out = server.shards_graph(seed_id="n-seed", depth=2)
 
     assert out == sentinel.to_dict()
-    assert seen == {"seed_id": "n-seed", "depth": 2}
+    assert seen == {"seed_id": "n-seed", "depth": 2, "direction": "out"}
+
+
+def test_mcp_tool_direction_passthrough(cfg: Config, vault: Path) -> None:
+    """End-to-end (unmocked): ``shards_graph(direction="in")`` finds a backlink."""
+    import shards.mcp.server as server
+
+    _seed_note(vault, note_id="n-b", title="Bee")
+    _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
+
+    payload = server.shards_graph(seed_id="n-b", depth=1, direction="in")
+
+    assert [n["id"] for n in payload["nodes"]] == ["n-b", "n-a"]
+    assert payload["edges"] == [["n-a", "n-b"]]

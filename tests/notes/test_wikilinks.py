@@ -54,16 +54,18 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
 def _seed_tolaria(vault: Path, name: str, meta: dict[str, object]) -> Path:
     """Write a non-shards Markdown file (id is not a shards ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
-    path.write_text(
-        frontmatter.dumps(frontmatter.Post("Tolaria content.", **meta)), encoding="utf-8"
-    )
+    post = frontmatter.Post("Tolaria content.")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -145,6 +147,59 @@ def test_find_dangling_empty_when_all_resolve(vault: Path) -> None:
     _seed_note(vault, note_id="n-t", title="Target")
     _seed_note(vault, note_id="n-r", title="Ref", body="[[Target]] and [[n-t]] and [[t-xxxx]]")
     assert find_dangling(vault) == []
+
+
+def _seed_task(
+    vault: Path,
+    *,
+    task_id: str,
+    rel: str = "tasks/open",
+    body: str = "Task body.",
+) -> Path:
+    """Write a shards task straight to disk (core-hardening/4: dangling covers tasks too)."""
+    meta: dict[str, object] = {
+        "id": task_id,
+        "type": "task",
+        "title": "A Task",
+        "tags": [],
+        "owner": "seed-agent",
+        "status": "open",
+        "created": _WHEN,
+        "updated": _WHEN,
+        "related": [],
+    }
+    folder = vault / rel
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    return path
+
+
+def test_find_dangling_covers_task_bodies(vault: Path) -> None:
+    # root tech.md § B6 / product.md "Vault-health counts cover the whole vault":
+    # a title-form wikilink in a task body that matches no note is dangling too.
+    _seed_task(vault, task_id="t-open1", body="Blocked on [[Missing Design Doc]].")
+    assert "Missing Design Doc" in find_dangling(vault)
+
+
+def test_find_dangling_task_id_form_link_is_not_dangling(vault: Path) -> None:
+    # An id-form link in a task body is never dangling, matching note behaviour.
+    _seed_task(vault, task_id="t-open2", body="See [[n-nope]] and [[t-nope]].")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_task_title_link_resolving_to_a_note_is_not_dangling(vault: Path) -> None:
+    _seed_note(vault, note_id="n-spec", title="Design Doc")
+    _seed_task(vault, task_id="t-open3", body="See [[Design Doc]] for details.")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_dedupes_across_notes_and_tasks(vault: Path) -> None:
+    _seed_note(vault, note_id="n-s1", title="S1", body="[[Phantom]]")
+    _seed_task(vault, task_id="t-open4", body="Also references [[Phantom]].")
+    assert find_dangling(vault) == ["Phantom"]
 
 
 # --------------------------------------------------------------------------- #

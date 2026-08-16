@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import frontmatter
@@ -88,6 +89,37 @@ def read_post(path: Path) -> frontmatter.Post | None:
         return frontmatter.loads(text)
     except yaml.YAMLError:
         return None
+
+
+def read_body(path: Path) -> str:
+    """The Markdown body at ``path``, or ``""`` when it is unreadable/malformed.
+
+    A thin projection of :func:`read_post` for the callers that want only the
+    body and treat "cannot read it" as "no body" — the ``--full`` search hit and
+    the ``session-start`` payload both need exactly this, and neither should
+    grow its own reader.
+    """
+    post = read_post(path)
+    return post.content if post is not None else ""
+
+
+def iter_md(root: Path, *, recursive: bool = True) -> Iterator[Path]:
+    """Yield every ``*.md`` under ``root`` — the one vault-walk primitive.
+
+    ``recursive=True`` (``rglob``) covers a whole subtree — ``notes/``, or a
+    corpus root (``notes/``/``tasks/`` for the warm index and the wikilink
+    scanners). ``recursive=False`` (``glob``) covers a single, non-nested
+    folder — a task lifecycle folder (``tasks/open/``, ``tasks/done/``), which
+    must **not** pick up anything filed a level deeper (``tasks/open/sub/…``)
+    or beside it (``tasks/archive/…``); the daemon's warm-index membership
+    predicates (``in_note_scope``/``in_task_scope``) are pinned to exactly this
+    shape, so ``recursive`` is a parameter of the walk, never a discriminator
+    that changes what gets skipped. A missing ``root`` yields nothing rather
+    than raising — every caller already treats "not created yet" as empty.
+    """
+    if not root.is_dir():
+        return
+    yield from (root.rglob("*.md") if recursive else root.glob("*.md"))
 
 
 def note_folder(note_type: str, tolaria_path: Path) -> Path:
