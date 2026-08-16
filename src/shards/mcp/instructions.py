@@ -13,8 +13,10 @@ what shards is, identity, valid owners, vault, recall mode, the tag-mutation tra
 the coordination protocol, then how to read a result.
 
 **Phrasing.** Ownership language throughout is a *cooperation* convention, never an
-authorization claim: ``owner``/``claimed_by`` are trusted local input shards
-records, not something it verifies or checks before a write goes through (root
+authorization claim. ``owner`` is checked against ``[tasks].collections`` when that
+roster is non-empty (``core/notes.py::_validate_owner``) — a value/spelling check,
+not proof of who is calling; ``claimed_by`` is never checked against it either way.
+Neither field verifies the identity of the agent actually making the call (root
 ``AGENTS.md`` § 6). If a change here reads like "you are not permitted" or "access
 denied", that is the wrong register — say what the values mean and what a
 cooperative agent does with them instead.
@@ -51,9 +53,9 @@ _COORDINATION = (
     "1. Check claimed_by before task_claim; pick another task if someone "
     "already holds it.\n"
     "2. Claim before starting work; release/finish/cancel when you stop.\n"
-    "3. owner (accountable) and claimed_by (working it) can differ — both are "
-    "free-text conventions shards records, not values it checks before a "
-    "write.\n"
+    "3. owner must match the roster when [tasks].collections is set (a value "
+    "check, not an identity check) — claimed_by is never checked against it "
+    "either way; neither proves who is actually calling.\n"
     "4. A `warnings` entry on creation flags a duplicate title — check the "
     "named id first.\n"
     "5. Prefer *_append over rewriting a body you did not write; use graph("
