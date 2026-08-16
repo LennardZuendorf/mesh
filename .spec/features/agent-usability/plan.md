@@ -3,7 +3,7 @@ type: feature-plan
 feature: agent-usability
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 # Feature: Agent Usability — Implementation Plan
@@ -375,18 +375,19 @@ Soft amendments (text only, no gate): /3 and /4 update wording inside /1's block
 
 ## Progress
 
-Not started — spec only. No code written for this feature.
+Complete — all 8 units shipped (status corrected by the core-hardening spec-reconciliation unit,
+from `git log b008ce8..HEAD`).
 
-| Unit | Status |
-|---|---|
-| agent-usability/1 | NOT STARTED |
-| agent-usability/2 | NOT STARTED |
-| agent-usability/3 | NOT STARTED |
-| agent-usability/4 | NOT STARTED |
-| agent-usability/5 | NOT STARTED |
-| agent-usability/6 | NOT STARTED |
-| agent-usability/7 | NOT STARTED |
-| agent-usability/8 | NOT STARTED |
+| Unit | Status | Evidence |
+|---|---|---|
+| agent-usability/1 | DONE | `a06fb26` feat(mcp): add config-driven instructions block; `460202e` fix(mcp): correct owner-vs-identity claim in instructions block |
+| agent-usability/2 | DONE | `7f3403b` feat(mcp): describe every tool parameter in its schema; `e795a97` fix(mcp): type task priority and graph direction as Literal |
+| agent-usability/3 | DONE | `befed8d` feat(core): make bare tag update additive, not a wipe; `dda3ded` fix(core): reject mixed-prefix tag specs instead of guessing |
+| agent-usability/4 | DONE | `f1d0f25` feat(mcp): add shards_health + search-mode marker; `b540bdf` fix(search): make search-mode marker observed, not predicted (round-1 finding); `cf12aaa` test(mcp): update stale recall-gap comment |
+| agent-usability/5 | DONE | `42246b2` feat(mcp): structured errors, typed missing-config |
+| agent-usability/6 | DONE | `efbdeb4` fix(cli): uniform --json/--quiet/--owner flag contract; `b7117bc` docs(spec): settle --owner scope decision |
+| agent-usability/7 | DONE | `ae17229` feat(cli): add shards init, example config, README onboarding |
+| agent-usability/8 | DONE | `ca397c7` feat(plugin): add shards plugin bundle and vault-coherence skill; `c93e4c1` fix(skill): correct false tag-delta claim (round-1 finding) |
 
 ---
 

@@ -3,7 +3,7 @@ type: feature-tech
 feature: core-hardening
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 # Feature: Core Hardening — Architecture
@@ -311,15 +311,15 @@ feature's branch does not edit root files.
 
 | Drift | Evidence | Resolution |
 |---|---|---|
-| `shards project` ships as a top-level verb | `cli/__main__.py` `_LEAVES` vs `features/cli-toolset-rework/product.md:87` ("No `project` verb this branch") and its `plan.md:190` ("`shards --help` shows no new verb") | Correct the cli-toolset-rework spec: the verb shipped and root product.md already documents it. Editable — feature layer, not root. |
-| shards-rebrand marked "in progress" | Root `plan.md:29` vs its own plan (units 1–5 DONE, tree renamed) | **Gated** — root plan row → DONE. |
-| Rebrand gates demand `uv run mypy src/` | `features/shards-rebrand/tech.md:70`, `product.md:74`, `plan.md:153`, `:214` — mypy is not a dependency; the toolchain is `ty` | Rewrite those gates to `ty`. Feature layer — editable. An unrunnable gate is worse than no gate. |
-| Both delete verbs unspec'd | Stance exists only in `AGENTS.md` § 6 | **Gated** — one line in root product.md Non-Goals / tech.md Contracts. |
-| Per-command flag surface undocumented | Lost when the feature specs were compounded | Owned by **agent-usability**; noted here, not fixed here. |
-| `[core].path` → `tolaria_path` alias undocumented | `schemas/config.py:100–102` | **Gated** — root tech.md § Contracts, Config row. |
-| Timestamp format inconsistent | `Z` in model dumps vs `+00:00` in `cli/_output.py:64` and `core/search.py:165` | Pick `Z` (matches `core/tasks.py::_iso_utc` and the on-disk contract); fix the two renderers. Code fix, no root edit. |
-| Stale code docs | `cli/admin.py:21–23` says the `indexed` module "is unbuilt" though it exists and is called at :322–329; `cli/note.py:4–6` and `cli/task.py:4–6` describe unlanded "sibling units" | Rewrite the docstrings. Code fix. |
-| root tech.md:91 vs :105 self-contradiction on exit codes | See B4 | **Gated** — reword :91 after B4 lands. |
+| `shards project` ships as a top-level verb | `cli/__main__.py` `_LEAVES` vs `features/cli-toolset-rework/product.md:87` ("No `project` verb this branch") and its `plan.md:190` ("`shards --help` shows no new verb") | **Resolved (core-hardening/9).** cli-toolset-rework's product.md/plan.md corrected in place: `project` is a read-only lens command, not a fourth mutating verb — root product.md already documented it under `graph`/lenses. |
+| shards-rebrand marked "in progress" | Root `plan.md:29` vs its own plan (units 1–5 DONE, tree renamed) | **Gated, still open** — root plan row → DONE. See [plan.md](plan.md) § Root follow-ups. |
+| Rebrand gates demanded a `mypy` invocation | `features/shards-rebrand/tech.md:70`, `product.md:74`, `plan.md:153`, `:214` — mypy is not a dependency; the toolchain is `ty` | **Resolved (core-hardening/9).** All four gates rewritten to `uv run ty check src/`, with an as-built note explaining why. |
+| Both delete verbs unspec'd | Stance exists only in `AGENTS.md` § 6 | **Gated, still open** — one line in root product.md Non-Goals / tech.md Contracts. See [plan.md](plan.md) § Root follow-ups. |
+| Per-command flag surface undocumented | Lost when the feature specs were compounded | Owned by **agent-usability**; noted here, not fixed here — see `features/agent-usability/tech.md` § Flag contract (settled unit 6). |
+| `[core].path` → `tolaria_path` alias undocumented | `schemas/config.py::load_config` (alias applied ~176–178 as of this unit; the brief's `:100–102` had already drifted) | **Gated, still open** — root tech.md § Contracts, Config row. See [plan.md](plan.md) § Root follow-ups. |
+| Timestamp format inconsistent | `Z` in model dumps vs `+00:00` in `cli/_output.py:64` and `core/search.py:165` | **Resolved (core-hardening/4, `049b804`).** Both renderers now emit `Z`, matching `core/tasks.py::_iso_utc` and the on-disk contract. No root edit needed — this row is closed as of that unit; recorded here for the reconciliation record. |
+| Stale code docs | `cli/note.py:4–6` and `cli/task.py:4–6` described unlanded "sibling units" (`new`/`update`/`claim` "landed", others promised) though every command listed had shipped | **Resolved (core-hardening/9).** Both docstrings rewritten to list every landed command, comment-only. The `cli/admin.py:21–23` "`indexed` module is unbuilt" claim in this row's original wording was not found verbatim in the current file (re-checked at reconciliation time) — no fix applied there; either already corrected by an earlier unit or the original observation was inaccurate. |
+| root tech.md:91 vs :105 self-contradiction on exit codes | See B4 | **Gated, still open — B4 has landed (core-hardening/3), so this is now actionable.** Reword :91 to match :105. See [plan.md](plan.md) § Root follow-ups. |
 
 ---
 

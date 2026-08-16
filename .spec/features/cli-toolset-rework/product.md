@@ -3,7 +3,7 @@ type: feature-product
 feature: cli-toolset-rework
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-07-18
+updated: 2026-08-16
 ---
 
 # Feature: CLI Toolset Rework — Product
@@ -80,11 +80,23 @@ task frontmatter, without introducing a fourth verb.
 - **When** projects are introduced
 - **Then** they ship as a note type + task field + scoped view, explicitly structured so a future `project` verb could graduate from it if usage earns that — no such verb ships this branch
 
+**As shipped (correction from the core-hardening spec-reconciliation unit):** the project-scoped read-lens landed as a top-level
+`shards project <id>` command (`cli/session.py::project_command`, wired in `cli/__main__.py`),
+not only a `task list --project <id>` filter — `shards --help` lists it beside `graph` and
+`build-context`. It is a fourth **read-only lens** alongside those two, not a fourth **verb**
+under the three-verb thesis (`note`/`task`/`search` remain the only mutating primitives) — but
+the non-goal below and the plan's unit-4 verification line were written before that shape was
+chosen and are stale as literally read. Corrected here; no root-spec claim is affected (root
+`product.md` never named `project`).
+
 ---
 
 ## Non-Goals
 
-- No `project` verb this branch — projects are a convention (note type + frontmatter field + scoped view) only.
+- No `project` **verb** this branch — `note`/`task`/`search` remain the only mutating primitives.
+  Projects are a convention (note type + frontmatter field) surfaced through a read-only lens
+  **command**, `shards project <id>` — see the as-shipped note above; corrected by the
+  core-hardening spec-reconciliation unit.
 - No execution of the Phase-3 task-graph build — design captured in [tech.md](tech.md) / [plan.md](plan.md), gated behind this feature's own units.
 - No resolution of the mesh-positioning/overclaiming review — that review is already queued in root [plan.md](../../plan.md) § Open reviews; this feature only surfaces it as a gap to close.
 - No Rust rewrite of the CLI — resolved (shelved) in [tech.md](tech.md) § Decisions; runtime stays Python 3.11+, optimized via the pydantic→msgspec swap and the measured tactics in [tech.md](tech.md) § Workstream B.

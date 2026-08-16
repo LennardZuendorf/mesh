@@ -3,7 +3,7 @@ type: feature-plan
 feature: core-hardening
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 # Feature: Core Hardening — Implementation Plan
@@ -251,8 +251,12 @@ src/shards/mcp/server.py        # same routing for the mirrored tools
 - Daemon down / hung / mid-request kill: every wired read falls back and produces the same
   result plus one stderr notice.
 - `vault.status` and `search.tag_pull` return the same shapes as their fallbacks.
-- No method in the dispatch table raises `503`; `git grep -n "note_get\|task_get" src/` returns
-  nothing.
+- No method in the dispatch table raises `503`; `git grep -n '"note\.get"\|"task\.get"' src/shards/daemon/`
+  returns nothing (as-corrected, core-hardening/9: the original pattern,
+  `git grep -n "note_get\|task_get" src/`, false-positives on the unrelated MCP tool functions
+  `shards_note_get`/`shards_task_get`, which were never removed and are not the RPC methods this
+  scenario is about — re-scoped to the dotted RPC method strings in the daemon module where the
+  dispatch table lives).
 - Filtering/sorting/limiting is not reimplemented: `git grep` shows one implementation of each
   task/note predicate.
 
@@ -458,11 +462,11 @@ user approval.
 | Root file | Correction | Source unit |
 |---|---|---|
 | `plan.md:29` | shards-rebrand `🛠 in progress` → `✅ DONE` (its own plan marks units 1–5 DONE; tree renamed) | 9 |
-| `plan.md` Sequence | Add the `core-hardening` row | 9 |
+| `plan.md` Sequence | Add rows for `core-hardening`, `team-awareness`, and `agent-usability` (root plan.md's Sequence table and `children:` frontmatter only list `shards-rebrand`/`cli-toolset-rework` — all three newer tracks are missing, not just core-hardening). `core-hardening` is 8/9 done (unit 8 outstanding); `team-awareness` is 10/11 done (unit 11 is the gated root-compound step itself); `agent-usability` is 8/8 done. | 9 |
 | `tech.md:91` | Reword to match :105 — codes live on the exception classes, the boundary maps them once | 3 |
 | `tech.md:134` | RPC method table: drop `note.get`, `task.get`, `search.query`, `index.reindex`; mark the rest warm-served | 5 |
 | `tech.md:54` | Invariant 7 becomes true — no text change needed if 5 ships; delete the invariant if it does not | 5 |
-| `tech.md` § Contracts, Config row | Document the `[core].path` → `tolaria_path` alias (`schemas/config.py:100-102`) | 9 |
+| `tech.md` § Contracts, Config row | Document the `[core].path` → `tolaria_path` alias (`schemas/config.py::load_config`, alias applied at lines ~176-178 as of this unit — cite the function, not a line number, since it has already drifted once) | 9 |
 | `tech.md` § Contracts | Document that both delete verbs hard-`unlink` (stance currently lives only in `AGENTS.md` § 6) | 9 |
 | `product.md:23` / `tech.md:137` | Remove `build-context` in favour of `graph` (~390 LOC incl. `tests/memory/test_build_context.py`) — **product decision required** | 8 |
 | `lessons.md` | Record: "a fixed lesson is not a fixed codebase — apply a cross-cutting rule to every reader/writer at fix time, and re-verify it in the unit that claims the fix" | compound |
@@ -471,17 +475,17 @@ user approval.
 
 ## Progress
 
-| Unit | Status |
-|---|---|
-| core-hardening/1 | NOT STARTED |
-| core-hardening/2 | NOT STARTED |
-| core-hardening/3 | NOT STARTED |
-| core-hardening/4 | NOT STARTED |
-| core-hardening/5 | NOT STARTED |
-| core-hardening/6 | NOT STARTED |
-| core-hardening/7 | NOT STARTED |
-| core-hardening/8 | NOT STARTED |
-| core-hardening/9 | NOT STARTED |
+| Unit | Status | Evidence |
+|---|---|---|
+| core-hardening/1 | DONE | `480e20a` fix(core): route task readers through read_post |
+| core-hardening/2 | DONE | `d374029` fix(core): hold allocator lock across create id+write |
+| core-hardening/3 | DONE | `c2f5ff0` fix(cli): map domain/OSError exceptions to exit codes once; `a22a87f` fix(mcp): add ValueError branch to the tool-error mapper (review round 1) |
+| core-hardening/4 | DONE | `049b804` fix(search): recall body hits at default config; dangling covers tasks; `a749bd6` test(mcp): cover shards_search threshold resolution; dedupe with CLI (review round 1) |
+| core-hardening/5 | DONE | `bb9758f` feat(daemon): wire warm list reads and cull stubs; `fb69f13` fix(daemon): scope warm rows and never gate on a bad reply (review round 1); `b73572a` docs(daemon): correct stale admin and daemon-test prose |
+| core-hardening/6 | DONE | `ff99ccb` test(core-hardening): cover locks, sandbox, mcp bodies, daemon lifecycle |
+| core-hardening/7 | DONE | `1efaee0` ci(core-hardening): harden CI gate |
+| core-hardening/8 | NOT STARTED | — (duplication cull; only unit left on this track after 9) |
+| core-hardening/9 | DONE | this unit — spec reconciliation |
 
 ---
 

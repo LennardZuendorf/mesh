@@ -104,15 +104,20 @@ The trap: `tags` is `list[str]` on `note_new` / `task_new` (`server.py:227-237`)
 **full replacement**. `tags="urgent"` wipes the list. Today that is documented only in CLI help
 and a `core` docstring — nowhere an MCP agent can see it.
 
-**Decision — additive default, explicit replace.** A bare comma-list is treated as a delta-add;
-replacement requires an explicit opt-in (a `replace_tags: bool` parameter, or a `=`-prefixed
-value — settled in unit 3). Rationale: the destructive reading of an ambiguous input is the wrong
-default, and this is the one place in shards where a plausible call silently destroys data. This
-**is** a behaviour change to the CLI's `--tags` on update, which is why it is its own unit with
-its own tests, and why the alternative (keep replace, reject un-prefixed input with exit 2) is
-recorded below as the fallback if the break proves unacceptable.
+**Decision (settled in unit 3) — additive default, explicit replace via a leading `=`.** A bare
+comma-list (`tags="x,y"`) is treated as a delta-add. Replacement is opt-in through a
+`=`-prefixed value (`tags="=x,y"`) — not a separate `replace_tags: bool` parameter, so the
+semantics live in one string argument rather than a second field every caller must remember to
+set. Delta syntax (`+x,-y`) is unchanged and orthogonal to the `=` opt-in. A spec mixing
+prefixed and unprefixed tokens with no leading `=` is rejected (`ValueError`, CLI exit 2 / MCP
+`ToolError`) rather than guessed. Rationale: the destructive reading of an ambiguous input is the
+wrong default, and this is the one place in shards where a plausible call silently destroys data.
+This **is** a behaviour change to the CLI's `--tags` on update — `apply_tag_spec` (`core/notes.py`,
+shared by `core/tasks.py`) is the one mechanism, and the semantics sentence
+(`core.notes.TAG_SPEC_SEMANTICS`) is imported verbatim into the MCP parameter description, the
+instructions block, and both CLI `--tags` help strings so the four call sites cannot drift.
 
-Whichever wins: the semantics appear in the parameter description, in the instructions block, and
+As shipped: the semantics appear in the parameter description, in the instructions block, and
 in the CLI help — one sentence, three places, identical wording.
 
 ### New tools

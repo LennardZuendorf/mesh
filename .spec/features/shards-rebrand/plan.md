@@ -3,7 +3,7 @@ type: feature-plan
 feature: shards-rebrand
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-07-06
+updated: 2026-08-16
 ---
 
 # Feature: Shards Rebrand — Implementation Plan
@@ -150,7 +150,10 @@ uv.lock                   # regenerated via `uv lock`
 - Full suite green; lint/type clean.
 - `git grep -in brain` residual is exactly the GBrain link + `brainstorming` under `.agents/skills/spec/`.
 
-**Verification:** `uv run pytest -q` + `uv run ruff check .` + `uv run mypy src/` all pass; `git grep -in brain` matches the expected residual set only. Commit on `feat/phase-1-mvp`.
+**Verification:** `uv run pytest -q` + `uv run ruff check .` + `uv run ty check src/` all pass
+(as-built correction, core-hardening spec-reconciliation unit: `ty`, not `mypy` — the latter is not a project
+dependency); `git grep -in brain` matches the expected residual set only. Commit on
+`feat/phase-1-mvp`.
 
 ---
 
@@ -211,7 +214,8 @@ semantic), half-renames (symbol renamed, caller missed — esp. `_SHARDS_ID_PREF
 (`~/.shards/`, `shards.sock`, `shards.pid`, `SHARDS_AGENT`, `SHARDS_CONFIG_PATH`), MCP tool
 contract break (`shards_*`, entry points `shards`/`shards-mcp`, `FastMCP("shards")`), orphaned
 `~/.brain/` state. Verify empirically: `uv sync` → `uv run pytest -q` (exit code, not tail) →
-`uv run ruff check .` → `uv run mypy src/` → `uv run shards --help` → import `shards.mcp.server`;
+`uv run ruff check .` → `uv run ty check src/` → `uv run shards --help` → import
+`shards.mcp.server` (as-built correction, core-hardening spec-reconciliation unit: `ty`, not `mypy`);
 `git grep -in brain -- ':!.agents'` — confirm residual is exactly the GBrain link + `.agents`
 `brainstorming`. Output: prioritized findings, each `file:line` + concrete fix.
 

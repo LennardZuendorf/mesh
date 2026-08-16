@@ -3,7 +3,7 @@ type: feature-plan
 feature: team-awareness
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 # Feature: Team Awareness — Implementation Plan
@@ -397,14 +397,14 @@ whole-feature gate against core-hardening (see § Feature gate).
 
 | Unit | Status | Evidence |
 |---|---|---|
-| team-awareness/1 | NOT STARTED | — |
-| team-awareness/2 | NOT STARTED | — |
-| team-awareness/3 | NOT STARTED | — |
-| team-awareness/4 | NOT STARTED | — |
-| team-awareness/5 | NOT STARTED | — |
-| team-awareness/6 | NOT STARTED | — |
-| team-awareness/7 | NOT STARTED | — |
-| team-awareness/8 | NOT STARTED | — |
-| team-awareness/9 | NOT STARTED | — |
-| team-awareness/10 | NOT STARTED | — |
-| team-awareness/11 | NOT STARTED (gated) | requires human sign-off before any root spec edit |
+| team-awareness/1 | DONE | `8854319` feat(context): invert related for backlinks via graph --direction |
+| team-awareness/2 | DONE | `f9aa448` feat(task): append text to a task body |
+| team-awareness/3 | DONE | `d001d3a` feat(task): add release + owner reassignment |
+| team-awareness/4 | DONE | `35f7301` feat(task): stale filter, multi-status, agent breakdown |
+| team-awareness/5 | DONE | `3235de3` feat(task): priority ordering + --available filter |
+| team-awareness/6 | DONE | `c0bc525` feat(activity): carry owner/claimed_by on activity rows |
+| team-awareness/7 | DONE | `04e9f4b` feat(session): session-start --team/--owner + mentions; `3b692a8` fix(session): degrade note-mention target set on unset identity |
+| team-awareness/8 | DONE | `06b13a8` feat(notes,tasks): attribute stamps to the acting agent |
+| team-awareness/9 | DONE | `2dc6dea` feat(create): warn on duplicate title at create; `a4606d2` fix(create): mirror slug rule for duplicate-title check |
+| team-awareness/10 | DONE | `9e2f995` feat(mcp): close MCP parity sweep for team-awareness |
+| team-awareness/11 | GATED — NOT RUN | root-layer compound; requires human sign-off before any root spec edit (root AGENTS.md § 0, § write invariants). See the core-hardening plan's § Root follow-ups table for the promote-to-root items this unit would carry. |

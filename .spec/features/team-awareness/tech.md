@@ -3,7 +3,7 @@ type: feature-tech
 feature: team-awareness
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 # Feature: Team Awareness — Architecture
@@ -174,7 +174,11 @@ release its own claim; breaking a peer's claim stays a human/CLI action.
   dumps the full model).
 - `cli/admin.py::vault_status` gains `agents: {identity: {owns_open, claimed, stale_claims}}`,
   computed from the task list it already walks. Human-only, like the rest of `status` — not exposed
-  over MCP.
+  over MCP. `stale_claims` uses a fixed, non-configurable window
+  (`cli/admin.py::_STATUS_STALE_WINDOW = "2d"`, matching the illustrative threshold below) — it is
+  a summary count, not a query surface; an operator who wants a different window runs
+  `task list --status claimed --stale <dur>` directly rather than reconfiguring the summary.
+  (Documented here, core-hardening/9 — the constant previously had no spec anchor.)
 
 "What is stuck" is then a *query*, not a new surface: `task list --status claimed --stale 2d`.
 

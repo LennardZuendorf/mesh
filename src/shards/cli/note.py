@@ -1,9 +1,8 @@
 """``shards note`` command surface.
 
 Command bodies for the ``note`` verb live here (per the entry-point contract in
-``cli/__main__``, which only wires sub-apps together). This unit lands ``append``
-and ``update``; sibling units add ``new``, ``get``, ``list``, ``delete`` to the
-same :data:`note_app`.
+``cli/__main__``, which only wires sub-apps together): ``new``, ``append``,
+``update``, ``get``, ``list``, ``delete`` all live on the same :data:`note_app`.
 
 Output honours the global flags stashed on ``ctx.obj``: ``--quiet`` prints the id
 only, ``--json`` prints a machine object, otherwise a terse human line. Resolution

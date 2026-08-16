@@ -1,9 +1,9 @@
 """``shards task`` command surface.
 
 Command bodies for the ``task`` verb live here (per the entry-point contract in
-``cli/__main__``, which only wires sub-apps together). This unit lands ``new``,
-``update``, and ``claim``; sibling units add ``finish``, ``cancel``, ``list``,
-``get``, and ``delete`` to the same :data:`task_app`.
+``cli/__main__``, which only wires sub-apps together): ``new``, ``update``,
+``append``, ``claim``, ``release``, ``finish``, ``cancel``, ``get``, ``list``,
+and ``delete`` all live on the same :data:`task_app`.
 
 Output honours the global flags stashed on ``ctx.obj``: ``--quiet`` prints the id
 only, ``--json`` prints a machine object (``id``/``status``/``updated``),
