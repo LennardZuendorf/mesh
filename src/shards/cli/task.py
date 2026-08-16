@@ -32,6 +32,7 @@ from shards.core.tasks import (
     find_duplicate_title,
     finish_task,
     get_task,
+    release_task,
     update_task,
 )
 from shards.daemon.client import DaemonClient
@@ -114,6 +115,9 @@ def update_command(
     project: str | None = typer.Option(
         None, "--project", help="Set the project soft link (a project note id)."
     ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="Reassign owner (must be in [tasks].collections)."
+    ),
     blocks: str | None = typer.Option(
         None, "--blocks", help="Replace the blocks list (comma-separated, inert v1)."
     ),
@@ -121,7 +125,11 @@ def update_command(
         None, "--blocked-by", help="Replace the blocked_by list (comma-separated, inert v1)."
     ),
 ) -> None:
-    """Update a task's fields (priority, tags, title, project, blocks/blocked_by)."""
+    """Update a task's fields (priority, tags, title, project, owner, blocks/blocked_by).
+
+    ``--owner`` reassigns accountability and never touches ``claimed_by`` — use
+    ``task claim``/``task release`` for the execution handle.
+    """
     config = load_config()
     with cli_errors():
         task = update_task(
@@ -131,6 +139,7 @@ def update_command(
             tags=tags,
             title=title,
             project=project,
+            owner=owner,
             blocks=_csv(blocks),
             blocked_by=_csv(blocked_by),
         )
@@ -175,6 +184,33 @@ def claim_command(
         task = claim_task(config, task_id, claimer)
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="claimed", fields={"status": task.status}
+    )
+
+
+@task_app.command("release")
+def release_command(
+    ctx: typer.Context,
+    task_id: str = typer.Argument(..., help="Task id."),
+    force: bool = typer.Option(
+        False, "--force", help="Break another agent's claim (cooperation override, not auth)."
+    ),
+    note: str | None = typer.Option(
+        None, "--note", help="Append this text via task append (e.g. why you're releasing)."
+    ),
+) -> None:
+    """Release a claim, returning the task to open (idempotent; exit 4 without --force)."""
+    config = load_config()
+    with cli_errors():
+        # The acting agent = global --owner override, else the configured identity.
+        releaser = getattr(ctx.obj, "owner", None) or config.agent
+        if not releaser:
+            raise ValueError("no agent identity: set [core].agent or pass --owner")
+        task = release_task(config, task_id, releaser, force=force)
+        if note is not None:
+            # Reuses append_task (R2) rather than a second body-writing path.
+            task = append_task(config, task_id, note)
+    _output.emit_mutation(
+        ctx, obj_id=task.id, updated=task.updated, verb="released", fields={"status": task.status}
     )
 
 

@@ -1,4 +1,4 @@
-"""tasks/3 — ``task claim``: atomic, single-winner claim (R2).
+"""tasks/3 — ``task claim``; team-awareness/3 — ``task release`` (R2, R3).
 
 Exercises R2 (Claim). A claim is an atomic check-and-set on ``claimed_by`` under
 the per-entity ``O_EXCL`` lock at ``tasks/.locks/<id>.lock``:
@@ -16,6 +16,17 @@ process exit (it lives in the frontmatter, not the lock file). The whole path
 uses ``storage.locks.acquire`` + ``storage.files.atomic_write`` directly, so it
 behaves identically with the daemon down. The concurrency test proves that under
 a simultaneous N-thread race exactly one claimer wins.
+
+Also exercises R3 (Release): ``release_task`` is the missing inverse of
+``claim_task``, sharing the same lock and write discipline. Its branches mirror
+claim's: terminal → no-op; already unclaimed → idempotent no-op; held by the
+releaser → durable clear (``claimed_by`` → ``None``, ``status`` → ``open``);
+held by another agent → :class:`ClaimConflictError` (exit 4) unless
+``force=True``. ``--force`` is a cooperation-convention override, not an
+authorization check (root ``AGENTS.md`` §6) — holder identity is trusted input,
+never verified. The release→claim tests close the loop this unit exists for:
+proving a freed task is actually claimable by a second agent, not merely that a
+field changed.
 """
 
 from __future__ import annotations
@@ -38,6 +49,7 @@ from shards.core.tasks import (
     ClaimConflictError,
     TaskNotFoundError,
     claim_task,
+    release_task,
 )
 from shards.schemas.config import Config, load_config
 from shards.storage.files import task_folder
@@ -401,6 +413,333 @@ def test_claim_concurrent_single_winner(cfg: Config, vault: Path) -> None:
     # Every loser saw the same, real winner; the file records that winner.
     assert set(conflicts) == {sole_winner}
     assert _reload(path).metadata["claimed_by"] == sole_winner
+
+
+# --------------------------------------------------------------------------- #
+# release_task (core) — held by releaser → durable clear                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_release_holder_clears_claim_and_reopens(cfg: Config, vault: Path) -> None:
+    path = _seed_task(
+        vault, task_id="t-mine", status="claimed", claimed_by="test-agent", updated=_OLD
+    )
+    task = release_task(cfg, "t-mine", "test-agent")
+    assert task.claimed_by is None
+    assert task.status == "open"
+    meta = _reload(path).metadata
+    assert meta["claimed_by"] is None
+    assert meta["status"] == "open"
+    assert meta["updated"] > _OLD  # bumped on the releasing write
+
+
+def test_release_stays_in_open_folder(cfg: Config, vault: Path) -> None:
+    """open|claimed both route to tasks/open/ — a release never moves the file."""
+    _seed_task(vault, task_id="t-stay", status="claimed", claimed_by="test-agent")
+    release_task(cfg, "t-stay", "test-agent")
+    assert (task_folder("open", vault) / "t-stay.md").exists()
+    assert list((vault / "tasks" / "done").glob("*.md")) == []
+
+
+def test_release_second_run_is_noop_writes_nothing(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second release on an already-open task is a no-op that writes nothing."""
+    path = _seed_task(vault, task_id="t-mine", status="claimed", claimed_by="test-agent")
+    release_task(cfg, "t-mine", "test-agent")
+    reopened = _reload(path).metadata["updated"]
+
+    calls: list[Path] = []
+    monkeypatch.setattr(tasks_core, "atomic_write", lambda path, content: calls.append(path))
+    task = release_task(cfg, "t-mine", "test-agent")
+    assert calls == []
+    assert task.status == "open"
+    assert task.claimed_by is None
+    assert _reload(path).metadata["updated"] == reopened
+
+
+# --------------------------------------------------------------------------- #
+# release_task (core) — already unclaimed → idempotent no-op                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_release_unclaimed_task_is_noop(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-open", status="open", claimed_by=None, updated=_OLD)
+    task = release_task(cfg, "t-open", "test-agent")
+    assert task.status == "open"
+    assert task.claimed_by is None
+    meta = _reload(path).metadata
+    assert meta["updated"] == _OLD  # pure no-op: nothing rewritten
+
+
+def test_release_unclaimed_does_not_write(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_task(vault, task_id="t-open", status="open", claimed_by=None)
+    calls: list[Path] = []
+    monkeypatch.setattr(tasks_core, "atomic_write", lambda path, content: calls.append(path))
+    release_task(cfg, "t-open", "test-agent")
+    assert calls == []
+
+
+# --------------------------------------------------------------------------- #
+# release_task (core) — held by another agent → conflict, or --force clears    #
+# --------------------------------------------------------------------------- #
+
+
+def test_release_non_holder_raises_naming_holder(cfg: Config, vault: Path) -> None:
+    path = _seed_task(
+        vault, task_id="t-taken", status="claimed", claimed_by="other-agent", updated=_OLD
+    )
+    with pytest.raises(ClaimConflictError) as exc:
+        release_task(cfg, "t-taken", "test-agent")
+    assert exc.value.existing_owner == "other-agent"
+    assert exc.value.code == 4
+    # The losing attempt leaves the frontmatter untouched.
+    meta = _reload(path).metadata
+    assert meta["claimed_by"] == "other-agent"
+    assert meta["status"] == "claimed"
+    assert meta["updated"] == _OLD
+
+
+def test_release_non_holder_conflict_does_not_write(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_task(vault, task_id="t-taken", status="claimed", claimed_by="other-agent")
+    calls: list[Path] = []
+    monkeypatch.setattr(tasks_core, "atomic_write", lambda path, content: calls.append(path))
+    with pytest.raises(ClaimConflictError):
+        release_task(cfg, "t-taken", "test-agent")
+    assert calls == []
+
+
+def test_release_force_overrides_non_holder_conflict(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-taken", status="claimed", claimed_by="other-agent")
+    task = release_task(cfg, "t-taken", "test-agent", force=True)
+    assert task.claimed_by is None
+    assert task.status == "open"
+    meta = _reload(path).metadata
+    assert meta["claimed_by"] is None
+    assert meta["status"] == "open"
+
+
+# --------------------------------------------------------------------------- #
+# release_task (core) — terminal statuses are never released (idempotent)      #
+# --------------------------------------------------------------------------- #
+
+
+def test_release_done_task_is_noop(cfg: Config, vault: Path) -> None:
+    """A finished task keeps status=done — release never resurrects it to open."""
+    path = _seed_task(
+        vault, task_id="t-done", status="done", owner="other-agent", claimed_by="other-agent"
+    )
+    task = release_task(cfg, "t-done", "other-agent")
+    assert task.status == "done"
+    assert task.claimed_by == "other-agent"
+    meta = _reload(path).metadata
+    assert meta["status"] == "done"
+    assert meta["claimed_by"] == "other-agent"
+    assert meta["updated"] == _OLD  # pure no-op: nothing rewritten
+    assert (task_folder("done", vault) / "t-done.md").exists()
+    assert list((vault / "tasks" / "open").glob("*.md")) == []
+
+
+def test_release_cancelled_task_is_noop(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-cancelled", status="cancelled", claimed_by="test-agent")
+    task = release_task(cfg, "t-cancelled", "test-agent")
+    assert task.status == "cancelled"
+    meta = _reload(path).metadata
+    assert meta["status"] == "cancelled"
+    assert meta["updated"] == _OLD
+
+
+def test_release_terminal_does_not_write(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_task(vault, task_id="t-done", status="done", claimed_by="other-agent")
+    calls: list[Path] = []
+    monkeypatch.setattr(tasks_core, "atomic_write", lambda path, content: calls.append(path))
+    release_task(cfg, "t-done", "other-agent")
+    assert calls == []
+
+
+# --------------------------------------------------------------------------- #
+# release_task (core) — resolves the path *inside* the entity lock (TOCTOU)    #
+# --------------------------------------------------------------------------- #
+
+
+def test_release_resolves_inside_lock(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_task(vault, task_id="t-order", status="claimed", claimed_by="test-agent")
+    events: list[str] = []
+    real_acquire = locks_mod.acquire
+    real_resolve = tasks_core._resolve_task_path
+
+    def spy_acquire(lock_path: Path):  # type: ignore[no-untyped-def]
+        events.append("acquire")
+        return real_acquire(lock_path)
+
+    def spy_resolve(config: Config, task_id: str) -> Path:
+        events.append("resolve")
+        return real_resolve(config, task_id)
+
+    monkeypatch.setattr(locks_mod, "acquire", spy_acquire)
+    monkeypatch.setattr(tasks_core, "_resolve_task_path", spy_resolve)
+    release_task(cfg, "t-order", "test-agent")
+    assert events.index("acquire") < events.index("resolve")
+
+
+def test_release_not_found_raises(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-here")
+    with pytest.raises(TaskNotFoundError):
+        release_task(cfg, "t-nope", "test-agent")
+
+
+# --------------------------------------------------------------------------- #
+# release → claim by a second agent — the handoff loop this unit exists for   #
+# --------------------------------------------------------------------------- #
+
+
+def test_release_then_claim_by_second_agent_succeeds(cfg: Config, vault: Path) -> None:
+    """The abandoned-agent recovery story, end to end: a dead holder's claim is
+    released (with --force, since the caller is not the holder), and a second
+    agent can then claim the freed task and durably record its own claim."""
+    path = _seed_task(vault, task_id="t-abandoned", status="claimed", claimed_by="dead-agent")
+
+    released = release_task(cfg, "t-abandoned", "operator", force=True)
+    assert released.status == "open"
+    assert released.claimed_by is None
+
+    claimed = claim_task(cfg, "t-abandoned", "rescuer-agent")
+    assert claimed.claimed_by == "rescuer-agent"
+    assert claimed.status == "claimed"
+
+    meta = _reload(path).metadata
+    assert meta["claimed_by"] == "rescuer-agent"
+    assert meta["status"] == "claimed"
+
+
+def test_release_by_holder_then_claim_by_second_agent_succeeds(cfg: Config, vault: Path) -> None:
+    """The everyday case: the holder itself releases, then a peer claims it."""
+    path = _seed_task(vault, task_id="t-handoff", status="claimed", claimed_by="test-agent")
+
+    release_task(cfg, "t-handoff", "test-agent")
+    claimed = claim_task(cfg, "t-handoff", "other-agent")
+    assert claimed.claimed_by == "other-agent"
+    assert _reload(path).metadata["claimed_by"] == "other-agent"
+
+
+# --------------------------------------------------------------------------- #
+# CLI — shards task release                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_release_holder_success_exit_0(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-c7d1", status="claimed", claimed_by="test-agent")
+    result = _invoke(["task", "release", "t-c7d1"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "released t-c7d1"
+    meta = _reload(path).metadata
+    assert meta["claimed_by"] is None
+    assert meta["status"] == "open"
+
+
+def test_cli_release_unclaimed_is_noop_exit_0(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-open", status="open", claimed_by=None)
+    result = _invoke(["task", "release", "t-open"])
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_release_non_holder_exits_4(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-taken", status="claimed", claimed_by="other-agent")
+    result = _invoke(["task", "release", "t-taken"])
+    assert result.exit_code == 4, result.output
+    assert "other-agent" in result.output
+
+
+def test_cli_release_force_clears_non_holder_claim(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-taken", status="claimed", claimed_by="other-agent")
+    result = _invoke(["task", "release", "t-taken", "--force"])
+    assert result.exit_code == 0, result.output
+    meta = _reload(path).metadata
+    assert meta["claimed_by"] is None
+    assert meta["status"] == "open"
+
+
+def test_cli_release_not_found_exits_3(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-here")
+    result = _invoke(["task", "release", "t-missing"])
+    assert result.exit_code == 3, result.output
+
+
+def test_cli_release_quiet_emits_id_only(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-c7d1", status="claimed", claimed_by="test-agent")
+    result = _invoke(["--quiet", "task", "release", "t-c7d1"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "t-c7d1"
+
+
+def test_cli_release_json_object(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-c7d1", status="claimed", claimed_by="test-agent")
+    result = _invoke(["--json", "task", "release", "t-c7d1"])
+    assert result.exit_code == 0, result.output
+    obj = json.loads(result.output)
+    assert obj["id"] == "t-c7d1"
+    assert obj["status"] == "open"
+    assert "updated" in obj
+
+
+def test_cli_release_owner_flag_chooses_releaser(cfg: Config, vault: Path) -> None:
+    """The global --owner flag chooses the acting agent for the holder check."""
+    path = _seed_task(vault, task_id="t-c7d1", status="claimed", claimed_by="other-agent")
+    result = _invoke(["--owner", "other-agent", "task", "release", "t-c7d1"])
+    assert result.exit_code == 0, result.output
+    assert _reload(path).metadata["claimed_by"] is None
+
+
+def test_cli_release_note_appends_exactly_one_block(cfg: Config, vault: Path) -> None:
+    """--note produces exactly one appended block via the unit-2 append path."""
+    path = _seed_task(
+        vault, task_id="t-note", status="claimed", claimed_by="test-agent", body="Original body."
+    )
+    result = _invoke(["task", "release", "t-note", "--note", "blocked on infra"])
+    assert result.exit_code == 0, result.output
+    post = _reload(path)
+    assert post.metadata["claimed_by"] is None
+    assert post.metadata["status"] == "open"
+    assert post.content.count("blocked on infra") == 1
+    assert "Original body." in post.content
+
+
+def test_cli_release_agentless_config_exits_2(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no [core].agent and no --owner there is no releaser identity → exit 2."""
+    _seed_task(vault, task_id="t-noagent", status="claimed", claimed_by="someone")
+    cfg_file = tmp_path / "noagent.toml"
+    cfg_file.write_text(
+        "\n".join(
+            (
+                "[core]",
+                f'tolaria_path = "{vault}"',
+                "",
+                "[tasks]",
+                "collections = []",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    result = _invoke(["task", "release", "t-noagent"])
+    assert result.exit_code == 2, result.output
+
+
+def test_release_command_registered() -> None:
+    names = {cmd.name for cmd in task_cli.task_app.registered_commands}
+    assert "release" in names
 
 
 # --------------------------------------------------------------------------- #

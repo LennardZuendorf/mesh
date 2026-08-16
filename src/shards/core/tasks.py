@@ -259,27 +259,40 @@ def update_task(
     tags: str | None = None,
     title: str | None = None,
     project: str | None = None,
+    owner: str | None = None,
     blocks: list[str] | None = None,
     blocked_by: list[str] | None = None,
 ) -> Task:
-    """Update a task's fields in place and bump ``updated`` (R1).
+    """Update a task's fields in place and bump ``updated`` (R1, R3).
 
-    Only the supplied fields change: ``priority``, ``title`` and ``project`` are
-    set directly, ``tags`` mutates the tag list (delta ``+x,-y`` or replacement —
-    see :func:`shards.core.notes.apply_tag_spec`), and ``blocks``/``blocked_by``
-    are replaced verbatim (inert — no readiness logic). The read-modify-write runs
-    under the per-entity ``O_EXCL`` lock and mutates the parsed metadata in place
-    (never rebuilding it), so ``status``, ``claimed_by``, ``owner``, ``related``
-    and any unknown keys round-trip untouched — and a task that carried no
-    ``project`` key keeps carrying none unless ``project`` is passed here. The
-    write is atomic. The id is resolved *inside* the lock (the lock id derives
-    from ``task_id``, not the file location, so it stays stable across a
-    concurrent finish/cancel move), closing the window where a racing finish
-    renames the file open→done before this write. Raises
-    :class:`TaskNotFoundError` when the id resolves to no file, or when the
-    resolved file turns unreadable/malformed before this read (via
-    :func:`shards.storage.files.read_post`) — matching :func:`get_task`.
+    Only the supplied fields change: ``priority``, ``title``, ``project`` and
+    ``owner`` are set directly, ``tags`` mutates the tag list (delta ``+x,-y`` or
+    replacement — see :func:`shards.core.notes.apply_tag_spec`), and
+    ``blocks``/``blocked_by`` are replaced verbatim (inert — no readiness
+    logic). The read-modify-write runs under the per-entity ``O_EXCL`` lock and
+    mutates the parsed metadata in place (never rebuilding it), so ``status``,
+    ``claimed_by``, ``related`` and any unknown keys round-trip untouched — and
+    a task that carried no ``project`` key keeps carrying none unless
+    ``project`` is passed here. The write is atomic. The id is resolved
+    *inside* the lock (the lock id derives from ``task_id``, not the file
+    location, so it stays stable across a concurrent finish/cancel move),
+    closing the window where a racing finish renames the file open→done before
+    this write. Raises :class:`TaskNotFoundError` when the id resolves to no
+    file, or when the resolved file turns unreadable/malformed before this read
+    (via :func:`shards.storage.files.read_post`) — matching :func:`get_task`.
+
+    ``owner`` is **reassignment**, a distinct field and a distinct code path
+    from :func:`claim_task`/:func:`release_task` — those mutate ``claimed_by``
+    (who is executing right now), this mutates ``owner`` (who is accountable).
+    An explicit ``owner`` outside a non-empty ``[tasks].collections`` raises
+    ``ValueError`` (CLI exit 2 via :func:`shards.core.notes._validate_owner`),
+    checked *before* the lock is taken so an unknown identity writes nothing —
+    mirroring :func:`create_task`. Reassignment never touches ``claimed_by``:
+    handing a task to someone and having them start work on it are different
+    actions (the latter is claiming *as* that agent, via the global
+    ``--owner``/``[core].agent`` identity :func:`claim_task` already resolves).
     """
+    _validate_owner(config, owner)
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         post = read_post(path)
@@ -291,6 +304,8 @@ def update_task(
             post.metadata["title"] = title
         if project is not None:
             post.metadata["project"] = project
+        if owner is not None:
+            post.metadata["owner"] = owner
         if tags is not None:
             current = post.metadata.get("tags") or []
             existing = [str(t) for t in current] if isinstance(current, list) else []
@@ -408,6 +423,71 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
             raise ClaimConflictError(str(existing))
         post.metadata["claimed_by"] = claimer
         post.metadata["status"] = "claimed"
+        post.metadata["updated"] = _now()
+        task = Task.model_validate(post.metadata)
+        atomic_write(path, frontmatter.dumps(post))
+    return task
+
+
+def release_task(config: Config, task_id: str, releaser: str, *, force: bool = False) -> Task:
+    """Atomically release a claim, returning the task to ``open`` (R3).
+
+    The missing inverse of :func:`claim_task`: a compare-and-*clear* on
+    ``claimed_by`` under the same per-entity ``O_EXCL`` lock at
+    ``tasks/.locks/<id>.lock``, mirroring its four branches:
+
+    * **Terminal** (``done``/``cancelled``) → idempotent no-op: returns the
+      current task without writing. A finished/cancelled task never carries a
+      live claim to release, and it must never be resurrected into
+      ``tasks/open/`` by a release.
+    * **Already unclaimed** (``claimed_by`` is null) → idempotent no-op: returns
+      the current task without writing (``updated`` untouched). Releasing an
+      unclaimed task is not an error — it is the natural end state of "make sure
+      nobody is holding this".
+    * **Held by `releaser`** → durably clears ``claimed_by``, sets
+      ``status=open``, bumps ``updated``, and writes atomically in place.
+      ``open`` and ``claimed`` both route to ``tasks/open/``, so a release never
+      moves the file.
+    * **Held by a different agent** → raises :class:`ClaimConflictError` (CLI
+      exit 4) naming the holder, leaving the file untouched — *unless*
+      ``force=True``, in which case the clear proceeds exactly as the
+      holder-release branch above.
+
+    ``force`` is a **speed bump and an audit affordance, not an authorization
+    check**: per root ``AGENTS.md`` §6, ``claimed_by``/``--owner`` are trusted
+    local input, not a verified identity, so "holder-only release" is a
+    cooperation convention this function enforces by *default* — it is not, and
+    cannot be, a security boundary. ``force`` exists precisely so a human/CLI
+    operator can recover a claim abandoned by a dead or unresponsive agent
+    without that convention becoming a deadlock.
+
+    The lock only serializes the read-modify-write; it is released after the
+    write and does **not** encode the claim, so a release is durable exactly as
+    a claim is (survives lock TTL expiry and process exit — the state lives in
+    the frontmatter). The whole path uses ``storage.locks.acquire`` +
+    ``storage.files.atomic_write`` directly, so it behaves identically with the
+    daemon down. The id is resolved *inside* the lock (the lock id derives from
+    ``task_id``, not the file location, so it stays stable across a concurrent
+    finish/cancel move), closing the window where a racing finish renames the
+    file open→done before this read. Raises :class:`TaskNotFoundError` when the
+    id resolves to no file, or when the resolved file turns unreadable/malformed
+    before this read (via :func:`shards.storage.files.read_post`) — matching
+    :func:`get_task`.
+    """
+    with hold(_lock_path(config, task_id)):
+        path = _resolve_task_path(config, task_id)
+        post = read_post(path)
+        if post is None:
+            raise TaskNotFoundError(task_id)
+        if post.metadata.get("status") in _TERMINAL_STATUSES:
+            return Task.model_validate(post.metadata)  # idempotent terminal no-op
+        existing = post.metadata.get("claimed_by")
+        if existing is None:
+            return Task.model_validate(post.metadata)  # idempotent already-released no-op
+        if existing != releaser and not force:
+            raise ClaimConflictError(str(existing))
+        post.metadata["claimed_by"] = None
+        post.metadata["status"] = "open"
         post.metadata["updated"] = _now()
         task = Task.model_validate(post.metadata)
         atomic_write(path, frontmatter.dumps(post))

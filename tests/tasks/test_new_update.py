@@ -307,6 +307,58 @@ def test_update_task_not_found_raises(cfg: Config, vault: Path) -> None:
         update_task(cfg, "t-missing", priority="high")
 
 
+# --------------------------------------------------------------------------- #
+# update_task (core) — owner reassignment (team-awareness/3, R3)               #
+# --------------------------------------------------------------------------- #
+
+
+def test_update_task_owner_reassigns(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, owner="operator")
+    task = update_task(cfg, "t-seed", owner="other-agent")
+    assert task.owner == "other-agent"
+    meta = _reload(path).metadata
+    assert meta["owner"] == "other-agent"
+    assert meta["updated"] > _OLD
+
+
+def test_update_task_owner_does_not_disturb_claimed_by(cfg: Config, vault: Path) -> None:
+    """Reassignment (owner) and release/claim (claimed_by) are distinct fields
+    on distinct code paths — updating owner must never touch a live claim."""
+    path = _seed_task(vault, owner="operator", status="claimed", claimed_by="test-agent")
+    update_task(cfg, "t-seed", owner="other-agent")
+    meta = _reload(path).metadata
+    assert meta["owner"] == "other-agent"
+    assert meta["claimed_by"] == "test-agent"
+    assert meta["status"] == "claimed"
+
+
+def test_update_task_unknown_owner_raises_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, owner="operator")
+    before = _reload(path).metadata
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", owner="ghost-agent")
+    after = _reload(path).metadata
+    assert after == before  # nothing written
+
+
+def test_update_task_owner_validated_before_lock(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown owner is rejected before the entity lock is even taken."""
+    _seed_task(vault, owner="operator")
+    seen: list[Path] = []
+    real = locks_mod.acquire
+
+    def spy(lock_path: Path):  # type: ignore[no-untyped-def]
+        seen.append(lock_path)
+        return real(lock_path)
+
+    monkeypatch.setattr(locks_mod, "acquire", spy)
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", owner="ghost-agent")
+    assert seen == []
+
+
 def _seed_malformed(vault: Path, task_id: str = "t-bad") -> Path:
     """Write a ``t-`` id file whose frontmatter is unparseable YAML (open/).
 
@@ -481,6 +533,21 @@ def test_cli_task_update_json_object(cfg: Config, vault: Path) -> None:
     assert obj["id"] == "t-c7d1"
     assert obj["status"] == "claimed"
     assert "updated" in obj
+
+
+def test_cli_task_update_owner_reassigns(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    result = _invoke(["task", "update", "t-c7d1", "--owner", "other-agent"])
+    assert result.exit_code == 0, result.output
+    assert _reload(path).metadata["owner"] == "other-agent"
+
+
+def test_cli_task_update_unknown_owner_exits_2_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    before = _reload(path).metadata
+    result = _invoke(["task", "update", "t-c7d1", "--owner", "ghost-agent"])
+    assert result.exit_code == 2, result.output
+    assert _reload(path).metadata == before
 
 
 # --------------------------------------------------------------------------- #

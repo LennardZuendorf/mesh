@@ -215,9 +215,11 @@ def test_task_verb_gains_no_new_command() -> None:
     """--project rides existing task new/update/list; no new task subcommand.
 
     ``append`` is included because team-awareness/2 legitimately adds it as a
-    sub-command of the existing ``task`` verb (still three top-level verbs) —
-    this assertion guards against a *stray* extra subcommand, not against
-    ``task`` ever growing one.
+    sub-command of the existing ``task`` verb (still three top-level verbs); this
+    unit (team-awareness/3) legitimately adds ``release`` the same way — the
+    missing inverse of the already-built ``claim`` primitive, not a fourth verb —
+    so it is included here too. This assertion guards against a *stray* extra
+    subcommand, not against ``task`` ever growing one.
     """
     import shards.cli.task as task_cli
 
@@ -227,6 +229,7 @@ def test_task_verb_gains_no_new_command() -> None:
         "append",
         "update",
         "claim",
+        "release",
         "finish",
         "cancel",
         "get",
