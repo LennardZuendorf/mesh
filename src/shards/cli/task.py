@@ -9,12 +9,26 @@ Output honours the global flags stashed on ``ctx.obj``: ``--quiet`` prints the i
 only, ``--json`` prints a machine object (``id``/``status``/``updated``),
 otherwise a terse ``<verb> <id>`` line. Resolution failures map to the shared
 exit codes (3 not-found, 2 validation).
+
+Every command also redeclares ``--json``/``--quiet`` (and, where an owner is
+written or filtered, ``--owner``) as its own local option, so a caller can give
+them on either side of the command name (R6, root tech.md § Surface C). Each
+command coalesces its local values with the root callback's globals via
+:func:`shards.cli._output.coalesce_flags`, called once near the top of the
+body. ``claim``/``release`` have no local ``--owner`` of their own — the
+acting identity is the global ``--owner`` (or ``[core].agent``) only, read
+straight off ``ctx.obj``, unchanged by this unit.
+
+``--status``'s filter help text is generated from ``_TASK_STATUSES``
+(``get_args(TaskStatus)``), never a hand-typed list, mirroring ``note.py``'s
+``--type`` fix (R7).
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from typing import get_args
 
 import typer
 from msgspec import ValidationError
@@ -38,7 +52,9 @@ from shards.core.tasks import (
 )
 from shards.daemon.client import DaemonClient
 from shards.schemas.config import load_config
-from shards.schemas.task import Task
+from shards.schemas.task import Task, TaskStatus
+
+_TASK_STATUSES: tuple[str, ...] = get_args(TaskStatus)
 
 task_app = typer.Typer(
     name="task",
@@ -73,9 +89,12 @@ def new_command(
     blocked_by: str | None = typer.Option(
         None, "--blocked-by", help="Comma-separated task ids blocking this (inert v1)."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Create a task in tasks/open/ (status open, unclaimed)."""
     config = load_config()
+    _, _, owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet, owner=owner)
     tag_list = _csv(tags) or []
     with cli_errors():
         # Checked before the write, so a hit names the *prior* id rather than the
@@ -123,13 +142,23 @@ def update_command(
     blocked_by: str | None = typer.Option(
         None, "--blocked-by", help="Replace the blocked_by list (comma-separated, inert v1)."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Update a task's fields (priority, tags, title, project, owner, blocks/blocked_by).
 
     ``--owner`` reassigns accountability and never touches ``claimed_by`` — use
-    ``task claim``/``task release`` for the execution handle.
+    ``task claim``/``task release`` for the execution handle. Deliberately
+    **not** coalesced with the global ``--owner``: unlike a create (which
+    always writes *some* owner), an update's owner is opt-in reassignment —
+    folding the ambient "acting identity" flag into an unrelated ``--priority``/
+    ``--tags`` update would silently reassign accountability nobody asked to
+    change (the same silent-mutation risk R3 rejected for bare-list tags).
+    Only an explicit local ``--owner`` reassigns; the global flag still
+    coalesces for ``--json``/``--quiet``.
     """
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         task = update_task(
             config,
@@ -158,9 +187,12 @@ def append_command(
     timestamp: bool = typer.Option(
         False, "--timestamp", help="Prepend an ISO-8601 UTC timestamp line."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Append text to a task's body (no status/folder change; mirrors note append)."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         task = append_task(config, task_id, text, section=section, timestamp=timestamp)
     _output.emit_mutation(
@@ -172,9 +204,12 @@ def append_command(
 def claim_command(
     ctx: typer.Context,
     task_id: str = typer.Argument(..., help="Task id."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Claim a task for the acting agent (atomic; exit 4 if held by another)."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         # The acting agent = global --owner override, else the configured identity.
         claimer = getattr(ctx.obj, "owner", None) or config.agent
@@ -196,9 +231,12 @@ def release_command(
     note: str | None = typer.Option(
         None, "--note", help="Append this text via task append (e.g. why you're releasing)."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Release a claim, returning the task to open (idempotent; exit 4 without --force)."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         # The acting agent = global --owner override, else the configured identity.
         releaser = getattr(ctx.obj, "owner", None) or config.agent
@@ -220,9 +258,12 @@ def finish_command(
     outcome: str | None = typer.Option(
         None, "--outcome", help="Outcome text recorded under the ## Outcome section."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Finish a task: append an outcome and move it to tasks/done/ (idempotent)."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         task = finish_task(config, task_id, outcome)
     _output.emit_mutation(
@@ -237,9 +278,12 @@ def cancel_command(
     reason: str | None = typer.Option(
         None, "--reason", help="Reason recorded under the ## Cancelled section."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Cancel a task: append a reason and move it to tasks/done/ (idempotent)."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         task = cancel_task(config, task_id, reason)
     _output.emit_mutation(
@@ -273,9 +317,12 @@ def get_command(
     task_id: str = typer.Argument(..., help="Task id."),
     full: bool = typer.Option(False, "--full", help="Show the complete body (no truncation)."),
     meta_only: bool = typer.Option(False, "--meta-only", help="Frontmatter only; no body."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Read a task: frontmatter + a 200-char body preview by default."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         try:
             view = get_task(config, task_id)
@@ -305,7 +352,12 @@ def get_command(
 def list_command(
     ctx: typer.Context,
     status: str | None = typer.Option(
-        None, "--status", help="Filter by status; comma-separated for a union (open,claimed)."
+        None,
+        "--status",
+        help=(
+            f"Filter by status (comma-separated union, e.g. open,claimed): "
+            f"{' | '.join(_TASK_STATUSES)}."
+        ),
     ),
     owner: str | None = typer.Option(None, "--owner", help="Filter by exact owner."),
     mine: bool = typer.Option(False, "--mine", help="Only tasks I own or have claimed."),
@@ -333,9 +385,12 @@ def list_command(
         help="updated | created | title | priority (default: updated, or priority with --available).",
     ),
     limit: int = typer.Option(20, "--limit", help="Cap the number of results."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """List shards tasks (open and done) with filters, sort and limit."""
     config = load_config()
+    _, _, owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet, owner=owner)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     # Honour --mine whether it lands on this command or as a global flag.
     mine_flag = mine or getattr(ctx.obj, "mine", False)
@@ -391,9 +446,12 @@ def delete_command(
     force: bool = typer.Option(
         False, "--force", help="Skip the confirmation prompt and delete immediately."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Hard-delete a task. Prompts on a TTY; refuses on a machine path without --force."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         if not force:
             _output.refuse_delete_if_non_interactive(ctx, tty=_is_tty())

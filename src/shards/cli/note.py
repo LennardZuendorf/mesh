@@ -8,6 +8,18 @@ same :data:`note_app`.
 Output honours the global flags stashed on ``ctx.obj``: ``--quiet`` prints the id
 only, ``--json`` prints a machine object, otherwise a terse human line. Resolution
 failures map to the shared exit codes (3 not-found, 2 validation/ambiguous).
+
+Every command also redeclares ``--json``/``--quiet`` (and, where an owner is
+written or filtered, ``--owner``) as its own local option, so a caller can give
+them on either side of the command name (R6, root tech.md § Surface C). Each
+command coalesces its local values with the root callback's globals via
+:func:`shards.cli._output.coalesce_flags`, called once near the top of the
+body — see that function's docstring for the mechanism.
+
+``--type``'s help text is generated from ``_NOTE_TYPES`` (``get_args(NoteType)``),
+never a hand-typed list, so it cannot omit a value the schema actually accepts
+(the defect this unit fixes: help said "note | log | decision | reference"
+while validation also accepted ``project``).
 """
 
 from __future__ import annotations
@@ -80,16 +92,19 @@ def _resolve_body(ctx: typer.Context, body: str | None, body_file: str | None) -
 def new_command(
     ctx: typer.Context,
     title: str = typer.Argument(..., help="Note title."),
-    note_type: str = typer.Option("note", "--type", help="note | log | decision | reference."),
+    note_type: str = typer.Option("note", "--type", help=f"Note type: {' | '.join(_NOTE_TYPES)}."),
     tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags."),
     owner: str | None = typer.Option(
         None, "--owner", help="Owner identity (must be in [tasks].collections)."
     ),
     body: str | None = typer.Option(None, "--body", help="Note body text."),
     body_file: str | None = typer.Option(None, "--file", help="Read the body from this file."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Create a note (routed by type); body from --body, --file, or $EDITOR (TTY)."""
     config = load_config()
+    _, _, owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet, owner=owner)
     with cli_errors():
         if note_type not in _NOTE_TYPES:
             raise ValueError(f"invalid note type: {note_type}")
@@ -124,9 +139,12 @@ def append_command(
     timestamp: bool = typer.Option(
         False, "--timestamp", help="Prepend an ISO-8601 UTC timestamp line."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Append text to a note's body (optionally under a section / timestamped)."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         note = append_note(config, target, text, section=section, timestamp=timestamp)
     _output.emit_mutation(
@@ -140,11 +158,16 @@ def update_command(
     target: str = typer.Argument(..., help="Note id or slug."),
     tags: str | None = typer.Option(None, "--tags", help=TAG_SPEC_SEMANTICS),
     new_type: str | None = typer.Option(
-        None, "--type", help="Move the note to this type's folder."
+        None,
+        "--type",
+        help=f"Move the note to this type's folder: {' | '.join(_NOTE_TYPES)}.",
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Update a note's fields (tags, type — moving its folder)."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         note = update_note(config, target, tags=tags, new_type=new_type)
     _output.emit_mutation(
@@ -173,9 +196,12 @@ def get_command(
     full: bool = typer.Option(False, "--full", help="Show the complete body (no truncation)."),
     meta_only: bool = typer.Option(False, "--meta-only", help="Frontmatter only; no body."),
     related: bool = typer.Option(False, "--related", help="Only the related list."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Read a note: frontmatter + a 200-char body preview by default."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         try:
             view = get_note(config, target)
@@ -218,9 +244,12 @@ def list_command(
     since: str | None = typer.Option(None, "--since", help="Recency: 7d or an ISO date."),
     sort: str = typer.Option("updated", "--sort", help="updated | created | title."),
     limit: int = typer.Option(20, "--limit", help="Cap the number of results."),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """List shards notes (id-bearing files only) with filters, sort and limit."""
     config = load_config()
+    _, _, owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet, owner=owner)
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     with cli_errors():
         # Served from the daemon's warm index when it is up, from the identical
@@ -263,9 +292,12 @@ def delete_command(
     force: bool = typer.Option(
         False, "--force", help="Skip the confirmation prompt and delete immediately."
     ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON output."),
+    quiet: bool = typer.Option(False, "--quiet", help="IDs only; suppress stderr notes."),
 ) -> None:
     """Hard-delete a note. Prompts on a TTY; refuses on a machine path without --force."""
     config = load_config()
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
         note_id = resolve_slug(config, target)
         if not force:

@@ -13,6 +13,19 @@ lists every command because rendering the summary resolves each one.
 
 Global flags (`--json`, `--quiet`, `--owner`, `--mine`) are parsed here and
 stashed on the Typer context (`ctx.obj`) so every command inherits them.
+
+**R6 flag contract** (`.spec/features/agent-usability/tech.md` § Surface C):
+every non-admin leaf/verb command also redeclares `--json`/`--quiet` (and,
+where meaningful, `--owner`) as its own local option and coalesces it with
+these globals via `shards.cli._output.coalesce_flags`, so a caller can give a
+flag on either side of the command name with identical effect. `--owner`
+means one thing everywhere it is accepted: the identity this invocation acts
+as — honoured on creation (defaults the written `owner`) and on filters
+(`note list`/`task list`/`search`), unchanged on `task claim`/`task
+release`/`session-start` (already read it), and deliberately *not* folded
+into `task update`'s reassignment `--owner` (opt-in only — see
+`cli/task.py::update_command`). Admin commands (`daemon`/`status`/`reindex`)
+are out of scope for this contract; their reader is a later unit's refactor.
 """
 
 from __future__ import annotations

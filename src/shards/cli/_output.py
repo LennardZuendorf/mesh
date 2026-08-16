@@ -10,6 +10,21 @@ the root callback stashes on ``ctx.obj``. The interactive-tty check stays a
 module-level seam in each command module (the delete tests fake it by path), so
 :func:`refuse_delete_if_non_interactive` takes the tty result as an argument
 rather than probing stdin itself.
+
+**The R6 flag contract** (root tech.md § Surface C): ``--json`` / ``--quiet`` /
+``--owner`` are accepted on either side of the command name, with identical
+effect, on every non-admin command. The root callback parses the *global*
+side; a leaf command that redeclares one of these flags for the *local* side
+calls :func:`coalesce_flags` once, early, so every later read through
+``is_json`` / ``is_quiet`` / ``emit_mutation`` / ``refuse_delete_if_non_interactive``
+sees the merged value with no further plumbing. This is the one shared
+coalescing implementation — ``note``, ``task``, ``search``, and the session
+lenses (``cli/session.py``) all call it rather than each hand-rolling the
+OR-with-``ctx.obj`` logic. It is deliberately *not* the reader unification
+that later collapses this module's ``is_json``/``is_quiet`` with
+``admin.py``'s and ``session.py``'s own private booleans into one — that is a
+separate, later unit's refactor (core-hardening/8); this is just the plumbing
+needed to make the observable contract true.
 """
 
 from __future__ import annotations
@@ -47,6 +62,35 @@ def is_json(ctx: typer.Context) -> bool:
 def is_machine(ctx: typer.Context) -> bool:
     """A non-interactive path: ``--json`` or ``--quiet`` was given."""
     return is_json(ctx) or is_quiet(ctx)
+
+
+def coalesce_flags(
+    ctx: typer.Context,
+    *,
+    json_out: bool = False,
+    quiet: bool = False,
+    owner: str | None = None,
+) -> tuple[bool, bool, str | None]:
+    """Fold a leaf command's own ``--json``/``--quiet``/``--owner`` into ``ctx.obj``.
+
+    A flag given on either side of the command name takes effect — the local
+    value wins when the caller gave one; otherwise the root callback's global
+    value (parsed ahead of the command name) applies. Call this once, early,
+    in any leaf command that redeclares these flags for local-side parity;
+    everything downstream (:func:`is_json`, :func:`is_quiet`,
+    :func:`emit_mutation`, :func:`refuse_delete_if_non_interactive`) reads
+    ``ctx.obj`` and so sees the merged value automatically. Returns the three
+    coalesced values too, for callers that need them as plain locals (e.g. to
+    pass ``owner`` into ``create_note``/``create_task``).
+
+    A command with no local ``--owner`` of its own simply omits the
+    ``owner=`` kwarg — the global value (if any) round-trips through
+    ``ctx.obj`` unchanged.
+    """
+    ctx.obj.json = json_out or is_json(ctx)
+    ctx.obj.quiet = quiet or is_quiet(ctx)
+    ctx.obj.owner = owner if owner is not None else getattr(ctx.obj, "owner", None)
+    return ctx.obj.json, ctx.obj.quiet, ctx.obj.owner
 
 
 def preview(body: str, full: bool) -> str:

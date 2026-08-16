@@ -26,6 +26,16 @@ JSON payload.
 actually reachable/in-use right now versus the substring fallback, so silent
 degradation stops being silent. It short-circuits before any query/tag-pull
 runs and never shells ``indexed`` itself, so it works with ``indexed`` absent.
+
+``--json``/``--quiet``/``--owner`` are redeclared locally (R6, root tech.md §
+Surface C) so a caller can give them on either side of the command name,
+coalesced with the root callback's globals via
+:func:`shards.cli._output.coalesce_flags`. ``--json`` is accepted for parity
+but has no separate effect — output is JSON-shaped by design regardless.
+``--quiet`` does have an effect here: it is exactly the flag
+:func:`~shards.core.search.query_search` already took to suppress the
+substring-fallback degradation notice, previously reachable only via the
+global side.
 """
 
 from __future__ import annotations
@@ -34,6 +44,7 @@ import json
 
 import typer
 
+from shards.cli import _output
 from shards.cli._errors import cli_errors
 from shards.core.search import hit_dict, query_search, resolve_effective_threshold, search_health
 from shards.daemon.client import DaemonClient
@@ -76,10 +87,18 @@ def search_command(
         "--health",
         help="Report indexed reachability vs. substring fallback (JSON), then exit.",
     ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Machine-readable JSON output (search's default; accepted for parity).",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", help="Suppress the substring-fallback degradation notice."
+    ),
 ) -> None:
     """Search notes + tasks. ``--tags`` (no query) pulls by tag; a query scores by match."""
     config = load_config()
-    quiet = bool(getattr(ctx.obj, "quiet", False))
+    _, quiet, owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet, owner=owner)
 
     if health:
         # Status check, not a recall path: report the gates and exit before any

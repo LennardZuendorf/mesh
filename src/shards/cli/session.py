@@ -18,9 +18,13 @@ straight off disk), so unlike ``recent-activity`` it has no degradation path and
 emits **no** infrastructure notice; an unresolvable seed exits 3.
 
 Cross-cutting flags (``--json`` / ``--quiet`` / ``--owner`` / ``--mine``) are
-accepted both here and on the root callback; the two are coalesced so
-``shards --mine recent-activity`` and ``shards recent-activity --mine`` behave
-identically.
+accepted both here and on the root callback; the two are coalesced (R6, root
+tech.md § Surface C) so ``shards --mine recent-activity`` and
+``shards recent-activity --mine`` behave identically. ``--json``/``--quiet``/
+``--owner`` route through the one shared :func:`shards.cli._output.coalesce_flags`
+— the same function ``note``/``task``/``search`` call — rather than a private
+per-module copy; ``--mine`` stays a direct inline OR here since it has no
+counterpart on those other verbs.
 
 ``session-start`` (memory/4; widened by team-awareness/7) is the warm-start
 composite: it merges the caller's live ``open``/``claimed`` task queue, inbound
@@ -54,6 +58,7 @@ from typing import Any
 
 import typer
 
+from shards.cli import _output
 from shards.cli._errors import cli_errors
 from shards.core.lenses import (
     SESSION_SINCE,
@@ -78,27 +83,6 @@ def _daemon_up() -> bool:
     Kept as a module-level seam so tests can fake daemon liveness without a socket.
     """
     return DaemonClient().is_up()
-
-
-def _coalesce(ctx: typer.Context, json_out: bool, quiet: bool) -> tuple[bool, bool]:
-    """Coalesce the leaf ``--json``/``--quiet`` flags with the root callback's globals.
-
-    A flag given on either side of the command name takes effect — shared by
-    every lens command below.
-    """
-    return (
-        json_out or bool(getattr(ctx.obj, "json", False)),
-        quiet or bool(getattr(ctx.obj, "quiet", False)),
-    )
-
-
-def _coalesce_owner(ctx: typer.Context, owner: str | None) -> str | None:
-    """Coalesce a leaf ``--owner`` with the root callback's global ``--owner``.
-
-    Matches :func:`recent_activity_command`'s own inline coalesce — a flag given
-    on either side of the command name takes effect.
-    """
-    return owner if owner is not None else getattr(ctx.obj, "owner", None)
 
 
 def _identity_columns(entry: dict[str, Any]) -> tuple[str, str]:
@@ -131,8 +115,9 @@ def recent_activity_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect.
-    json_out, quiet = _coalesce(ctx, json_out, quiet)
-    owner = _coalesce_owner(ctx, owner)
+    json_out, quiet, owner = _output.coalesce_flags(
+        ctx, json_out=json_out, quiet=quiet, owner=owner
+    )
     mine = mine or bool(getattr(ctx.obj, "mine", False))
 
     with cli_errors():
@@ -197,8 +182,9 @@ def session_start_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag on
     # either side of the command name takes effect.
-    json_out, quiet = _coalesce(ctx, json_out, quiet)
-    owner = _coalesce_owner(ctx, owner)
+    json_out, quiet, owner = _output.coalesce_flags(
+        ctx, json_out=json_out, quiet=quiet, owner=owner
+    )
     effective_config = as_effective_agent(config, owner)
     me = effective_config.agent
 
@@ -265,7 +251,7 @@ def build_context_command(
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect. This lens is daemon-free —
     # every node is read off disk — so there is no degradation notice.
-    json_out, quiet = _coalesce(ctx, json_out, quiet)
+    json_out, quiet, _owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
 
     with cli_errors():
         entries = build_context(config, seed_id, depth=depth)
@@ -309,7 +295,7 @@ def graph_command(
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect. Same daemon-free traversal
     # as build-context, so there is no degradation notice.
-    json_out, quiet = _coalesce(ctx, json_out, quiet)
+    json_out, quiet, _owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
 
     with cli_errors():
         result = graph_query(config, seed_id, depth=depth, direction=direction)
@@ -345,7 +331,7 @@ def project_command(
 
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect.
-    json_out, quiet = _coalesce(ctx, json_out, quiet)
+    json_out, quiet, _owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
 
     with cli_errors():
         result = project_view(config, project_id)
