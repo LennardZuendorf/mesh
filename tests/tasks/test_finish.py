@@ -145,6 +145,86 @@ def test_finish_timestamp_line_precedes_outcome(cfg: Config, vault: Path) -> Non
 
 
 # --------------------------------------------------------------------------- #
+# team-awareness/8 — ## Outcome names the acting agent                          #
+# --------------------------------------------------------------------------- #
+
+
+def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
+    """Write a standalone ``config.toml`` identifying as ``agent`` (or with no
+    ``[core].agent`` at all when ``agent`` is ``None``), pointed at ``vault``, so
+    a test can hold two distinct-identity ``Config`` objects over one vault."""
+    lines = ["[core]", f'tolaria_path = "{vault}"']
+    if agent is not None:
+        lines.append(f'agent = "{agent}"')
+    path = tmp_path / f"{agent or 'noagent'}.toml"
+    path.write_text("\n".join([*lines, ""]), encoding="utf-8")
+    return path
+
+
+def test_finish_outcome_names_the_acting_agent(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8: a task owned by flights-agent, finished by tolaria-agent — the
+    ``## Outcome`` stamp names the finisher, never the task's ``owner``."""
+    _seed_task(vault, status="open", owner="flights-agent")
+    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    finisher_cfg = load_config()
+
+    finish_task(finisher_cfg, "t-seed", "Shipped it.")
+    content = _reload(_done_path(vault)).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert match.start() == 0
+    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert "flights-agent" not in stamp_line
+
+
+def test_finish_unset_identity_outcome_stamp_is_bare_iso(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``[core].agent``/``$SHARDS_AGENT`` degrades to a bare ISO line — no
+    stray trailing separator, no crash."""
+    _seed_task(vault, status="open")
+    cfg_file = _write_agent_config(tmp_path, vault, None)
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    noagent_cfg = load_config()
+    assert noagent_cfg.agent is None
+
+    finish_task(noagent_cfg, "t-seed", "Shipped it.")
+    content = _reload(_done_path(vault)).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert stamp_line == match.group(0)
+
+
+def test_finish_idempotent_rerun_by_a_different_agent_adds_nothing(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-finishing an already-done task is a no-op regardless of who calls it —
+    the first finisher's attribution is never overwritten by a second agent."""
+    body = "Task body.\n\n## Outcome\n\n2026-01-01T09:00:00Z — first-agent\nFirst outcome."
+    _seed_task(vault, status="done", body=body, updated=_OLD)
+    cfg_file = _write_agent_config(tmp_path, vault, "second-agent")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    second_cfg = load_config()
+
+    task = finish_task(second_cfg, "t-seed", "Second outcome.")
+    assert task.status == "done"
+    post = _reload(_done_path(vault))
+    assert post.content.count("## Outcome") == 1
+    assert "first-agent" in post.content
+    assert "second-agent" not in post.content
+    assert "Second outcome." not in post.content
+    assert post.metadata["updated"] == _OLD  # no rewrite
+
+
+# --------------------------------------------------------------------------- #
 # finish_task (core) — optional outcome                                         #
 # --------------------------------------------------------------------------- #
 

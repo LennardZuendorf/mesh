@@ -34,6 +34,7 @@ from shards.core.notes import (
     _append_to_end,
     _append_under_section,
     _format_block,
+    _format_stamp,
     _matches_tags,
     _opt_datetime,
     _opt_int,
@@ -396,6 +397,10 @@ def append_task(
     the amended body, exactly as notes, so a ``[[…]]`` mention in the appended
     text becomes discoverable via ``graph --direction in`` from the mentioned id.
 
+    A ``timestamp`` line names the acting agent (``<iso> — <agent>``,
+    team-awareness/8), resolved from ``config.agent`` — the identity of *this*
+    call, not the task's ``owner`` — exactly as :func:`shards.core.notes.append_note`.
+
     Mechanics mirror :func:`update_task`: the id is resolved *inside*
     ``hold(_lock_path(config, task_id))`` (the lock name derives from ``task_id``,
     not the file location) so a concurrent finish/cancel move cannot race the
@@ -405,7 +410,7 @@ def append_task(
     before this read (via :func:`shards.storage.files.read_post`) — matching
     :func:`get_task`.
     """
-    block = _format_block(text, timestamp)
+    block = _format_block(text, timestamp, config.agent)
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         post = read_post(path)
@@ -561,10 +566,14 @@ def _terminate_task(
 ) -> Task:
     """Shared machinery behind :func:`finish_task` and :func:`cancel_task`.
 
-    Under the per-entity ``O_EXCL`` lock: append ``heading`` + an ISO-8601 UTC
-    timestamp line (and optional ``text``) to the body, set ``status``, bump
-    ``updated`` (``created`` untouched), recompute ``related`` from the amended
-    body, write atomically in place, then move the file into ``tasks/done/``.
+    Under the per-entity ``O_EXCL`` lock: append ``heading`` + a stamp line
+    (and optional ``text``) to the body, set ``status``, bump ``updated``
+    (``created`` untouched), recompute ``related`` from the amended body, write
+    atomically in place, then move the file into ``tasks/done/``. The stamp
+    names the acting agent (``<iso> — <agent>``, team-awareness/8, via
+    :func:`shards.core.notes._format_stamp`) resolved from ``config.agent`` —
+    the identity of *this* call finishing/cancelling the task, not its
+    ``owner`` — degrading to a bare ``iso`` when unset.
 
     The id is resolved *inside* the lock because a concurrent terminator renames
     the file open→done; the lock id derives from ``task_id`` (not the file
@@ -591,7 +600,7 @@ def _terminate_task(
             return Task.model_validate(post.metadata)
 
         now = _now()
-        stamp = _iso_utc(now)
+        stamp = _format_stamp(_iso_utc(now), config.agent)
         block = f"{stamp}\n{text}" if text else stamp
         section = f"{heading}\n\n{block}"
         base = post.content.rstrip("\n")

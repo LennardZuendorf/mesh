@@ -173,6 +173,80 @@ def test_append_timestamp_prepends_iso_line(cfg: Config, vault: Path) -> None:
     assert match.start() < content.index("with clock")
 
 
+# --------------------------------------------------------------------------- #
+# team-awareness/8 — the stamp names the editor, never the note's owner         #
+# --------------------------------------------------------------------------- #
+
+
+def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
+    """Write a standalone ``config.toml`` (distinct from the ``shards_config``
+    fixture's) identifying as ``agent`` — or with no ``[core].agent`` at all when
+    ``agent`` is ``None`` — so a test can hold two ``Config`` objects pointed at
+    the same vault under two different identities."""
+    lines = ["[core]", f'tolaria_path = "{vault}"']
+    if agent is not None:
+        lines.append(f'agent = "{agent}"')
+    path = tmp_path / f"{agent or 'noagent'}.toml"
+    path.write_text("\n".join([*lines, ""]), encoding="utf-8")
+    return path
+
+
+def test_append_timestamp_names_the_editor_not_the_owner(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The observed team-sim bug (R8): tolaria-agent appends to a note owned by
+    flights-agent; the stamp must name the editor (tolaria-agent), never the
+    note's ``owner``, and the ISO token stays the first field on the line."""
+    path = _seed_note(vault, extra={"owner": "flights-agent"})
+    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    editor_cfg = load_config()
+
+    append_note(editor_cfg, "n-seed", "appended by the editor", timestamp=True)
+    content = _reload(path).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert match.start() == 0  # the ISO token is the first field on the line
+    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert "flights-agent" not in stamp_line  # names the editor, not the owner
+
+
+def test_append_timestamp_unset_identity_is_bare_iso(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``[core].agent`` and no ``$SHARDS_AGENT`` degrades to a bare ISO line —
+    no stray trailing separator, no crash."""
+    path = _seed_note(vault)
+    cfg_file = _write_agent_config(tmp_path, vault, None)
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    noagent_cfg = load_config()
+    assert noagent_cfg.agent is None
+
+    append_note(noagent_cfg, "n-seed", "anonymous append", timestamp=True)
+    content = _reload(path).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert stamp_line == match.group(0)  # bare ISO, no " — ", no placeholder
+
+
+def test_append_timestamp_adds_no_frontmatter_key(cfg: Config, vault: Path) -> None:
+    """R8: the stamp is prose in the body, never a new frontmatter key — the
+    frontmatter is unchanged apart from ``updated``."""
+    path = _seed_note(vault)
+    before = dict(_reload(path).metadata)
+    append_note(cfg, "n-seed", "with clock", timestamp=True)
+    after = dict(_reload(path).metadata)
+    assert set(after) == set(before)  # no key added or removed
+    before.pop("updated")
+    after_updated = after.pop("updated")
+    assert after == before  # every other field is byte-identical
+    assert after_updated != _OLD
+
+
 def test_append_roundtrips_unknown_frontmatter_keys(cfg: Config, vault: Path) -> None:
     path = _seed_note(vault, extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"})
     append_note(cfg, "n-seed", "x")

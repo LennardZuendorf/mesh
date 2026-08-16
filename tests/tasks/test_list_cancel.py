@@ -658,6 +658,64 @@ def test_cancel_id_reresolves_from_done(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# team-awareness/8 — ## Cancelled names the acting agent                        #
+# --------------------------------------------------------------------------- #
+
+
+def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
+    """Write a standalone ``config.toml`` identifying as ``agent`` (or with no
+    ``[core].agent`` at all when ``agent`` is ``None``), pointed at ``vault``, so
+    a test can hold two distinct-identity ``Config`` objects over one vault."""
+    lines = ["[core]", f'tolaria_path = "{vault}"']
+    if agent is not None:
+        lines.append(f'agent = "{agent}"')
+    path = tmp_path / f"{agent or 'noagent'}.toml"
+    path.write_text("\n".join([*lines, ""]), encoding="utf-8")
+    return path
+
+
+def test_cancel_reason_names_the_acting_agent(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8: a task owned by flights-agent, cancelled by tolaria-agent — the
+    ``## Cancelled`` stamp names the canceller, never the task's ``owner``."""
+    _seed_task(vault, status="open", owner="flights-agent")
+    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    canceller_cfg = load_config()
+
+    cancel_task(canceller_cfg, "t-seed", "not needed")
+    content = _reload(_done_path(vault)).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert match.start() == 0
+    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert "flights-agent" not in stamp_line
+
+
+def test_cancel_unset_identity_stamp_is_bare_iso(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``[core].agent``/``$SHARDS_AGENT`` degrades to a bare ISO line — no
+    stray trailing separator, no crash."""
+    _seed_task(vault, status="open")
+    cfg_file = _write_agent_config(tmp_path, vault, None)
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    noagent_cfg = load_config()
+    assert noagent_cfg.agent is None
+
+    cancel_task(noagent_cfg, "t-seed", "not needed")
+    content = _reload(_done_path(vault)).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert stamp_line == match.group(0)
+
+
+# --------------------------------------------------------------------------- #
 # CLI — shards task list                                                        #
 # --------------------------------------------------------------------------- #
 

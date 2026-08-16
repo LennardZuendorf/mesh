@@ -264,6 +264,65 @@ def test_append_roundtrips_unknown_frontmatter_keys(cfg: Config, vault: Path) ->
 
 
 # --------------------------------------------------------------------------- #
+# team-awareness/8 — the stamp names the editor, never the task's owner         #
+# --------------------------------------------------------------------------- #
+
+
+def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
+    """Write a standalone ``config.toml`` identifying as ``agent`` (or with no
+    ``[core].agent`` at all when ``agent`` is ``None``), pointed at ``vault``, so
+    a test can hold two distinct-identity ``Config`` objects over one vault."""
+    lines = ["[core]", f'tolaria_path = "{vault}"']
+    if agent is not None:
+        lines.append(f'agent = "{agent}"')
+    path = tmp_path / f"{agent or 'noagent'}.toml"
+    path.write_text("\n".join([*lines, ""]), encoding="utf-8")
+    return path
+
+
+def test_append_timestamp_names_the_editor_not_the_owner(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8: tolaria-agent appends to a task owned by flights-agent; the stamp
+    names the editor (tolaria-agent), never the task's ``owner``, and the ISO
+    token stays the first field on the line."""
+    path = _seed_task(vault, owner="flights-agent")
+    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    editor_cfg = load_config()
+
+    append_task(editor_cfg, "t-seed", "appended by the editor", timestamp=True)
+    content = _reload(path).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert match.start() == 0
+    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert "flights-agent" not in stamp_line
+
+
+def test_append_timestamp_unset_identity_is_bare_iso(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``[core].agent``/``$SHARDS_AGENT`` degrades to a bare ISO line — no
+    stray trailing separator, no crash."""
+    path = _seed_task(vault)
+    cfg_file = _write_agent_config(tmp_path, vault, None)
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    noagent_cfg = load_config()
+    assert noagent_cfg.agent is None
+
+    append_task(noagent_cfg, "t-seed", "anonymous append", timestamp=True)
+    content = _reload(path).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert stamp_line == match.group(0)
+
+
+# --------------------------------------------------------------------------- #
 # Mechanics — atomic write, entity lock, no second implementation              #
 # --------------------------------------------------------------------------- #
 

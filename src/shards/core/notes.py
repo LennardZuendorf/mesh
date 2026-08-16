@@ -190,9 +190,34 @@ def _append_under_section(body: str, block: str, section: str) -> str:
     return f"{result}\n\n{tail}" if tail else result
 
 
-def _format_block(text: str, timestamp: bool) -> str:
+def _format_stamp(iso: str, agent: str | None) -> str:
+    """Render the attribution-stamp contract: ``<iso> — <agent>`` (team-awareness/8).
+
+    The single place that contract is spelled — :func:`_format_block` (note/task
+    ``append``) and :func:`shards.core.tasks._terminate_task` (``## Outcome`` /
+    ``## Cancelled``) both call through here rather than each formatting their
+    own line, so the "who wrote this" prose stays one formatter, not two drifting
+    copies. ``agent`` is **who is actually running the command** — resolved by
+    each caller from ``config.agent`` (the only identity available at these call
+    sites; none of them take a separate ``--owner`` override) — never the note's
+    ``owner`` field, which only names who a task/note is accountable to and may
+    be a completely different agent than the one appending right now (the bug
+    this unit fixes: an editor's append was silently attributed to the creator).
+    When ``agent`` is unset (no ``[core].agent``, no ``$SHARDS_AGENT``) this
+    degrades to the bare ``iso`` — no trailing separator, no placeholder — so a
+    misconfigured caller still gets a clean, human-readable line instead of a
+    dangling ``— None`` or a crash. This is prose, not metadata: nothing indexes
+    or queries the name embedded here, and no new frontmatter key is added
+    (rejected by the spec — see the feature plan's "Attribution on stamps"
+    entry).
+    """
+    return f"{iso} — {agent}" if agent else iso
+
+
+def _format_block(text: str, timestamp: bool, agent: str | None = None) -> str:
     if timestamp:
-        return f"{_now().strftime('%Y-%m-%dT%H:%M:%SZ')}\n{text}"
+        iso = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        return f"{_format_stamp(iso, agent)}\n{text}"
     return text
 
 
@@ -289,7 +314,11 @@ def append_note(
 
     With ``section`` the text lands under a ``## {section}`` heading (created at
     end-of-body if missing). With ``timestamp`` an ISO-8601 UTC line is prepended
-    to the text block. The whole read-modify-write runs under the entity lock and
+    to the text block, naming the acting agent (``<iso> — <agent>``, team-awareness/8
+    — see :func:`_format_stamp`) resolved from ``config.agent``: the identity of
+    *this* call, not the note's ``owner``, so an editor's append is attributed to
+    the editor even when it lands on a note it does not own — the observed gap
+    this unit closes. The whole read-modify-write runs under the entity lock and
     the result is written atomically. The re-read inside the lock goes through
     :func:`shards.storage.files.read_post`; a file that vanishes or turns
     unreadable between resolution and the lock raises
@@ -297,7 +326,7 @@ def append_note(
     """
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
-    block = _format_block(text, timestamp)
+    block = _format_block(text, timestamp, config.agent)
     with hold(_lock_path(config, note_id)):
         post = read_post(path)
         if post is None:
