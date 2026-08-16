@@ -38,7 +38,6 @@ from shards.cli._errors import cli_errors
 from shards.core.notes import TAG_SPEC_SEMANTICS
 from shards.core.tasks import (
     TaskNotFoundError,
-    TaskView,
     append_task,
     cancel_task,
     claim_task,
@@ -420,7 +419,7 @@ def list_command(
             typer.echo(view.task.id)
         return
     if _output.is_json(ctx):
-        typer.echo(json.dumps([_list_obj(view) for view in views]))
+        typer.echo(json.dumps([_output.to_json_obj(view.task) for view in views]))
         return
     for view in views:
         # id / status / holder (or "-" when unclaimed) / title — tab-separated so
@@ -428,10 +427,6 @@ def list_command(
         # contain spaces. ``--json`` is unchanged (the full model, untouched).
         holder = view.task.claimed_by or "-"
         typer.echo(f"{view.task.id}\t{view.task.status}\t{holder}\t{view.task.title}")
-
-
-def _list_obj(view: TaskView) -> dict[str, object]:
-    return view.task.model_dump(mode="json")
 
 
 def _is_tty() -> bool:

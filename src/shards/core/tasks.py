@@ -48,7 +48,7 @@ from shards.core.notes import (
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.task import Task, TaskStatus
-from shards.storage.files import atomic_write, read_post, task_folder
+from shards.storage.files import atomic_write, iter_md, read_post, task_folder
 from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
 
@@ -151,13 +151,12 @@ def _iter_task_files(config: Config) -> Iterator[Path]:
     finish. Both live and terminal folders are scanned so a task is resolvable
     through its whole lifecycle; ``.locks/`` holds no ``.md``, so it is naturally
     excluded. :func:`in_task_scope` is the membership form of this same scope —
-    keep the two in step.
+    keep the two in step. Each folder is a non-recursive call onto the one shared
+    vault walk (:func:`shards.storage.files.iter_md`).
     """
     root = _tasks_root(config)
     for sub in _TASK_SUBDIRS:
-        folder = root / sub
-        if folder.is_dir():
-            yield from folder.glob("*.md")
+        yield from iter_md(root / sub, recursive=False)
 
 
 def in_task_scope(vault: Path, path: Path) -> bool:

@@ -53,6 +53,7 @@ from typing import Any
 
 import typer
 
+from shards.cli import _output
 from shards.cli._errors import cli_errors
 from shards.core.lenses import TASK_STATUSES
 
@@ -156,25 +157,24 @@ def _remove(path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _json(ctx: typer.Context) -> bool:
-    return bool(getattr(ctx.obj, "json", False))
-
-
-def _quiet(ctx: typer.Context) -> bool:
-    return bool(getattr(ctx.obj, "quiet", False))
-
-
 def _notice(ctx: typer.Context, message: str) -> None:
     """Emit an infrastructure notice on stderr (suppressed under ``--quiet``)."""
-    if not _quiet(ctx):
+    if not _output.is_quiet(ctx):
         typer.echo(message, err=True)
 
 
 def _emit(ctx: typer.Context, payload: dict[str, Any], human: str) -> None:
-    """Machine JSON on ``--json``; a terse human line otherwise (silent if quiet)."""
-    if _json(ctx):
+    """Machine JSON on ``--json``; a terse human line otherwise (silent if quiet).
+
+    ``payload`` is this command's own already-built ``{...}`` shape (no per-target
+    id, no ``updated`` timestamp) — a different contract from
+    :func:`shards.cli._output.emit_mutation`'s note/task envelope, so this stays
+    admin's own helper rather than forcing the two together (root tech.md §
+    Duplication).
+    """
+    if _output.is_json(ctx):
         typer.echo(json.dumps(payload))
-    elif not _quiet(ctx):
+    elif not _output.is_quiet(ctx):
         typer.echo(human)
 
 
@@ -447,7 +447,7 @@ def status_command(ctx: typer.Context) -> None:
         report["daemon"] = {"running": running is not None, "pid": running}
         report["agents"] = _agent_breakdown(DaemonClient().task_list(config, limit=None))
 
-    if _json(ctx):
+    if _output.is_json(ctx):
         typer.echo(json.dumps(report))
         return
 

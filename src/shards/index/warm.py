@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from shards.schemas.config import Config
-from shards.storage.files import read_post
+from shards.storage.files import iter_md, read_post
 
 DEFAULT_RECENT_LIMIT = 20
 _ID_PREFIXES = ("n-", "t-")
@@ -64,11 +64,11 @@ def iter_vault_md(vault: Path) -> Iterator[Path]:
     ``.md`` and is naturally excluded. This is the corpus
     :func:`shards.index.tagpull.iter_corpus` walks, shared verbatim so the warm
     index and the on-disk scanners can never disagree about *which* files exist.
+    Delegates to the one shared vault-walk primitive
+    (:func:`shards.storage.files.iter_md`).
     """
     for sub in ("notes", "tasks"):
-        root = vault / sub
-        if root.is_dir():
-            yield from root.rglob("*.md")
+        yield from iter_md(vault / sub)
 
 
 def _entry_dict(path: Path, meta: dict[str, Any], mtime: float) -> dict[str, Any]:

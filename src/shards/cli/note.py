@@ -36,7 +36,6 @@ from shards.cli._errors import cli_errors
 from shards.core.notes import (
     TAG_SPEC_SEMANTICS,
     NoteNotFoundError,
-    NoteView,
     append_note,
     create_note,
     delete_note,
@@ -269,14 +268,10 @@ def list_command(
             typer.echo(view.note.id)
         return
     if _output.is_json(ctx):
-        typer.echo(json.dumps([_list_obj(view) for view in views]))
+        typer.echo(json.dumps([_output.to_json_obj(view.note) for view in views]))
         return
     for view in views:
         typer.echo(f"{view.note.id}  {view.note.type}  {view.note.title}")
-
-
-def _list_obj(view: NoteView) -> dict[str, object]:
-    return view.note.model_dump(mode="json")
 
 
 def _is_tty() -> bool:

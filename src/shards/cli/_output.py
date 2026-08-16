@@ -20,16 +20,20 @@ calls :func:`coalesce_flags` once, early, so every later read through
 sees the merged value with no further plumbing. This is the one shared
 coalescing implementation — ``note``, ``task``, ``search``, and the session
 lenses (``cli/session.py``) all call it rather than each hand-rolling the
-OR-with-``ctx.obj`` logic. It is deliberately *not* the reader unification
-that later collapses this module's ``is_json``/``is_quiet`` with
-``admin.py``'s and ``session.py``'s own private booleans into one — that is a
-separate, later unit's refactor (core-hardening/8); this is just the plumbing
-needed to make the observable contract true.
+OR-with-``ctx.obj`` logic. ``admin.py``'s own private ``_json``/``_quiet``
+booleans (core-hardening/8) were the same one-line read as :func:`is_json` /
+:func:`is_quiet`, so they were collapsed into these; ``admin.py``'s ``_emit``/
+``_notice`` stay put — they answer to admin's own ``{payload, human}`` shape
+(``daemon start|stop|status``, ``init``, no per-target id), a different
+contract from :func:`emit_mutation`'s ``{obj_id, updated, verb, fields}``
+note/task shape, and unifying the two would need a discriminator between
+them.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -119,6 +123,50 @@ def emit_mutation(
         typer.echo(json.dumps({"id": obj_id, **fields, "updated": _iso_z(updated)}))
         return
     typer.echo(f"{verb} {obj_id}")
+
+
+def to_json_obj(model: Any) -> dict[str, object]:
+    """Render a validated Note/Task model to its ``--json`` list-row dict.
+
+    Both ``note list --json`` and ``task list --json`` dump the whole validated
+    model verbatim — the one-line shape ``NoteView``/``TaskView`` differ only in
+    which field (``.note``/``.task``) wraps, so the caller unwraps the view
+    first and this stays a plain ``model_dump``.
+    """
+    return model.model_dump(mode="json")
+
+
+def emit_entries(
+    ctx: typer.Context,
+    entries: list[dict[str, Any]],
+    render: Callable[[dict[str, Any]], str],
+) -> None:
+    """Report a list of dict rows per the active global output flags.
+
+    ``--json`` → the raw list, ``json.dumps``'d whole. ``--quiet`` → each row's
+    ``id`` field, one per line. Otherwise ``render(entry)`` is called once per
+    row and the result echoed. The per-row text shape is the *only* thing that
+    varies across ``recent-activity`` / ``session-start`` / ``build-context``
+    (a tab-separated column set, different per command), so it comes in as a
+    plain callable rather than a strategy object with internal branches — the
+    same collapse :func:`emit_mutation` already made for its ``fields`` dict.
+
+    Not used by ``graph`` / ``project``: their ``--json`` payload is a single
+    object (``{seed, nodes, edges}`` / ``{project, tasks}``), not a row list,
+    and their text rendering is either pre-built lines or a two-part
+    project-then-tasks walk — forcing them through this list-shaped helper
+    would need a payload-shape discriminator, which is the duplication the DRY
+    filter rejects, not the one it merges.
+    """
+    if is_json(ctx):
+        typer.echo(json.dumps(entries))
+        return
+    if is_quiet(ctx):
+        for entry in entries:
+            typer.echo(str(entry.get("id", "")))
+        return
+    for entry in entries:
+        typer.echo(render(entry))
 
 
 def refuse_delete_if_non_interactive(ctx: typer.Context, *, tty: bool) -> None:

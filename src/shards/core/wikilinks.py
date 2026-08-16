@@ -32,7 +32,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-from shards.storage.files import read_post
+from shards.storage.files import iter_md, read_post
 
 # A ``[[…]]`` link: capture the inner text, excluding brackets and newlines.
 _WIKILINK = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
@@ -50,21 +50,18 @@ def _tasks_root(vault_path: Path) -> Path:
     return vault_path / "tasks"
 
 
-def _iter_md_files(root: Path) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``root``, sorted (``.locks/`` holds no ``.md``)."""
-    if not root.is_dir():
-        return
-    yield from sorted(root.rglob("*.md"))
-
-
 def _iter_note_files(vault_path: Path) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``notes/``."""
-    yield from _iter_md_files(_notes_root(vault_path))
+    """Yield every ``*.md`` under ``notes/``, sorted.
+
+    A thin, deterministically-ordered call onto the one shared vault walk
+    (:func:`shards.storage.files.iter_md`).
+    """
+    yield from sorted(iter_md(_notes_root(vault_path)))
 
 
 def _iter_task_files(vault_path: Path) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``tasks/`` (both ``open/`` and ``done/``)."""
-    yield from _iter_md_files(_tasks_root(vault_path))
+    """Yield every ``*.md`` under ``tasks/`` (both ``open/`` and ``done/``), sorted."""
+    yield from sorted(iter_md(_tasks_root(vault_path)))
 
 
 def _link_targets(body: str) -> list[str]:

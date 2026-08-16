@@ -101,6 +101,15 @@ def _identity_columns(entry: dict[str, Any]) -> tuple[str, str]:
     return (str(owner) if owner else "-", str(claimed_by) if claimed_by else "-")
 
 
+def _recent_activity_row(entry: dict[str, Any]) -> str:
+    """``recent-activity``'s text row: id / type / owner / claimed_by / title / path."""
+    owner_col, claimed_col = _identity_columns(entry)
+    return (
+        f"{entry.get('id', '')}\t{entry.get('type', '')}\t{owner_col}\t{claimed_col}\t"
+        f"{entry.get('title', '')}\t{entry.get('path', '')}"
+    )
+
+
 def recent_activity_command(
     ctx: typer.Context,
     since: str | None = typer.Option(None, "--since", help="Recency window: 7d, 12h, or ISO."),
@@ -114,8 +123,10 @@ def recent_activity_command(
     config = load_config()
 
     # Coalesce the leaf flags with the root callback's global flags so a flag given
-    # on either side of the command name takes effect.
-    json_out, quiet, owner = _output.coalesce_flags(
+    # on either side of the command name takes effect. ``emit_entries`` below reads
+    # the merged json/quiet straight off ``ctx.obj``, so only ``quiet`` (the notice
+    # gate) and ``owner`` are needed as locals here.
+    _json_out, quiet, owner = _output.coalesce_flags(
         ctx, json_out=json_out, quiet=quiet, owner=owner
     )
     mine = mine or bool(getattr(ctx.obj, "mine", False))
@@ -128,19 +139,7 @@ def recent_activity_command(
     if not quiet and not _daemon_up():
         typer.echo(_DAEMON_DOWN_NOTICE, err=True)
 
-    if json_out:
-        typer.echo(json.dumps(entries))
-        return
-    if quiet:
-        for entry in entries:
-            typer.echo(str(entry.get("id", "")))
-        return
-    for entry in entries:
-        owner_col, claimed_col = _identity_columns(entry)
-        typer.echo(
-            f"{entry.get('id', '')}\t{entry.get('type', '')}\t{owner_col}\t{claimed_col}\t"
-            f"{entry.get('title', '')}\t{entry.get('path', '')}"
-        )
+    _output.emit_entries(ctx, entries, _recent_activity_row)
 
 
 def session_start_command(
@@ -181,8 +180,9 @@ def session_start_command(
     config = load_config()
 
     # Coalesce the leaf flags with the root callback's global flags so a flag on
-    # either side of the command name takes effect.
-    json_out, quiet, owner = _output.coalesce_flags(
+    # either side of the command name takes effect. ``emit_entries`` below reads
+    # the merged json/quiet straight off ``ctx.obj``.
+    _json_out, _quiet, owner = _output.coalesce_flags(
         ctx, json_out=json_out, quiet=quiet, owner=owner
     )
     effective_config = as_effective_agent(config, owner)
@@ -223,19 +223,16 @@ def session_start_command(
         # then the remaining activity newest-first — deduped by id throughout.
         entries = session_start_entries(task_views, activity, mentions, meta_only=meta_only)
 
-    if json_out:
-        typer.echo(json.dumps(entries))
-        return
-    if quiet:
-        for entry in entries:
-            typer.echo(str(entry.get("id", "")))
-        return
-    for entry in entries:
-        owner_col, claimed_col = _identity_columns(entry)
-        typer.echo(
-            f"{entry.get('id', '')}\t{entry.get('type', '')}\t{entry.get('reason', '')}\t"
-            f"{owner_col}\t{claimed_col}\t{entry.get('title', '')}\t{entry.get('path', '')}"
-        )
+    _output.emit_entries(ctx, entries, _session_start_row)
+
+
+def _session_start_row(entry: dict[str, Any]) -> str:
+    """``session-start``'s text row: id / type / reason / owner / claimed_by / title / path."""
+    owner_col, claimed_col = _identity_columns(entry)
+    return (
+        f"{entry.get('id', '')}\t{entry.get('type', '')}\t{entry.get('reason', '')}\t"
+        f"{owner_col}\t{claimed_col}\t{entry.get('title', '')}\t{entry.get('path', '')}"
+    )
 
 
 def build_context_command(
@@ -251,23 +248,20 @@ def build_context_command(
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect. This lens is daemon-free —
     # every node is read off disk — so there is no degradation notice.
-    json_out, quiet, _owner = _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
+    _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
 
     with cli_errors():
         entries = build_context(config, seed_id, depth=depth)
 
-    if json_out:
-        typer.echo(json.dumps(entries))
-        return
-    if quiet:
-        for entry in entries:
-            typer.echo(str(entry.get("id", "")))
-        return
-    for entry in entries:
-        typer.echo(
-            f"{entry.get('id', '')}\t{entry.get('type', '')}\t"
-            f"{entry.get('title', '')}\t{entry.get('path', '')}"
-        )
+    _output.emit_entries(ctx, entries, _build_context_row)
+
+
+def _build_context_row(entry: dict[str, Any]) -> str:
+    """``build-context``'s text row: id / type / title / path."""
+    return (
+        f"{entry.get('id', '')}\t{entry.get('type', '')}\t"
+        f"{entry.get('title', '')}\t{entry.get('path', '')}"
+    )
 
 
 def graph_command(

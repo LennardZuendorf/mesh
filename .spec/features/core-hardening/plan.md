@@ -484,7 +484,7 @@ user approval.
 | core-hardening/5 | DONE | `bb9758f` feat(daemon): wire warm list reads and cull stubs; `fb69f13` fix(daemon): scope warm rows and never gate on a bad reply (review round 1); `b73572a` docs(daemon): correct stale admin and daemon-test prose |
 | core-hardening/6 | DONE | `ff99ccb` test(core-hardening): cover locks, sandbox, mcp bodies, daemon lifecycle |
 | core-hardening/7 | DONE | `1efaee0` ci(core-hardening): harden CI gate |
-| core-hardening/8 | NOT STARTED | — (duplication cull; only unit left on this track after 9) |
+| core-hardening/8 | DONE | duplication cull under the DRY filter — see tech.md § Duplication as-built rows |
 | core-hardening/9 | DONE | this unit — spec reconciliation |
 
 ---

@@ -32,7 +32,7 @@ from shards.core.ids import generate_note_id
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.note import Note, NoteType
-from shards.storage.files import atomic_write, note_folder, read_post
+from shards.storage.files import atomic_write, iter_md, note_folder, read_post
 from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
 
@@ -108,12 +108,10 @@ def _iter_note_files(config: Config) -> Iterator[Path]:
     The *canonical* note scope: :func:`_resolve_path`, :func:`_id_taken` and
     :func:`note_rows` all read through here, so a file outside it is not a note as
     far as this program is concerned. :func:`in_note_scope` is the membership form
-    of this same scope — keep the two in step.
+    of this same scope — keep the two in step. A thin recursive call onto the one
+    shared vault walk (:func:`shards.storage.files.iter_md`).
     """
-    root = _notes_root(config)
-    if not root.is_dir():
-        return
-    yield from root.rglob("*.md")
+    yield from iter_md(_notes_root(config))
 
 
 def in_note_scope(vault: Path, path: Path) -> bool:
