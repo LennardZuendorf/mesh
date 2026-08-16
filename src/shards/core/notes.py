@@ -617,7 +617,14 @@ def note_rows(config: Config) -> Iterator[MetaRow]:
 
 def _title_collision(rows: Iterable[MetaRow], title: str, id_prefix: str) -> str | None:
     """Return the ``id`` of the first row whose id carries ``id_prefix`` and whose
-    ``title`` exactly equals ``title``; ``None`` if nothing matches (R9).
+    ``title`` slug-collides with ``title``; ``None`` if nothing matches (R9).
+
+    "Slug-collides" means :func:`_slugify` of the two titles is equal — the
+    identical normalization :func:`_resolve_path` applies for CLI ``<id|slug>``
+    lookups, deliberately mirrored here (see :func:`find_duplicate_title` for
+    the reasoning). A single pass, one target slug computed once and compared
+    against each row — no second scan and no index built on top of the row
+    iterator already being walked.
 
     The shared engine behind :func:`find_duplicate_title` (here) and
     :func:`shards.core.tasks.find_duplicate_title`: each passes its own row
@@ -625,31 +632,37 @@ def _title_collision(rows: Iterable[MetaRow], title: str, id_prefix: str) -> str
     that happen to share a title never collide with each other — same-kind only,
     matching the product decision (R9: warn on same-kind duplicates).
     """
+    target = _slugify(title)
     for _, meta in rows:
         candidate_id = meta.get("id")
+        candidate_title = meta.get("title")
         if (
             isinstance(candidate_id, str)
             and candidate_id.startswith(id_prefix)
-            and meta.get("title") == title
+            and isinstance(candidate_title, str)
+            and _slugify(candidate_title) == target
         ):
             return candidate_id
     return None
 
 
 def find_duplicate_title(config: Config, title: str) -> str | None:
-    """Return the id of an existing note whose title exactly matches ``title`` (R9).
+    """Return the id of an existing note whose title slug-collides with ``title`` (R9).
 
-    Mirrors the exact-match rule :func:`shards.core.wikilinks._title_index` uses
-    for wikilink title resolution — a literal string comparison (no case-fold, no
-    whitespace normalization) — *not* the slug-normalized rule
-    :func:`_resolve_path` uses for CLI ``<id|slug>`` lookups. That is a deliberate
-    choice, not an oversight: a slug collision is exactly what this warning exists
-    to flag before it bites (see the ``team-awareness/9`` unit report), but the
-    exact-match index is the one already built for link resolution, so this reuses
-    it rather than inventing a second title-matching rule. A title differing only
-    by case or whitespace therefore does **not** warn here even though it *would*
-    still collide once slugified — a known, accepted gap; widening the rule is a
-    call for a future unit, made deliberately rather than silently.
+    Mirrors the **slug-normalized** rule :func:`_resolve_path` uses for CLI
+    ``<id|slug>`` lookups (``_slugify`` — lower-cased, non-alphanumeric runs
+    collapsed to a single ``-``, trimmed) — *not* the exact-match rule
+    :func:`shards.core.wikilinks._title_index` uses for wikilink title
+    resolution. That is the point: a duplicate that only ``_resolve_path``
+    would consider the same is exactly the duplicate that later poisons the
+    slug resolver forever (``AmbiguousSlugError``, no way back short of
+    renaming/deleting) — so the warning has to use the resolver's own rule, or
+    it warns about the wrong set of collisions. A title differing only by case
+    or surrounding/internal whitespace **does** warn here, because it *would*
+    already collide once slugified — see
+    ``tests/notes/test_new.py::test_cli_new_case_whitespace_duplicate_warns_and_is_genuinely_ambiguous_slug``,
+    which ties the warning to the real harm (a subsequent ambiguous-slug
+    lookup), not to a string comparison.
 
     Same-kind only — scans ``notes/`` and never sees a task, even a
     title-identical one (see :func:`shards.core.tasks.find_duplicate_title` for

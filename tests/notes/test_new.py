@@ -268,15 +268,19 @@ def test_find_duplicate_title_no_match_returns_none(cfg: Config, vault: Path) ->
     assert find_duplicate_title(cfg, "Unrelated Title") is None
 
 
-def test_find_duplicate_title_case_and_whitespace_do_not_collide(cfg: Config, vault: Path) -> None:
-    """Mirrors ``wikilinks._title_index``'s exact-match rule: a title differing
-    only by case or surrounding whitespace is a *different* string, not a
-    collision — the same exact-match rule the wikilink title index uses, not
-    the slug resolver's normalized rule (asserted, not incidental)."""
-    create_note(cfg, "Japan Visa", body="x")
-    assert find_duplicate_title(cfg, "japan visa") is None
-    assert find_duplicate_title(cfg, "JAPAN VISA") is None
-    assert find_duplicate_title(cfg, " Japan Visa ") is None
+def test_find_duplicate_title_case_and_whitespace_collide(cfg: Config, vault: Path) -> None:
+    """Mirrors ``_resolve_path``'s slug-normalized rule (``_slugify``), not
+    ``wikilinks._title_index``'s exact-match rule: a title differing only by
+    case or surrounding/internal whitespace *does* collide, because it would
+    already collide once slugified — the same normalization the CLI's
+    ``<id|slug>`` resolver applies (asserted, not incidental). This is the case
+    that actually poisons the slug resolver, which is the harm this warning
+    exists to flag."""
+    first = create_note(cfg, "Japan Visa", body="x")
+    assert find_duplicate_title(cfg, "japan visa") == first.id
+    assert find_duplicate_title(cfg, "JAPAN VISA") == first.id
+    assert find_duplicate_title(cfg, " Japan Visa ") == first.id
+    assert find_duplicate_title(cfg, "Japan  Visa") == first.id  # internal whitespace run
 
 
 def test_find_duplicate_title_ignores_tasks(cfg: Config, vault: Path) -> None:
@@ -352,3 +356,34 @@ def test_cli_new_note_task_same_title_no_warning(cfg: Config, vault: Path) -> No
     note_result = _invoke(["note", "new", "Cross-Kind Title", "--body", "x"])
     assert note_result.exit_code == 0, note_result.output
     assert note_result.stderr == ""
+
+
+def test_cli_new_case_whitespace_duplicate_warns_and_is_genuinely_ambiguous_slug(
+    cfg: Config, vault: Path
+) -> None:
+    """The motivating case: two titles differing only in case/whitespace.
+
+    Ties the warning to the *real* harm rather than to a string comparison —
+    the create succeeds and warns naming the prior id, and the resulting pair
+    is genuinely what makes ``note get <slug>`` permanently ambiguous
+    afterwards (the whole reason this warning exists)."""
+    first = _invoke(["--quiet", "note", "new", "Japan Visa", "--body", "x"])
+    assert first.exit_code == 0, first.output
+    first_id = first.output.strip()
+
+    second = _invoke(["note", "new", " japan  visa ", "--body", "y"])
+    assert second.exit_code == 0, second.output
+    assert first_id in second.stderr
+    assert "duplicate title" in second.stderr
+    second_id = second.output.strip().split()[-1]
+    assert second_id != first_id
+    assert (note_folder("note", vault) / f"{second_id}.md").exists()
+    assert (note_folder("note", vault) / f"{first_id}.md").exists()
+
+    # The warned-about pair is genuinely the ambiguous-slug case: a slug lookup
+    # on either spelling now refuses forever rather than resolving.
+    ambiguous = _invoke(["note", "get", "japan visa"])
+    assert ambiguous.exit_code == 2, ambiguous.output
+    assert "ambiguous slug" in ambiguous.stderr
+    assert first_id in ambiguous.stderr
+    assert second_id in ambiguous.stderr

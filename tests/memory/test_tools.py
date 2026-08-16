@@ -298,6 +298,15 @@ def test_task_new_unique_title_returns_empty_warnings(cfg: Config, vault: Path) 
     assert result["warnings"] == []
 
 
+def test_note_new_case_whitespace_duplicate_returns_warning(cfg: Config, vault: Path) -> None:
+    """Slug-normalized rule, not exact-match — mirrors the CLI/core assertion
+    (a case/whitespace-only variant still collides, since it's the same
+    collision that would poison the slug resolver)."""
+    first = server.shards_note_new(title="Case Insensitive MCP Title", body="x")
+    second = server.shards_note_new(title=" case  insensitive mcp title ", body="y")
+    assert second["warnings"] == [f"duplicate title, also used by {first['id']}"]
+
+
 def test_note_and_task_sharing_title_do_not_warn_over_mcp(cfg: Config, vault: Path) -> None:
     """Same-kind only: a task and a note sharing a title never warn each other,
     matching the CLI's cross-kind decision (R9)."""

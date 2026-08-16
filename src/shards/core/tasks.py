@@ -718,15 +718,16 @@ def task_rows(config: Config) -> Iterator[MetaRow]:
 
 
 def find_duplicate_title(config: Config, title: str) -> str | None:
-    """Return the id of an existing task whose title exactly matches ``title`` (R9).
+    """Return the id of an existing task whose title slug-collides with ``title`` (R9).
 
     The task-side twin of :func:`shards.core.notes.find_duplicate_title`: same
-    exact-match rule (see that docstring for the full reasoning — it mirrors
-    ``wikilinks._title_index``, not the slug-normalized resolver), same
-    before-the-lock timing, scoped to ``tasks/{open,done}/`` instead of
-    ``notes/`` via :func:`task_rows` so a note sharing a task's title never
-    warns here (same-kind only, per R9). Shares :func:`shards.core.notes._title_collision`
-    — the one exact-match engine — rather than a second copy of the compare.
+    slug-normalized rule (see that docstring for the full reasoning — it
+    mirrors the resolver's own ``_slugify`` comparison, not
+    ``wikilinks._title_index``'s exact-match rule), same before-the-lock
+    timing, scoped to ``tasks/{open,done}/`` instead of ``notes/`` via
+    :func:`task_rows` so a note sharing a task's title never warns here
+    (same-kind only, per R9). Shares :func:`shards.core.notes._title_collision`
+    — the one slug-collision engine — rather than a second copy of the compare.
     """
     return _title_collision(task_rows(config), title, _ID_PREFIX)
 

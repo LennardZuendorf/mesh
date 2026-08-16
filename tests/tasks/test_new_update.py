@@ -518,13 +518,15 @@ def test_find_duplicate_title_no_match_returns_none(cfg: Config, vault: Path) ->
     assert find_duplicate_title(cfg, "Unrelated Task Title") is None
 
 
-def test_find_duplicate_title_case_and_whitespace_do_not_collide(cfg: Config, vault: Path) -> None:
-    """Mirrors ``wikilinks._title_index``'s exact-match rule — same rule the note
-    side asserts (asserted, not incidental)."""
-    create_task(cfg, "Ship The Report")
-    assert find_duplicate_title(cfg, "ship the report") is None
-    assert find_duplicate_title(cfg, "SHIP THE REPORT") is None
-    assert find_duplicate_title(cfg, " Ship The Report ") is None
+def test_find_duplicate_title_case_and_whitespace_collide(cfg: Config, vault: Path) -> None:
+    """Mirrors the slug-normalized rule (``_slugify``) — same rule the note side
+    asserts, shared via the one ``_title_collision`` engine (asserted, not
+    incidental)."""
+    first = create_task(cfg, "Ship The Report")
+    assert find_duplicate_title(cfg, "ship the report") == first.id
+    assert find_duplicate_title(cfg, "SHIP THE REPORT") == first.id
+    assert find_duplicate_title(cfg, " Ship The Report ") == first.id
+    assert find_duplicate_title(cfg, "Ship  The  Report") == first.id  # internal whitespace run
 
 
 def test_find_duplicate_title_ignores_notes(cfg: Config, vault: Path) -> None:
@@ -603,3 +605,29 @@ def test_cli_task_new_note_task_same_title_no_warning(cfg: Config, vault: Path) 
     task_result = _invoke(["task", "new", "Cross-Kind Task Title"])
     assert task_result.exit_code == 0, task_result.output
     assert task_result.stderr == ""
+
+
+def test_cli_task_new_case_whitespace_duplicate_warns_and_names_the_real_prior_id(
+    cfg: Config, vault: Path
+) -> None:
+    """The motivating case, task side: two titles differing only in
+    case/whitespace. Task resolution is id-only (no slug matcher —
+    ``_resolve_task_path`` never resolves by title, per its own module
+    docstring), so the harm here isn't an ``AmbiguousSlugError`` the way it is
+    for notes; it's the *other* harm R9's product requirement names — two
+    agents silently create separate ids for what is really one piece of work.
+    The warning is what lets an agent notice and claim/finish the existing
+    ``t-`` id instead of starting a shadow copy, so this asserts the create
+    succeeds and the warning names the correct, pre-existing id."""
+    first = _invoke(["--quiet", "task", "new", "Ship The Report"])
+    assert first.exit_code == 0, first.output
+    first_id = first.output.strip()
+
+    second = _invoke(["task", "new", " ship  the report "])
+    assert second.exit_code == 0, second.output
+    assert first_id in second.stderr
+    assert "duplicate title" in second.stderr
+    second_id = second.output.strip().split()[-1]
+    assert second_id != first_id
+    assert (task_folder("open", vault) / f"{second_id}.md").exists()
+    assert (task_folder("open", vault) / f"{first_id}.md").exists()
