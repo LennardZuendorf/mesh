@@ -49,6 +49,9 @@ from shards.core.notes import (
     get_note,
     update_note,
 )
+from shards.core.notes import (
+    find_duplicate_title as find_duplicate_note_title,
+)
 from shards.core.search import hit_dict, query_search, resolve_effective_threshold
 from shards.core.tasks import (
     TaskView,
@@ -58,6 +61,9 @@ from shards.core.tasks import (
     finish_task,
     get_task,
     update_task,
+)
+from shards.core.tasks import (
+    find_duplicate_title as find_duplicate_task_title,
 )
 from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
@@ -240,6 +246,20 @@ def shards_project(project_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def _with_warnings(payload: dict[str, Any], existing_id: str | None) -> dict[str, Any]:
+    """Attach the structured ``warnings`` key (R9) — empty unless a title collided.
+
+    The MCP mirror of the CLI's stderr line (``cli/note.py``/``cli/task.py``):
+    there is no stream an agent reads on this surface, so the same advisory
+    travels in the JSON result instead — never silently dropped, never mixed
+    into the payload's own fields.
+    """
+    payload["warnings"] = (
+        [f"duplicate title, also used by {existing_id}"] if existing_id is not None else []
+    )
+    return payload
+
+
 def shards_note_new(
     title: str,
     note_type: str = "note",
@@ -247,10 +267,13 @@ def shards_note_new(
     owner: str | None = None,
     body: str = "",
 ) -> dict[str, Any]:
-    """Create a note (routed by type) and return its frontmatter."""
+    """Create a note (routed by type) and return its frontmatter plus any warnings."""
     config = load_config()
+    # Checked before the write, so a hit names the *prior* id (R9); non-blocking
+    # either way — see shards.core.notes.find_duplicate_title.
+    existing_id = find_duplicate_note_title(config, title)
     note = create_note(config, title, note_type=note_type, tags=tags, owner=owner, body=body)
-    return note.model_dump(mode="json")
+    return _with_warnings(note.model_dump(mode="json"), existing_id)
 
 
 def shards_note_append(
@@ -275,8 +298,11 @@ def shards_task_new(
     blocks: list[str] | None = None,
     blocked_by: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Create a task in tasks/open/ (status open, unclaimed) and return it."""
+    """Create a task in tasks/open/ (status open, unclaimed) and return it plus any warnings."""
     config = load_config()
+    # Checked before the write, so a hit names the *prior* id (R9); non-blocking
+    # either way — see shards.core.tasks.find_duplicate_title.
+    existing_id = find_duplicate_task_title(config, title)
     task = create_task(
         config,
         title,
@@ -288,7 +314,7 @@ def shards_task_new(
         blocks=blocks,
         blocked_by=blocked_by,
     )
-    return task.model_dump(mode="json")
+    return _with_warnings(task.model_dump(mode="json"), existing_id)
 
 
 # --------------------------------------------------------------------------- #

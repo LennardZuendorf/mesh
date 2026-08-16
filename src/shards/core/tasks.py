@@ -40,6 +40,7 @@ from shards.core.notes import (
     _opt_str,
     _parse_since,
     _str_tuple,
+    _title_collision,
     _validate_owner,
     apply_tag_spec,
 )
@@ -714,6 +715,20 @@ def task_rows(config: Config) -> Iterator[MetaRow]:
         if post is None:
             continue
         yield path, post.metadata
+
+
+def find_duplicate_title(config: Config, title: str) -> str | None:
+    """Return the id of an existing task whose title exactly matches ``title`` (R9).
+
+    The task-side twin of :func:`shards.core.notes.find_duplicate_title`: same
+    exact-match rule (see that docstring for the full reasoning — it mirrors
+    ``wikilinks._title_index``, not the slug-normalized resolver), same
+    before-the-lock timing, scoped to ``tasks/{open,done}/`` instead of
+    ``notes/`` via :func:`task_rows` so a note sharing a task's title never
+    warns here (same-kind only, per R9). Shares :func:`shards.core.notes._title_collision`
+    — the one exact-match engine — rather than a second copy of the compare.
+    """
+    return _title_collision(task_rows(config), title, _ID_PREFIX)
 
 
 def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:

@@ -615,6 +615,56 @@ def note_rows(config: Config) -> Iterator[MetaRow]:
         yield path, post.metadata
 
 
+def _title_collision(rows: Iterable[MetaRow], title: str, id_prefix: str) -> str | None:
+    """Return the ``id`` of the first row whose id carries ``id_prefix`` and whose
+    ``title`` exactly equals ``title``; ``None`` if nothing matches (R9).
+
+    The shared engine behind :func:`find_duplicate_title` (here) and
+    :func:`shards.core.tasks.find_duplicate_title`: each passes its own row
+    iterator (``note_rows``/``task_rows``) and id prefix, so a note and a task
+    that happen to share a title never collide with each other — same-kind only,
+    matching the product decision (R9: warn on same-kind duplicates).
+    """
+    for _, meta in rows:
+        candidate_id = meta.get("id")
+        if (
+            isinstance(candidate_id, str)
+            and candidate_id.startswith(id_prefix)
+            and meta.get("title") == title
+        ):
+            return candidate_id
+    return None
+
+
+def find_duplicate_title(config: Config, title: str) -> str | None:
+    """Return the id of an existing note whose title exactly matches ``title`` (R9).
+
+    Mirrors the exact-match rule :func:`shards.core.wikilinks._title_index` uses
+    for wikilink title resolution — a literal string comparison (no case-fold, no
+    whitespace normalization) — *not* the slug-normalized rule
+    :func:`_resolve_path` uses for CLI ``<id|slug>`` lookups. That is a deliberate
+    choice, not an oversight: a slug collision is exactly what this warning exists
+    to flag before it bites (see the ``team-awareness/9`` unit report), but the
+    exact-match index is the one already built for link resolution, so this reuses
+    it rather than inventing a second title-matching rule. A title differing only
+    by case or whitespace therefore does **not** warn here even though it *would*
+    still collide once slugified — a known, accepted gap; widening the rule is a
+    call for a future unit, made deliberately rather than silently.
+
+    Same-kind only — scans ``notes/`` and never sees a task, even a
+    title-identical one (see :func:`shards.core.tasks.find_duplicate_title` for
+    the task-side twin).
+
+    Reads every note's frontmatter (an ``O(vault-notes)`` scan via
+    :func:`note_rows`) — the same order of cost ``create_note``'s own id-collision
+    scan and the wikilink title index already pay. Call this *before* acquiring
+    the create lock: it is a plain, best-effort read (a concurrent creator can
+    still race past it unseen — this is advisory, not a guarantee) and must never
+    extend how long the per-kind allocator lock is held.
+    """
+    return _title_collision(note_rows(config), title, _ID_PREFIX)
+
+
 def select_notes(rows: Iterable[MetaRow], spec: NoteFilter) -> list[NoteView]:
     """Apply ``spec`` to ``rows`` — the *one* note filter/sort/limit implementation.
 

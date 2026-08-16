@@ -28,6 +28,7 @@ from shards.core.notes import (
     append_note,
     create_note,
     delete_note,
+    find_duplicate_title,
     get_note,
     resolve_slug,
     update_note,
@@ -93,11 +94,19 @@ def new_command(
             raise ValueError(f"invalid note type: {note_type}")
         body_text = _resolve_body(ctx, body, body_file)
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        # Checked before the write, so a hit names the *prior* id rather than the
+        # one about to be created (R9). Non-blocking: the create proceeds either
+        # way — this is advisory, not a lock-guarded guarantee.
+        existing_id = find_duplicate_title(config, title)
         # ValidationError (schema-invalid) and ValueError (owner outside
         # [tasks].collections, enforced once in core) both map to exit 2.
         note = create_note(
             config, title, note_type=note_type, tags=tag_list, owner=owner, body=body_text
         )
+    if existing_id is not None and not _output.is_quiet(ctx):
+        # Advisory, stderr-only — never inside the --json payload (design.md
+        # "Infrastructure on stderr, never in JSON payloads"); --quiet hides it.
+        typer.echo(f"note new: duplicate title, also used by {existing_id}", err=True)
     _output.emit_mutation(
         ctx, obj_id=note.id, updated=note.updated, verb="created", fields={"type": note.type}
     )

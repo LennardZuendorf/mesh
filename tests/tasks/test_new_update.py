@@ -32,6 +32,7 @@ from shards.cli.__main__ import app
 from shards.core.tasks import (
     TaskNotFoundError,
     create_task,
+    find_duplicate_title,
     update_task,
 )
 from shards.schemas.config import Config, load_config
@@ -500,3 +501,105 @@ def test_created_task_validates_as_task(cfg: Config, vault: Path) -> None:
     task = create_task(cfg, "Model Check")
     path = task_folder("open", vault) / f"{task.id}.md"
     Task.model_validate(_reload(path).metadata)
+
+
+# --------------------------------------------------------------------------- #
+# find_duplicate_title / duplicate-title warning at create (R9)                #
+# --------------------------------------------------------------------------- #
+
+
+def test_find_duplicate_title_exact_match(cfg: Config, vault: Path) -> None:
+    first = create_task(cfg, "Ship the Q3 report")
+    assert find_duplicate_title(cfg, "Ship the Q3 report") == first.id
+
+
+def test_find_duplicate_title_no_match_returns_none(cfg: Config, vault: Path) -> None:
+    create_task(cfg, "Existing Task Title")
+    assert find_duplicate_title(cfg, "Unrelated Task Title") is None
+
+
+def test_find_duplicate_title_case_and_whitespace_do_not_collide(cfg: Config, vault: Path) -> None:
+    """Mirrors ``wikilinks._title_index``'s exact-match rule — same rule the note
+    side asserts (asserted, not incidental)."""
+    create_task(cfg, "Ship The Report")
+    assert find_duplicate_title(cfg, "ship the report") is None
+    assert find_duplicate_title(cfg, "SHIP THE REPORT") is None
+    assert find_duplicate_title(cfg, " Ship The Report ") is None
+
+
+def test_find_duplicate_title_ignores_notes(cfg: Config, vault: Path) -> None:
+    """Same-kind only: a note with the same title is invisible to the task check."""
+    from shards.core.notes import create_note
+
+    create_note(cfg, "Shared Title", body="x")
+    assert find_duplicate_title(cfg, "Shared Title") is None
+
+
+def test_find_duplicate_title_scans_done_too(cfg: Config, vault: Path) -> None:
+    """A duplicate is detected against ``tasks/done/`` as well as ``tasks/open/``."""
+    _seed_task(vault, task_id="t-finished", title="Finished Title", status="done")
+    assert find_duplicate_title(cfg, "Finished Title") == "t-finished"
+
+
+def test_create_task_duplicate_title_still_succeeds(cfg: Config, vault: Path) -> None:
+    """Non-blocking: creating a second task with an existing title still creates
+    it (no exception, id returned, file on disk) rather than refusing."""
+    first = create_task(cfg, "Ship the Q3 report")
+    second = create_task(cfg, "Ship the Q3 report")
+    assert second.id != first.id
+    assert (task_folder("open", vault) / f"{second.id}.md").exists()
+    assert (task_folder("open", vault) / f"{first.id}.md").exists()
+
+
+# --------------------------------------------------------------------------- #
+# CLI — duplicate-title warning (R9)                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_task_new_duplicate_title_warns_and_still_creates(cfg: Config, vault: Path) -> None:
+    """Load-bearing: the create SUCCEEDS (exit 0, id on stdout, file on disk)
+    *and* a warning naming the prior id lands on stderr."""
+    first = _invoke(["--quiet", "task", "new", "Ship the Q3 report"])
+    assert first.exit_code == 0, first.output
+    first_id = first.output.strip()
+
+    second = _invoke(["task", "new", "Ship the Q3 report"])
+    assert second.exit_code == 0, second.output
+    assert first_id in second.stderr
+    assert "duplicate title" in second.stderr
+    second_id = second.output.strip().split()[-1]
+    assert (task_folder("open", vault) / f"{second_id}.md").exists()
+
+
+def test_cli_task_new_unique_title_emits_no_warning(cfg: Config, vault: Path) -> None:
+    result = _invoke(["task", "new", "A Wholly Unique Task Title"])
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+
+
+def test_cli_task_new_duplicate_title_quiet_suppresses_warning(cfg: Config, vault: Path) -> None:
+    _invoke(["--quiet", "task", "new", "Repeat Task Title"])
+    second = _invoke(["--quiet", "task", "new", "Repeat Task Title"])
+    assert second.exit_code == 0, second.output
+    assert second.stderr == ""
+
+
+def test_cli_task_new_duplicate_title_json_never_carries_warning(cfg: Config, vault: Path) -> None:
+    """``--json`` payload never carries the advisory text; the warning still
+    reaches stderr (only ``--quiet`` suppresses it)."""
+    _invoke(["--quiet", "task", "new", "JSON Dup Task"])
+    second = _invoke(["--json", "task", "new", "JSON Dup Task"])
+    assert second.exit_code == 0, second.output
+    obj = json.loads(second.stdout)
+    assert "warning" not in json.dumps(obj)
+    assert "duplicate title" in second.stderr
+
+
+def test_cli_task_new_note_task_same_title_no_warning(cfg: Config, vault: Path) -> None:
+    """A note and a task sharing a title do not warn (same-kind only, R9)."""
+    note_result = _invoke(["note", "new", "Cross-Kind Task Title", "--body", "x"])
+    assert note_result.exit_code == 0, note_result.output
+
+    task_result = _invoke(["task", "new", "Cross-Kind Task Title"])
+    assert task_result.exit_code == 0, task_result.output
+    assert task_result.stderr == ""

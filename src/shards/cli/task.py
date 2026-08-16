@@ -29,6 +29,7 @@ from shards.core.tasks import (
     claim_task,
     create_task,
     delete_task,
+    find_duplicate_title,
     finish_task,
     get_task,
     update_task,
@@ -75,6 +76,10 @@ def new_command(
     config = load_config()
     tag_list = _csv(tags) or []
     with cli_errors():
+        # Checked before the write, so a hit names the *prior* id rather than the
+        # one about to be created (R9). Non-blocking: the create proceeds either
+        # way — this is advisory, not a lock-guarded guarantee.
+        existing_id = find_duplicate_title(config, title)
         # ValidationError (schema-invalid) and ValueError (owner outside
         # [tasks].collections, enforced once in core) both map to exit 2.
         task = create_task(
@@ -88,6 +93,10 @@ def new_command(
             blocks=_csv(blocks),
             blocked_by=_csv(blocked_by),
         )
+    if existing_id is not None and not _output.is_quiet(ctx):
+        # Advisory, stderr-only — never inside the --json payload (design.md
+        # "Infrastructure on stderr, never in JSON payloads"); --quiet hides it.
+        typer.echo(f"task new: duplicate title, also used by {existing_id}", err=True)
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="created", fields={"status": task.status}
     )

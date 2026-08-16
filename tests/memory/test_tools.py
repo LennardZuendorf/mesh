@@ -261,6 +261,67 @@ def test_build_context_tool_calls_core_build_context(
 
 
 # --------------------------------------------------------------------------- #
+# Duplicate-title warnings (team-awareness/9, R9)                             #
+# --------------------------------------------------------------------------- #
+#
+# MCP has no stream an agent reads, so the same non-blocking advisory the CLI
+# puts on stderr travels in the JSON result's ``warnings`` key instead — never
+# on a stream nobody reads, never mixed into the entity's own fields.
+
+
+def test_note_new_duplicate_title_returns_warning(cfg: Config, vault: Path) -> None:
+    first = server.shards_note_new(title="Japan visa requirements for Q3 trip", body="x")
+    second = server.shards_note_new(title="Japan visa requirements for Q3 trip", body="y")
+
+    # Non-blocking: the second create still succeeded (a real id, a real file).
+    assert second["id"] != first["id"]
+    assert (vault / "notes" / f"{second['id']}.md").exists()
+    assert second["warnings"] == [f"duplicate title, also used by {first['id']}"]
+
+
+def test_note_new_unique_title_returns_empty_warnings(cfg: Config, vault: Path) -> None:
+    result = server.shards_note_new(title="A Wholly Unique MCP Title", body="x")
+    assert result["warnings"] == []
+
+
+def test_task_new_duplicate_title_returns_warning(cfg: Config, vault: Path) -> None:
+    first = server.shards_task_new(title="Ship the Q3 report")
+    second = server.shards_task_new(title="Ship the Q3 report")
+
+    assert second["id"] != first["id"]
+    assert (vault / "tasks" / "open" / f"{second['id']}.md").exists()
+    assert second["warnings"] == [f"duplicate title, also used by {first['id']}"]
+
+
+def test_task_new_unique_title_returns_empty_warnings(cfg: Config, vault: Path) -> None:
+    result = server.shards_task_new(title="A Wholly Unique MCP Task Title")
+    assert result["warnings"] == []
+
+
+def test_note_and_task_sharing_title_do_not_warn_over_mcp(cfg: Config, vault: Path) -> None:
+    """Same-kind only: a task and a note sharing a title never warn each other,
+    matching the CLI's cross-kind decision (R9)."""
+    server.shards_task_new(title="Cross-Kind MCP Title")
+    note = server.shards_note_new(title="Cross-Kind MCP Title", body="x")
+    assert note["warnings"] == []
+
+
+def test_note_new_duplicate_title_warning_reaches_structured_content(
+    cfg: Config, vault: Path
+) -> None:
+    """The warning lands in the *structured* MCP result, not a stream nobody
+    reads — dispatched through FastMCP's real ``call_tool``, not just the raw
+    function."""
+    server.shards_note_new(title="Structured Dup", body="x")
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_new", {"title": "Structured Dup", "body": "y"})
+    )
+    assert dispatched.structured_content is not None
+    assert len(dispatched.structured_content["warnings"]) == 1
+    assert "duplicate title" in dispatched.structured_content["warnings"][0]
+
+
+# --------------------------------------------------------------------------- #
 # core-hardening/3 — boundary mapping: domain/OSError -> a clean ToolError    #
 # --------------------------------------------------------------------------- #
 
