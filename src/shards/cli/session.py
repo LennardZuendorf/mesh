@@ -22,11 +22,19 @@ accepted both here and on the root callback; the two are coalesced so
 ``shards --mine recent-activity`` and ``shards recent-activity --mine`` behave
 identically.
 
-``session-start`` (memory/4) is the warm-start composite: it merges the
-``recent_activity(7d, mine)`` window with the caller's live ``open``/``claimed``
-task queue, de-duplicates by id, and orders *tasks first* then the remaining
-activity newest-first — the payload the ``SessionStart`` hook feeds a fresh
-agent session.
+``session-start`` (memory/4; widened by team-awareness/7) is the warm-start
+composite: it merges the caller's live ``open``/``claimed`` task queue, inbound
+mentions of the caller's nodes, and a ``recent_activity(7d)`` window,
+de-duplicates by id, and orders *tasks, then mentions, then the remaining
+activity* newest-first — the payload the ``SessionStart`` hook feeds a fresh
+agent session. ``--owner <agent>`` (honoured on both sides of the command name,
+like every other cross-cutting flag here) swaps the effective identity for
+*both* halves — "what would flights-agent's warm start show" — by building a
+:class:`~shards.schemas.config.Config` with that agent substituted for
+``[core].agent`` and driving every source off it, rather than adding a second
+identity parameter to each source. ``--team`` drops the identity filter on the
+activity half *only*; the task half always stays the effective agent's own
+open/claimed queue — widening never means "show me everyone's todo list."
 
 ``graph`` (cli-toolset-rework/3) delegates to :func:`shards.core.context.graph_query`
 — the same daemon-free BFS ``build-context`` performs, promoted to a first-class
@@ -42,7 +50,9 @@ someone else's note deliverable from ``t-184G`` itself.
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import msgspec.structs
 import typer
 
 from shards.cli._errors import cli_errors
@@ -51,11 +61,12 @@ from shards.core.lenses import (
     graph_query,
     project_view,
     recent_activity,
+    session_mentions,
     session_start_entries,
 )
 from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
-from shards.schemas.config import load_config
+from shards.schemas.config import Config, load_config
 
 _DAEMON_DOWN_NOTICE = "recent-activity: daemon down, scanning the folder directly"
 _SESSION_SINCE = "7d"
@@ -81,6 +92,49 @@ def _coalesce(ctx: typer.Context, json_out: bool, quiet: bool) -> tuple[bool, bo
     )
 
 
+def _coalesce_owner(ctx: typer.Context, owner: str | None) -> str | None:
+    """Coalesce a leaf ``--owner`` with the root callback's global ``--owner``.
+
+    Matches :func:`recent_activity_command`'s own inline coalesce — a flag given
+    on either side of the command name takes effect.
+    """
+    return owner if owner is not None else getattr(ctx.obj, "owner", None)
+
+
+def _as_agent(config: Config, agent: str | None) -> Config:
+    """``config`` with ``[core].agent`` substituted for ``agent`` (a no-op if unset).
+
+    ``--owner`` on ``session-start`` means "show me *that* agent's warm start",
+    and every source this command composes (``task_list(mine=True)``,
+    ``note_list(owner=...)``, ``recent_activity(mine=True)``,
+    :func:`~shards.core.lenses.session_mentions`) resolves "me" from
+    ``config.agent`` — so substituting the identity once, here, drives every
+    source through its existing ``mine``/``me`` semantics unchanged, rather than
+    threading a second "effective agent" parameter through each one. ``Config``
+    is an unfrozen :class:`msgspec.Struct`, so this is a cheap, local copy — the
+    caller's own ``config`` (and anyone else holding it) is never mutated.
+    """
+    if agent is None:
+        return config
+    return msgspec.structs.replace(config, core=msgspec.structs.replace(config.core, agent=agent))
+
+
+def _identity_columns(entry: dict[str, Any]) -> tuple[str, str]:
+    """``(owner, claimed_by)`` text-row columns for an activity/task/mention row.
+
+    ``"-"`` stands in for an absent value — the exact fallback :func:`task
+    list <shards.cli.task.list_command>` established (``35f7301``) for
+    ``claimed_by`` in its own text rows; this is that same one convention,
+    reused rather than re-invented, now covering ``owner`` too. Every row this
+    module renders already carries both keys as of team-awareness/6/7 (activity
+    rows, task dumps, and resolved mention entries alike), so this is a pure
+    format, never a fallback disk read.
+    """
+    owner = entry.get("owner")
+    claimed_by = entry.get("claimed_by")
+    return (str(owner) if owner else "-", str(claimed_by) if claimed_by else "-")
+
+
 def recent_activity_command(
     ctx: typer.Context,
     since: str | None = typer.Option(None, "--since", help="Recency window: 7d, 12h, or ISO."),
@@ -96,7 +150,7 @@ def recent_activity_command(
     # Coalesce the leaf flags with the root callback's global flags so a flag given
     # on either side of the command name takes effect.
     json_out, quiet = _coalesce(ctx, json_out, quiet)
-    owner = owner if owner is not None else getattr(ctx.obj, "owner", None)
+    owner = _coalesce_owner(ctx, owner)
     mine = mine or bool(getattr(ctx.obj, "mine", False))
 
     with cli_errors():
@@ -115,48 +169,85 @@ def recent_activity_command(
             typer.echo(str(entry.get("id", "")))
         return
     for entry in entries:
+        owner_col, claimed_col = _identity_columns(entry)
         typer.echo(
-            f"{entry.get('id', '')}\t{entry.get('type', '')}\t"
+            f"{entry.get('id', '')}\t{entry.get('type', '')}\t{owner_col}\t{claimed_col}\t"
             f"{entry.get('title', '')}\t{entry.get('path', '')}"
         )
 
 
 def session_start_command(
     ctx: typer.Context,
+    owner: str | None = typer.Option(
+        None, "--owner", help="Show this agent's warm start instead of mine."
+    ),
+    team: bool = typer.Option(
+        False, "--team", help="Widen the activity half to every agent (task half stays mine)."
+    ),
     meta_only: bool = typer.Option(
         False, "--meta-only", help="Omit note/task bodies (token-budget path)."
     ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON array."),
     quiet: bool = typer.Option(False, "--quiet", help="IDs only, one per line."),
 ) -> None:
-    """Warm-start payload: my recent activity (7d) + my open/claimed tasks (R4).
+    """Warm-start payload: my open/claimed tasks + mentions of me + recent activity (R4, R7).
 
-    Composes two read-only lenses — ``recent_activity(since=7d, mine)`` and
-    ``list_tasks(mine, open|claimed)`` — de-duplicates by id, and orders the
-    result *tasks first* (what I still owe) then the remaining activity entries
+    Composes three read-only lenses — ``list_tasks(mine, open|claimed)``,
+    :func:`~shards.core.lenses.session_mentions` (inbound links to nodes I own or
+    have claimed), and ``recent_activity(since=7d)`` — de-duplicates by id, and
+    orders the result *tasks, then mentions, then remaining activity*
     newest-first. ``--meta-only`` drops bodies for the token budget; the
-    ``SessionStart`` hook invokes ``session-start --meta-only --json``. Both
-    lenses are daemon-independent (or degrade transparently), so the payload is
-    produced with the daemon down; no infrastructure notice is emitted from this
-    composite path.
+    ``SessionStart`` hook invokes ``session-start --meta-only --json`` and this
+    stays valid and body-free under it (mentions and activity rows never carry a
+    body regardless). Every lens here is daemon-independent (or degrades
+    transparently), so the payload is produced identically with the daemon down;
+    no infrastructure notice is emitted from this composite path.
+
+    ``--owner <agent>`` (honoured on both sides of the command name — coalesced
+    with the root callback's global ``--owner``, like every other cross-cutting
+    flag) substitutes ``agent`` for the effective identity on *every* source —
+    "what would that agent's warm start show" — via :func:`_as_agent`.
+    ``--team`` drops the identity filter on the activity half only; the task
+    half (and the mentions target set, which is built from that same task
+    queue) always stays the effective agent's own.
     """
     config = load_config()
 
     # Coalesce the leaf flags with the root callback's global flags so a flag on
     # either side of the command name takes effect.
     json_out, quiet = _coalesce(ctx, json_out, quiet)
+    owner = _coalesce_owner(ctx, owner)
+    effective_config = _as_agent(config, owner)
+    me = effective_config.agent
 
     with cli_errors():
-        # Source A — my live queue: every open/claimed task I own or have claimed.
-        # Warm-index served when the daemon is up, disk-walked when it is down.
-        task_views = DaemonClient().task_list(config, mine=True, limit=None)
-        # Source B — my recent changes (dedup happens in the compose step below).
-        activity = recent_activity(
-            config, since=_SESSION_SINCE, owner=None, mine=True, limit=DEFAULT_RECENT_LIMIT
+        # Source A — the effective agent's live queue: every task they own or
+        # have claimed, any status (session_mentions needs the unfiltered set
+        # too — see below — so the status narrowing to open/claimed happens
+        # once, inside the compose step).
+        task_views = DaemonClient().task_list(effective_config, mine=True, limit=None)
+        # Every note the effective agent owns — the note half of "my nodes" for
+        # the mentions target set (a task has claimed_by too; a note does not).
+        note_views = DaemonClient().note_list(effective_config, owner=me, limit=None)
+        # Source B — inbound mentions of my nodes (team-awareness/7): one
+        # whole-vault reverse-``related`` pass, reused across every target in
+        # task_views/note_views rather than walked once per target.
+        mentions = session_mentions(
+            effective_config, task_views, note_views, me=me, since=_SESSION_SINCE
         )
-        # Compose the warm-start payload: open/claimed tasks first (deduped by
-        # id), then the remaining activity newest-first.
-        entries = session_start_entries(task_views, activity, meta_only=meta_only)
+        # Source C — recent changes. --team drops the identity filter here only;
+        # the task queue above (and the mentions target set built from it) never
+        # widens — dedup happens in the compose step below.
+        activity = recent_activity(
+            effective_config,
+            since=_SESSION_SINCE,
+            owner=None,
+            mine=not team,
+            limit=DEFAULT_RECENT_LIMIT,
+        )
+        # Compose the warm-start payload: open/claimed tasks, then mentions,
+        # then the remaining activity newest-first — deduped by id throughout.
+        entries = session_start_entries(task_views, activity, mentions, meta_only=meta_only)
 
     if json_out:
         typer.echo(json.dumps(entries))
@@ -166,9 +257,10 @@ def session_start_command(
             typer.echo(str(entry.get("id", "")))
         return
     for entry in entries:
+        owner_col, claimed_col = _identity_columns(entry)
         typer.echo(
-            f"{entry.get('id', '')}\t{entry.get('type', '')}\t"
-            f"{entry.get('title', '')}\t{entry.get('path', '')}"
+            f"{entry.get('id', '')}\t{entry.get('type', '')}\t{entry.get('reason', '')}\t"
+            f"{owner_col}\t{claimed_col}\t{entry.get('title', '')}\t{entry.get('path', '')}"
         )
 
 

@@ -461,3 +461,46 @@ def test_cli_no_notice_when_daemon_up(
     result = _invoke(["recent-activity", "--json"])
     assert result.exit_code == 0, result.output
     assert "daemon" not in result.stderr.lower()
+
+
+# --------------------------------------------------------------------------- #
+# CLI text rows: identity carry-over (team-awareness/7)                        #
+# --------------------------------------------------------------------------- #
+#
+# team-awareness/6 put owner/claimed_by on every activity row (JSON, MCP); its
+# brief scoped it to index/warm.py + core/activity.py, leaving the human text
+# rows still silent on "who did that?". team-awareness/7 closes that gap here,
+# following 35f7301's ``claimed_by or "-"`` convention rather than inventing a
+# second text-row style: ``id / type / owner / claimed_by / title / path``.
+
+
+def test_cli_text_rows_carry_owner_and_claimed_by(cfg: Config, vault: Path) -> None:
+    _seed_task(
+        vault,
+        task_id="t-peer",
+        title="Peer's Task",
+        status="claimed",
+        owner="other-agent",
+        claimed_by="third-agent",
+    )
+
+    result = _invoke(["recent-activity"])
+    assert result.exit_code == 0, result.output
+
+    fields = result.stdout.strip().splitlines()[0].split("\t")
+    assert fields[0] == "t-peer"
+    assert fields[1] == "task"
+    assert fields[2] == "other-agent"
+    assert fields[3] == "third-agent"
+    assert fields[4] == "Peer's Task"
+
+
+def test_cli_text_rows_use_dash_for_absent_claimed_by(cfg: Config, vault: Path) -> None:
+    _seed_note(vault, note_id="n-a", title="Alpha", owner="test-agent")
+
+    result = _invoke(["recent-activity"])
+    assert result.exit_code == 0, result.output
+
+    fields = result.stdout.strip().splitlines()[0].split("\t")
+    assert fields[2] == "test-agent"
+    assert fields[3] == "-"  # notes never carry claimed_by

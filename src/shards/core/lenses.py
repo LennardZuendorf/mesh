@@ -21,7 +21,11 @@ warm-index-or-fallback shape, so they are grouped here as one layer that surface
   that note plus every task whose ``project`` soft link points at it — "my
   project and its work in one call" — as a :class:`ProjectResult`.
 * **session-start** — :func:`session_start_entries`: the warm-start *composite*
-  that merges a recent-activity window with the caller's live task queue.
+  that merges a recent-activity window, the caller's live task queue, and
+  (team-awareness/7) :func:`session_mentions` — inbound links to nodes the
+  caller owns or has claimed, the notify half that turns a peer's
+  ``[[t-184G]]`` reference into something the addressee's warm start actually
+  surfaces.
 * **vault-status** — :func:`status_inputs` + :func:`status_report`: the
   vault-health composite behind ``shards status``. The daemon's ``vault.status``
   handler computes the index-derivable half (:func:`status_inputs`) and the client
@@ -46,9 +50,16 @@ from pathlib import Path
 from typing import Any
 
 from shards.core.activity import recent_activity
-from shards.core.context import GraphResult, SeedNotFoundError, build_context, graph_query
+from shards.core.context import (
+    GraphResult,
+    SeedNotFoundError,
+    _inbound_index,
+    _resolve_entry,
+    build_context,
+    graph_query,
+)
 from shards.core.errors import ShardsError
-from shards.core.notes import NoteError, NoteView, get_note
+from shards.core.notes import NoteError, NoteView, _parse_since, get_note
 from shards.core.tasks import TaskView
 from shards.core.wikilinks import find_dangling
 from shards.daemon.client import DaemonClient
@@ -69,6 +80,7 @@ __all__ = [
     "project_view",
     "recent_activity",
     "scan_stale_locks",
+    "session_mentions",
     "session_start_entries",
     "status_inputs",
     "status_report",
@@ -103,41 +115,134 @@ def _updated_key(entry: dict[str, Any]) -> float:
     return 0.0
 
 
+def session_mentions(
+    config: Config,
+    task_views: list[TaskView],
+    note_views: list[NoteView],
+    *,
+    me: str | None,
+    since: str,
+) -> list[dict[str, Any]]:
+    """Inbound mentions of my nodes — the notify half of session-start (team-awareness/7).
+
+    "My nodes" are every task I own or have claimed (``owner == me or
+    claimed_by == me`` — exactly ``task_views`` as the caller already fetched it
+    for the task half: unfiltered by status, since a mention of a task I already
+    finished is still a mention) plus every note I own (``owner == me``,
+    ``note_views``). For each target id, the whole-vault reverse-``related`` map
+    (:func:`shards.core.context._inbound_index`) is built **once** — not once per
+    target, which is exactly the batched form its own docstring calls for — and
+    every target's inbound (mentioning) ids are unioned into one mentioner set,
+    so a node mentioning two of my targets is still resolved once.
+
+    Each mentioner is resolved to a full entry via
+    :func:`shards.core.context._resolve_entry` — the same single-node resolver
+    :func:`~shards.core.context.build_context`/:func:`~shards.core.context.graph_query`
+    use, so there is no second id→entry lookup implementation. A resolved
+    mentioner is dropped when it is unresolvable (a dangling/deleted mentioner,
+    matching every other inbound-consuming path), when its own ``owner`` is
+    ``me`` (a mention *by* me of my own node — R7's "mentions by me of my own
+    nodes are excluded"), or when its ``updated`` falls outside the ``since``
+    recency floor (the identical window :func:`shards.core.activity.recent_activity`
+    applies, parsed once via :func:`shards.core.notes._parse_since`, and reusing
+    :func:`_updated_key` so the mtime-fallback rule cannot drift between the two
+    windows). Surviving entries are sorted newest-first, matching the
+    remaining-activity ordering rule.
+
+    Entirely daemon-independent: :func:`_inbound_index` reads straight off disk
+    (module docstring, "Inbound derivation"), so this composes to an identical
+    result with the daemon up or down — no infrastructure notice is ever owed
+    from this half.
+    """
+    my_ids: set[str] = {view.task.id for view in task_views}
+    my_ids.update(view.note.id for view in note_views)
+    if not my_ids:
+        return []
+
+    cutoff = _parse_since(since).timestamp()
+    inbound_map = _inbound_index(config)
+    mentioner_ids: set[str] = set()
+    for target_id in my_ids:
+        mentioner_ids.update(inbound_map.get(target_id, []))
+
+    entries: list[dict[str, Any]] = []
+    for mentioner_id in mentioner_ids:
+        entry = _resolve_entry(config, mentioner_id)
+        if entry is None or entry.get("owner") == me:
+            continue
+        if _updated_key(entry) < cutoff:
+            continue
+        entries.append(entry)
+
+    entries.sort(key=_updated_key, reverse=True)
+    return entries
+
+
 def session_start_entries(
     task_views: list[TaskView],
     activity: list[dict[str, Any]],
+    mentions: list[dict[str, Any]],
     *,
     meta_only: bool,
 ) -> list[dict[str, Any]]:
-    """Compose the warm-start payload from a live task queue + a recent-activity window.
+    """Compose the warm-start payload: live task queue + mentions + recent activity.
 
     Keeps only ``open``/``claimed`` tasks (the caller's live queue), renders each
-    as its frontmatter dict plus ``path`` (and ``body`` unless ``meta_only``), then
-    appends the recent-activity remainder — every activity row whose id is not
-    already in the task section — re-sorted newest-first (``updated`` proxied by
-    ``mtime``). The result is *tasks first* (what the agent still owes) then the
-    remaining activity, de-duplicated by id.
+    as its frontmatter dict plus ``path`` (and ``body`` unless ``meta_only``);
+    appends the already-resolved ``mentions`` (:func:`session_mentions`) whose id
+    is not already a task; appends the recent-activity remainder — every activity
+    row whose id is not already a task or a mention — re-sorted newest-first
+    (``updated`` proxied by ``mtime``). Every entry gains a ``reason`` key —
+    ``"task"``, ``"mention"``, or ``"activity"`` — so a flat JSON array stays
+    self-describing (team-awareness/7).
+
+    The result is **tasks, then mentions, then remaining activity**, de-duplicated
+    by id across all three sections. Precedence when an id would otherwise appear
+    twice: the *earlier* section wins — a mention that is also one of my own
+    tasks (I hold it, and something else I hold links it) surfaces once, under
+    ``reason="task"``, never duplicated as a mention; likewise a mention that
+    also falls in the recent-activity window surfaces once, under
+    ``reason="mention"``. This is the same "tasks first" precedence the compose
+    already used before mentions existed, extended one section further.
 
     Bodies are read here, per surviving task, rather than taken off the passed
     views: a list-shaped read is served from the daemon's warm index, which holds
     frontmatter only, so its rows carry no body. Reading them here keeps the
     payload identical daemon-up and daemon-down, and costs one ``open()`` per
-    *live* task instead of a body-carrying walk of the whole vault.
+    *live* task instead of a body-carrying walk of the whole vault. Mentions and
+    activity rows never carry a body regardless of ``meta_only`` — neither
+    ``_resolve_entry`` nor a warm-index row reads one — so this stays sane under
+    ``--meta-only`` by construction, not by a special case here.
     """
     open_views = [view for view in task_views if view.task.status in _OPEN_STATUSES]
-    task_ids = {view.task.id for view in open_views}
+    seen_ids: set[Any] = {view.task.id for view in open_views}
     task_entries: list[dict[str, Any]] = []
     for view in open_views:
         entry = view.task.model_dump(mode="json")
         entry["path"] = str(view.path)
+        entry["reason"] = "task"
         if not meta_only:
             entry["body"] = read_body(view.path)
         task_entries.append(entry)
 
-    remaining = [entry for entry in activity if entry.get("id") not in task_ids]
+    mention_entries: list[dict[str, Any]] = []
+    for entry in mentions:
+        entry_id = entry.get("id")
+        if entry_id in seen_ids:
+            continue
+        seen_ids.add(entry_id)
+        mention_entries.append({**entry, "reason": "mention"})
+
+    remaining = []
+    for entry in activity:
+        entry_id = entry.get("id")
+        if entry_id in seen_ids:
+            continue
+        seen_ids.add(entry_id)
+        remaining.append({**entry, "reason": "activity"})
     remaining.sort(key=_updated_key, reverse=True)
 
-    return task_entries + remaining
+    return task_entries + mention_entries + remaining
 
 
 # --------------------------------------------------------------------------- #

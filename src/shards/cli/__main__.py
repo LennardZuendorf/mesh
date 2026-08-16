@@ -73,7 +73,7 @@ _LEAVES: dict[str, tuple[str, str, str]] = {
     "session-start": (
         "shards.cli.session",
         "session_start_command",
-        "Warm-start payload: my recent activity (7d) + my open/claimed tasks.",
+        "Warm-start payload: my tasks + mentions of me + recent activity.",
     ),
 }
 # Display order in ``shards --help`` (matches the pre-decomposition wiring):
