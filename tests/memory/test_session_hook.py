@@ -610,6 +610,87 @@ def test_mention_outside_window_is_excluded(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# team-awareness/7 fix round 1 — the note-owned half of the target set,         #
+# and the unset-identity guard that half needs (review findings 1 & 2)         #
+# --------------------------------------------------------------------------- #
+
+
+def test_mention_of_my_note_surfaces_as_mention(cfg: Config, vault: Path) -> None:
+    """The target set is nodes I own *or* have claimed, not tasks only.
+
+    A note I own (no task involved at all) gets mentioned by someone else; the
+    mention must surface exactly like a mentioned task does. This is the one
+    path team-awareness/7 went beyond the brief's own (task-only) scenarios on
+    — tech.md's literal "owner == me or claimed_by == me" — and it needs its
+    own direct coverage, not just inference from the task-mention tests.
+    """
+    _seed_note(vault, note_id="n-my-note", owner="test-agent", title="My idea")
+    _seed_note(
+        vault,
+        note_id="n-reply",
+        owner="other-agent",
+        title="Following up",
+        related=["n-my-note"],
+    )
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    assert {e["id"]: e["reason"] for e in arr}.get("n-reply") == "mention"
+
+
+def test_no_identity_configured_never_floods_mentions_with_the_whole_vault(
+    vault: Path, config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``[core].agent`` and no ``$SHARDS_AGENT``: the note half degrades to
+    empty, exactly like the task half already did — never to "every note in
+    the vault is mine" (review finding 1).
+
+    ``note_list``'s ``owner=None`` means *unfiltered* to ``select_notes``
+    (``if spec.owner is not None and note.owner != spec.owner: continue`` —
+    core/notes.py), unlike ``task_list``'s ``mine``, whose ``task.owner !=
+    spec.me`` degrades to matching nothing when ``spec.me`` is ``None``. Before
+    the fix, an unset identity made ``session_mentions`` treat *every* note as
+    one of "my nodes", so a note mentioning any other note would wrongly
+    surface as ``reason=mention`` even though nothing is actually "mine".
+    """
+    config_path.write_text(
+        "\n".join(
+            (
+                "[core]",
+                f'tolaria_path = "{vault}"',
+                "",
+                "[tasks]",
+                'collections = ["research-agent", "ops-agent"]',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+
+    # Adversarial fixture: a note mentioning another note, neither owned by any
+    # particular caller — with the pre-fix bug, an unset identity would still
+    # have swept the target note into "my nodes" (owner=None fetched *every*
+    # note) and surfaced the mentioner.
+    _seed_note(vault, note_id="n-target", owner="research-agent")
+    _seed_note(vault, note_id="n-mentioner", owner="ops-agent", related=["n-target"])
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    # The mentions section specifically must stay empty — the property this fix
+    # restores. (``recent_activity``'s own ``mine`` matching against an unset
+    # identity is a separate, pre-existing quirk — out of scope here — so
+    # ``n-mentioner``/``n-target`` may still surface under ``reason="activity"``;
+    # what must never happen again is either one tagged ``reason="mention"``.)
+    assert [e for e in arr if e.get("reason") == "mention"] == []
+
+
+# --------------------------------------------------------------------------- #
 # team-awareness/7 — dedupe precedence across all three sections               #
 # --------------------------------------------------------------------------- #
 
