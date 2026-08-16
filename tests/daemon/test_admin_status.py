@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import frontmatter
@@ -35,12 +35,14 @@ from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
 from shards.cli.admin import (
+    _agent_breakdown,
     daemon_running,
     default_pid_path,
     read_pid,
     write_pid,
 )
 from shards.core.lenses import scan_stale_locks
+from shards.core.tasks import list_tasks
 from shards.daemon.client import DaemonClient
 from shards.schemas.config import Config, load_config
 from shards.storage.files import note_folder, task_folder
@@ -130,20 +132,23 @@ def _seed_task(
     status: str = "open",
     title: str = "Seed Task",
     body: str = "t",
+    owner: str = "seed-agent",
+    claimed_by: str | None = None,
+    updated: datetime | None = None,
 ) -> Path:
-    when = datetime.now(UTC)
+    when = updated if updated is not None else datetime.now(UTC)
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
         "title": title,
         "tags": [],
-        "owner": "seed-agent",
+        "owner": owner,
         "created": when,
         "updated": when,
         "related": [],
         "status": status,
         "priority": None,
-        "claimed_by": None,
+        "claimed_by": claimed_by,
         "blocks": [],
         "blocked_by": [],
     }
@@ -377,6 +382,104 @@ def test_status_reports_stale_locks(cfg: Config, vault: Path, runtime_dir: Path)
     assert result.exit_code == 0, result.output
     stale = json.loads(result.output)["stale_locks"]
     assert any(p.endswith("n-dead.lock") for p in stale)
+
+
+# --------------------------------------------------------------------------- #
+# _agent_breakdown (team-awareness/4) — per-agent open/claimed/stale-claim      #
+# --------------------------------------------------------------------------- #
+
+
+def test_agent_breakdown_counts_owns_open_and_claimed(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-owned", status="open", owner="agent-a")
+    _seed_task(vault, task_id="t-held", status="claimed", owner="agent-b", claimed_by="agent-a")
+    agents = _agent_breakdown(list_tasks(cfg, limit=None))
+    assert agents["agent-a"] == {"owns_open": 1, "claimed": 1, "stale_claims": 0}
+    assert agents["agent-b"] == {"owns_open": 0, "claimed": 0, "stale_claims": 0}
+
+
+def test_agent_breakdown_flags_stale_claims(cfg: Config, vault: Path) -> None:
+    """A claim untouched for four days counts as stale; a fresh one does not."""
+    _seed_task(
+        vault,
+        task_id="t-idle",
+        status="claimed",
+        owner="operator",
+        claimed_by="agent-a",
+        updated=datetime.now(UTC) - timedelta(days=4),
+    )
+    _seed_task(
+        vault,
+        task_id="t-fresh",
+        status="claimed",
+        owner="operator",
+        claimed_by="agent-b",
+        updated=datetime.now(UTC),
+    )
+    agents = _agent_breakdown(list_tasks(cfg, limit=None))
+    assert agents["agent-a"]["claimed"] == 1
+    assert agents["agent-a"]["stale_claims"] == 1
+    assert agents["agent-b"]["claimed"] == 1
+    assert agents["agent-b"]["stale_claims"] == 0
+
+
+def test_agent_breakdown_includes_an_agent_holding_nothing_current(
+    cfg: Config, vault: Path
+) -> None:
+    """An agent who owns only a finished task still gets a zero-filled row."""
+    _seed_task(vault, task_id="t-done", status="done", owner="agent-a")
+    agents = _agent_breakdown(list_tasks(cfg, limit=None))
+    assert agents["agent-a"] == {"owns_open": 0, "claimed": 0, "stale_claims": 0}
+
+
+def test_agent_breakdown_empty_vault_is_empty_dict(cfg: Config, vault: Path) -> None:
+    assert _agent_breakdown(list_tasks(cfg, limit=None)) == {}
+
+
+# --------------------------------------------------------------------------- #
+# shards status — the agents breakdown end to end (team-awareness/4)           #
+# --------------------------------------------------------------------------- #
+
+
+def test_status_json_includes_agents_breakdown(cfg: Config, vault: Path, runtime_dir: Path) -> None:
+    _seed_task(vault, task_id="t-owned", status="open", owner="agent-a")
+    _seed_task(vault, task_id="t-held", status="claimed", owner="agent-b", claimed_by="agent-a")
+    result = _invoke(["--json", "status"])
+    assert result.exit_code == 0, result.output
+    obj = json.loads(result.output)
+    assert obj["agents"]["agent-a"] == {"owns_open": 1, "claimed": 1, "stale_claims": 0}
+
+
+def test_status_human_output_lists_agents(cfg: Config, vault: Path, runtime_dir: Path) -> None:
+    _seed_task(vault, task_id="t-owned", status="open", owner="agent-a")
+    result = _invoke(["status"])
+    assert result.exit_code == 0, result.output
+    assert "agents:" in result.output
+    assert "agent-a" in result.output
+
+
+def test_status_human_output_says_none_when_no_agents(
+    cfg: Config, vault: Path, runtime_dir: Path
+) -> None:
+    result = _invoke(["status"])
+    assert result.exit_code == 0, result.output
+    assert "agents: (none)" in result.output
+
+
+def test_status_agents_warm_and_cold_agree(cfg: Config, vault: Path, sock_dir: Path) -> None:
+    """The breakdown is derived from ``task.list``, so it inherits warm/cold parity."""
+    from tests.daemon.conftest import running_daemon
+
+    _seed_task(vault, task_id="t-owned", status="open", owner="agent-a")
+    _seed_task(vault, task_id="t-held", status="claimed", owner="agent-b", claimed_by="agent-a")
+    cold_agents = _agent_breakdown(
+        DaemonClient(socket_path=sock_dir / "nonexistent.sock").task_list(cfg, limit=None)
+    )
+    with running_daemon(sock_dir / "shards.sock", config=cfg):
+        warm_agents = _agent_breakdown(
+            DaemonClient(socket_path=sock_dir / "shards.sock").task_list(cfg, limit=None)
+        )
+    assert cold_agents == warm_agents
+    assert cold_agents["agent-a"] == {"owns_open": 1, "claimed": 1, "stale_claims": 0}
 
 
 # --------------------------------------------------------------------------- #

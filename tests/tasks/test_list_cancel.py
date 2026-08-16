@@ -245,6 +245,85 @@ def test_list_since_duration_days(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# list_tasks (core) — --stale (team-awareness/4): the inverse of --since        #
+# --------------------------------------------------------------------------- #
+
+
+def test_stale_is_the_inverse_of_since_on_one_fixture(cfg: Config, vault: Path) -> None:
+    """The load-bearing inversion: one fixture, opposite outcomes.
+
+    A task claimed and idle for four days is returned by ``--stale 2d`` and
+    hidden by ``--since 2d`` — proving the two are genuine inverses over the same
+    ``updated`` field rather than two filters that happen to both pass on
+    different data.
+    """
+    _seed_task(
+        vault,
+        task_id="t-idle",
+        status="claimed",
+        claimed_by="agent-a",
+        updated=_now() - timedelta(days=4),
+    )
+    assert {v.task.id for v in list_tasks(cfg, stale="2d")} == {"t-idle"}
+    assert {v.task.id for v in list_tasks(cfg, since="2d")} == set()
+
+
+def test_stale_excludes_a_recently_touched_task(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-fresh", updated=_now() - timedelta(hours=1))
+    assert {v.task.id for v in list_tasks(cfg, stale="2d")} == set()
+
+
+def test_stale_and_since_combined_yield_a_band(cfg: Config, vault: Path) -> None:
+    """Combined, ``--since``/``--stale`` band-pass: not fresher, not older."""
+    _seed_task(vault, task_id="t-fresh", updated=_now() - timedelta(hours=1))
+    _seed_task(vault, task_id="t-band", updated=_now() - timedelta(days=4))
+    _seed_task(vault, task_id="t-ancient", updated=_now() - timedelta(days=10))
+    ids = {v.task.id for v in list_tasks(cfg, since="7d", stale="2d")}
+    assert ids == {"t-band"}
+
+
+def test_stale_does_not_imply_a_status(cfg: Config, vault: Path) -> None:
+    """``--stale`` alone filters purely on recency — statuses are untouched."""
+    _seed_task(vault, task_id="t-open-old", status="open", updated=_now() - timedelta(days=5))
+    _seed_task(vault, task_id="t-done-old", status="done", updated=_now() - timedelta(days=5))
+    ids = {v.task.id for v in list_tasks(cfg, stale="2d")}
+    assert ids == {"t-open-old", "t-done-old"}
+
+
+def test_invalid_stale_duration_raises(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-a")
+    with pytest.raises(ValueError):
+        list_tasks(cfg, stale="bogus")
+
+
+# --------------------------------------------------------------------------- #
+# list_tasks (core) — --status CSV (team-awareness/4): union, not exact-match   #
+# --------------------------------------------------------------------------- #
+
+
+def test_status_csv_returns_the_union(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-open", status="open", updated=_now())
+    _seed_task(vault, task_id="t-claimed", status="claimed", updated=_now() - timedelta(minutes=1))
+    _seed_task(vault, task_id="t-done", status="done", updated=_now() - timedelta(minutes=2))
+    ids = {v.task.id for v in list_tasks(cfg, status="open,claimed")}
+    assert ids == {"t-open", "t-claimed"}
+
+
+def test_status_single_value_still_exact_match(cfg: Config, vault: Path) -> None:
+    """A single ``--status`` value behaves exactly as before the CSV change."""
+    _seed_task(vault, task_id="t-open", status="open", updated=_now())
+    _seed_task(vault, task_id="t-claimed", status="claimed", updated=_now() - timedelta(minutes=1))
+    ids = {v.task.id for v in list_tasks(cfg, status="open")}
+    assert ids == {"t-open"}
+
+
+def test_status_csv_unknown_status_raises(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-a")
+    with pytest.raises(ValueError):
+        list_tasks(cfg, status="open,bogus")
+
+
+# --------------------------------------------------------------------------- #
 # list_tasks (core) — sort / limit                                             #
 # --------------------------------------------------------------------------- #
 
@@ -506,6 +585,81 @@ def test_cli_list_invalid_sort_exits_2(cfg: Config, vault: Path) -> None:
     _seed_task(vault, task_id="t-a")
     result = _invoke(["task", "list", "--sort", "bogus"])
     assert result.exit_code == 2
+
+
+def test_cli_list_status_csv_returns_union(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-open", status="open", updated=_now())
+    _seed_task(vault, task_id="t-claimed", status="claimed", updated=_now() - timedelta(minutes=1))
+    _seed_task(vault, task_id="t-done", status="done", updated=_now() - timedelta(minutes=2))
+    result = _invoke(["--quiet", "task", "list", "--status", "open,claimed"])
+    assert result.exit_code == 0, result.output
+    assert set(result.output.split()) == {"t-open", "t-claimed"}
+
+
+def test_cli_list_status_csv_unknown_exits_2(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-a")
+    result = _invoke(["task", "list", "--status", "open,bogus"])
+    assert result.exit_code == 2, result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_list_stale_is_inverse_of_since(cfg: Config, vault: Path) -> None:
+    _seed_task(
+        vault,
+        task_id="t-idle",
+        status="claimed",
+        claimed_by="agent-a",
+        updated=_now() - timedelta(days=4),
+    )
+    stale_result = _invoke(["--quiet", "task", "list", "--stale", "2d"])
+    since_result = _invoke(["--quiet", "task", "list", "--since", "2d"])
+    assert stale_result.output.split() == ["t-idle"]
+    assert since_result.output.split() == []
+
+
+def test_cli_list_invalid_stale_exits_2(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-a")
+    result = _invoke(["task", "list", "--stale", "bogus"])
+    assert result.exit_code == 2, result.output
+    assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------- #
+# CLI — shards task list human text rows carry claimed_by (team-awareness/4)    #
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_list_text_row_shows_claimed_by(cfg: Config, vault: Path) -> None:
+    _seed_task(
+        vault,
+        task_id="t-held",
+        title="Held Task",
+        status="claimed",
+        claimed_by="agent-a",
+        updated=_now(),
+    )
+    result = _invoke(["task", "list"])
+    assert result.exit_code == 0, result.output
+    line = result.output.strip()
+    assert line.split("\t") == ["t-held", "claimed", "agent-a", "Held Task"]
+
+
+def test_cli_list_text_row_shows_dash_when_unclaimed(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-open", title="Open Task", status="open", updated=_now())
+    result = _invoke(["task", "list"])
+    assert result.exit_code == 0, result.output
+    line = result.output.strip()
+    assert line.split("\t") == ["t-open", "open", "-", "Open Task"]
+
+
+def test_cli_list_json_output_unchanged_by_the_row_format_change(cfg: Config, vault: Path) -> None:
+    """The text-row change (id/status/claimed_by/title) never touches --json."""
+    _seed_task(vault, task_id="t-held", status="claimed", claimed_by="agent-a", updated=_now())
+    result = _invoke(["--json", "task", "list"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.output)
+    assert arr[0]["claimed_by"] == "agent-a"
+    assert set(arr[0]) >= {"id", "status", "claimed_by", "title", "owner"}
 
 
 def test_list_command_registered() -> None:

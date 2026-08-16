@@ -22,7 +22,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import frontmatter
 from msgspec import ValidationError
@@ -45,7 +45,7 @@ from shards.core.notes import (
 )
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
-from shards.schemas.task import Task
+from shards.schemas.task import Task, TaskStatus
 from shards.storage.files import atomic_write, read_post, task_folder
 from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
@@ -54,6 +54,11 @@ _ID_PREFIX = "t-"
 _TASK_SUBDIRS: tuple[str, ...] = ("open", "done")
 _SORT_FIELDS: tuple[str, ...] = ("updated", "created", "title")
 _DEFAULT_LIMIT = 20
+# The write-boundary status vocabulary, reused as the *read*-boundary vocabulary
+# for ``--status`` (team-awareness/4): a CSV entry outside this set is a caller
+# error (exit 2), never a silent empty result. Derived from the schema's own
+# ``Literal`` — one vocabulary, not a second copy that could drift from it.
+_TASK_STATUSES: tuple[str, ...] = get_args(TaskStatus)
 # Terminal statuses: a re-run of finish/cancel on one of these is a no-op — the
 # file already lives in ``tasks/done/`` and the outcome/cancel section is fixed.
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "cancelled"})
@@ -557,6 +562,27 @@ def get_task(config: Config, task_id: str) -> TaskView:
 # --------------------------------------------------------------------------- #
 
 
+def _parse_status_csv(value: str | None) -> tuple[str, ...] | None:
+    """Split ``--status`` into a validated, order-preserving set of statuses.
+
+    A single value behaves exactly as before (a one-element tuple); a
+    comma-separated list (``"open,claimed"``) becomes a membership test instead
+    of the old exact-match, so "all live work" is one call. Unknown entries raise
+    ``ValueError`` (CLI exit 2 via ``cli_errors``) naming the offender — a typo in
+    ``--status`` must fail loudly, never silently return nothing. Whitespace
+    around each entry is trimmed; empty entries (a stray comma) are dropped.
+    """
+    if value is None:
+        return None
+    statuses = tuple(dict.fromkeys(s.strip() for s in value.split(",") if s.strip()))
+    if not statuses:
+        return None
+    unknown = [s for s in statuses if s not in _TASK_STATUSES]
+    if unknown:
+        raise ValueError(f"unknown status: {', '.join(unknown)} (use {', '.join(_TASK_STATUSES)})")
+    return statuses
+
+
 @dataclass(frozen=True)
 class TaskFilter:
     """A normalized, socket-transportable ``task list`` filter/sort/limit spec.
@@ -566,9 +592,21 @@ class TaskFilter:
     explicitly in ``me`` rather than reading a config: the daemon's own
     ``[core].agent`` is *not* the calling agent's, so "mine" must be resolved on
     the caller's side and travel with the request.
+
+    ``status`` is a membership set (team-awareness/4): ``None`` matches every
+    status, otherwise a task's status must be *in* the set — a single-entry set
+    behaves exactly like the old exact-match. ``cutoff`` (``--since``) and
+    ``stale_cutoff`` (``--stale``) are the two ends of one recency axis, both
+    parsed by :func:`shards.core.notes._parse_since` from the identical duration
+    grammar: ``cutoff`` is a *floor* (keep ``updated >= cutoff``, i.e. "touched
+    recently"), ``stale_cutoff`` is a *ceiling* (keep ``updated < stale_cutoff``,
+    i.e. "not touched recently") — literal inverses over the same field. They are
+    conjunctive and independent of ``status``: passing both narrows to the band
+    ``cutoff <= updated < stale_cutoff``, and neither implies any particular
+    status filter.
     """
 
-    status: str | None = None
+    status: tuple[str, ...] | None = None
     owner: str | None = None
     mine: bool = False
     me: str | None = None
@@ -576,6 +614,7 @@ class TaskFilter:
     any_tag: bool = False
     project: str | None = None
     cutoff: datetime | None = None
+    stale_cutoff: datetime | None = None
     sort: str = "updated"
     limit: int | None = _DEFAULT_LIMIT
 
@@ -591,20 +630,22 @@ class TaskFilter:
         any_tag: bool = False,
         project: str | None = None,
         since: str | None = None,
+        stale: str | None = None,
         sort: str = "updated",
         limit: int | None = _DEFAULT_LIMIT,
     ) -> TaskFilter:
         """Validate and normalize the caller-level arguments into a spec.
 
         Resolves ``mine`` against ``config.agent`` here, at the caller's boundary.
-        Raises ``ValueError`` for an unknown ``sort`` field or an unparseable
-        ``since`` (the boundary mappers turn both into exit 2) — *before* any
-        socket call, so validation never depends on the daemon being up.
+        Raises ``ValueError`` for an unknown ``sort`` field, an unknown status in
+        ``status``, or an unparseable ``since``/``stale`` (the boundary mappers
+        turn all of them into exit 2) — *before* any socket call, so validation
+        never depends on the daemon being up.
         """
         if sort not in _SORT_FIELDS:
             raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
         return cls(
-            status=status,
+            status=_parse_status_csv(status),
             owner=owner,
             mine=mine,
             me=config.agent,
@@ -612,6 +653,7 @@ class TaskFilter:
             any_tag=any_tag,
             project=project,
             cutoff=_parse_since(since) if since else None,
+            stale_cutoff=_parse_since(stale) if stale else None,
             sort=sort,
             limit=limit,
         )
@@ -619,7 +661,7 @@ class TaskFilter:
     def to_params(self) -> dict[str, Any]:
         """Render the spec as JSON-safe RPC params."""
         return {
-            "status": self.status,
+            "status": list(self.status) if self.status else None,
             "owner": self.owner,
             "mine": self.mine,
             "me": self.me,
@@ -627,16 +669,26 @@ class TaskFilter:
             "any_tag": self.any_tag,
             "project": self.project,
             "cutoff": self.cutoff.isoformat() if self.cutoff is not None else None,
+            "stale_cutoff": self.stale_cutoff.isoformat()
+            if self.stale_cutoff is not None
+            else None,
             "sort": self.sort,
             "limit": self.limit,
         }
 
     @classmethod
     def from_params(cls, params: Mapping[str, Any]) -> TaskFilter:
-        """Rebuild a spec from untrusted RPC params (see :meth:`NoteFilter.from_params`)."""
+        """Rebuild a spec from untrusted RPC params (see :meth:`NoteFilter.from_params`).
+
+        The wire is not a validation boundary — :meth:`build` already validated
+        ``status``/``sort``/durations on the caller's side — so a wrong-typed or
+        unknown ``status`` entry here is dropped defensively via
+        :func:`shards.core.notes._str_tuple` rather than raising, exactly like
+        every other field in this method.
+        """
         sort = params.get("sort")
         return cls(
-            status=_opt_str(params.get("status")),
+            status=_str_tuple(params.get("status")),
             owner=_opt_str(params.get("owner")),
             mine=bool(params.get("mine", False)),
             me=_opt_str(params.get("me")),
@@ -644,6 +696,7 @@ class TaskFilter:
             any_tag=bool(params.get("any_tag", False)),
             project=_opt_str(params.get("project")),
             cutoff=_opt_datetime(params.get("cutoff")),
+            stale_cutoff=_opt_datetime(params.get("stale_cutoff")),
             sort=sort if sort in _SORT_FIELDS else "updated",
             limit=_opt_int(params.get("limit")),
         )
@@ -671,14 +724,19 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
     whose frontmatter carries a valid shards id (``t-`` prefix), declare
     ``type: task``, and validate against :class:`Task` are surfaced; Tolaria /
     foreign / malformed rows are skipped silently. Filters (all conjunctive):
-    exact ``status``, exact ``owner`` (on the ``owner`` field), ``mine``
-    (``owner`` *or* ``claimed_by`` equals ``spec.me``), ``tags`` (AND, or OR with
-    ``any_tag``), exact ``project`` (the project-scoped view — only tasks whose
-    ``project`` soft link matches), and the ``cutoff`` recency bound on
-    ``updated``. ``sort`` is ``updated``/``created`` (descending) or ``title``
-    (ascending), tie-broken by path so the order is deterministic and identical on
-    both paths; ``limit`` caps the result (``None`` for unbounded). Shares the
-    ``--since``/tag/sort semantics with :func:`shards.core.notes.select_notes`.
+    ``status`` membership (a CSV set — ``open,claimed`` matches either; a single
+    value matches exactly as before), exact ``owner`` (on the ``owner`` field),
+    ``mine`` (``owner`` *or* ``claimed_by`` equals ``spec.me``), ``tags`` (AND, or
+    OR with ``any_tag``), exact ``project`` (the project-scoped view — only tasks
+    whose ``project`` soft link matches), the ``cutoff`` recency *floor* on
+    ``updated`` (``--since``: keep ``updated >= cutoff``), and the
+    ``stale_cutoff`` recency *ceiling* (``--stale``: keep ``updated <
+    stale_cutoff``) — the literal inverse of ``cutoff`` over the same field, so
+    the pair is a band-pass when both are given. ``sort`` is
+    ``updated``/``created`` (descending) or ``title`` (ascending), tie-broken by
+    path so the order is deterministic and identical on both paths; ``limit``
+    caps the result (``None`` for unbounded). Shares the ``--since``/tag/sort
+    semantics with :func:`shards.core.notes.select_notes`.
 
     The returned views carry ``body=""`` — see :data:`shards.core.notes.MetaRow`.
     """
@@ -693,7 +751,7 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
             task = Task.model_validate(meta)
         except ValidationError:
             continue
-        if spec.status is not None and task.status != spec.status:
+        if spec.status is not None and task.status not in spec.status:
             continue
         if spec.owner is not None and task.owner != spec.owner:
             continue
@@ -704,6 +762,8 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
         if spec.tags and not _matches_tags(task.tags, list(spec.tags), spec.any_tag):
             continue
         if spec.cutoff is not None and task.updated < spec.cutoff:
+            continue
+        if spec.stale_cutoff is not None and task.updated >= spec.stale_cutoff:
             continue
         views.append(TaskView(task=task, body="", path=path))
 
@@ -728,6 +788,7 @@ def list_tasks(
     any_tag: bool = False,
     project: str | None = None,
     since: str | None = None,
+    stale: str | None = None,
     sort: str = "updated",
     limit: int | None = _DEFAULT_LIMIT,
 ) -> list[TaskView]:
@@ -749,6 +810,7 @@ def list_tasks(
             any_tag=any_tag,
             project=project,
             since=since,
+            stale=stale,
             sort=sort,
             limit=limit,
         ),

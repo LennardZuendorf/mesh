@@ -260,7 +260,9 @@ def get_command(
 @task_app.command("list")
 def list_command(
     ctx: typer.Context,
-    status: str | None = typer.Option(None, "--status", help="Filter by exact status."),
+    status: str | None = typer.Option(
+        None, "--status", help="Filter by status; comma-separated for a union (open,claimed)."
+    ),
     owner: str | None = typer.Option(None, "--owner", help="Filter by exact owner."),
     mine: bool = typer.Option(False, "--mine", help="Only tasks I own or have claimed."),
     tags: str | None = typer.Option(None, "--tags", help="Comma-separated tag filter (AND)."),
@@ -268,7 +270,14 @@ def list_command(
     project: str | None = typer.Option(
         None, "--project", help="Only tasks scoped to this project note id."
     ),
-    since: str | None = typer.Option(None, "--since", help="Recency: 7d or an ISO date."),
+    since: str | None = typer.Option(
+        None, "--since", help="Recency floor: updated within <dur> (7d) or since an ISO date."
+    ),
+    stale: str | None = typer.Option(
+        None,
+        "--stale",
+        help="Recency ceiling: not updated within <dur> (2d) — the inverse of --since.",
+    ),
     sort: str = typer.Option("updated", "--sort", help="updated | created | title."),
     limit: int = typer.Option(20, "--limit", help="Cap the number of results."),
 ) -> None:
@@ -289,6 +298,7 @@ def list_command(
             any_tag=any_tag,
             project=project,
             since=since,
+            stale=stale,
             sort=sort,
             limit=limit,
         )
@@ -301,7 +311,11 @@ def list_command(
         typer.echo(json.dumps([_list_obj(view) for view in views]))
         return
     for view in views:
-        typer.echo(f"{view.task.id}  {view.task.status}  {view.task.title}")
+        # id / status / holder (or "-" when unclaimed) / title — tab-separated so
+        # a row stays trivially splittable (`cut -f`) even though a title may
+        # contain spaces. ``--json`` is unchanged (the full model, untouched).
+        holder = view.task.claimed_by or "-"
+        typer.echo(f"{view.task.id}\t{view.task.status}\t{holder}\t{view.task.title}")
 
 
 def _list_obj(view: TaskView) -> dict[str, object]:

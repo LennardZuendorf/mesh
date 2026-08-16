@@ -312,6 +312,7 @@ class DaemonClient:
         any_tag: bool = False,
         project: str | None = None,
         since: str | None = None,
+        stale: str | None = None,
         sort: str = "updated",
         limit: int | None = None,
     ) -> list[TaskView]:
@@ -319,7 +320,11 @@ class DaemonClient:
 
         Mirrors :meth:`note_list`; ``mine`` is resolved against ``config.agent``
         here and travels with the request, because the daemon's own configured
-        identity is not the calling agent's.
+        identity is not the calling agent's. ``status`` accepts a comma-separated
+        set (team-awareness/4); ``stale`` is the inverse of ``since`` over the
+        same ``updated`` field — see :class:`~shards.core.tasks.TaskFilter` for
+        the exact semantics, built once here so both the warm request and the
+        on-disk fallback validate identically before any socket call.
         """
         spec = TaskFilter.build(
             config,
@@ -330,6 +335,7 @@ class DaemonClient:
             any_tag=any_tag,
             project=project,
             since=since,
+            stale=stale,
             sort=sort,
             limit=limit,
         )
@@ -344,6 +350,7 @@ class DaemonClient:
                 any_tag=any_tag,
                 project=project,
                 since=since,
+                stale=stale,
                 sort=sort,
                 limit=limit,
             )

@@ -283,11 +283,18 @@ def _read_matrix(client: DaemonClient, cfg: Config) -> dict[str, Any]:
         "note.list/created": _rows(client.note_list(cfg, sort="created", limit=None), "note"),
         "task.list/all": _rows(client.task_list(cfg, limit=None), "task"),
         "task.list/status": _rows(client.task_list(cfg, status="open", limit=None), "task"),
+        "task.list/status-csv": _rows(
+            client.task_list(cfg, status="open,claimed", limit=None), "task"
+        ),
         "task.list/mine": _rows(client.task_list(cfg, mine=True, limit=None), "task"),
         "task.list/owner": _rows(client.task_list(cfg, owner=_OTHER, limit=None), "task"),
         "task.list/project": _rows(client.task_list(cfg, project="n-proj", limit=None), "task"),
         "task.list/tags": _rows(client.task_list(cfg, tags=["shared"], limit=None), "task"),
         "task.list/since": _rows(client.task_list(cfg, since="7d", limit=None), "task"),
+        "task.list/stale": _rows(client.task_list(cfg, stale="7d", limit=None), "task"),
+        "task.list/since-stale-band": _rows(
+            client.task_list(cfg, since="60d", stale="7d", limit=None), "task"
+        ),
         "task.list/title-limit": _rows(client.task_list(cfg, sort="title", limit=2), "task"),
         "tag_pull/all": [_hit(h) for h in client.tag_pull(cfg, limit=-1)],
         "tag_pull/tag": [_hit(h) for h in client.tag_pull(cfg, tags=["shared"], limit=-1)],
@@ -350,6 +357,22 @@ def test_task_list_filters(reads: DaemonClient, cfg: Config) -> None:
     # ``mine`` matches owner *or* claimed_by, resolved against the caller's agent.
     assert set(_ids(reads.task_list(cfg, mine=True, limit=None), "task")) == {"t-open", "t-claim"}
     assert _ids(reads.task_list(cfg, owner=_OTHER, status="done", limit=None), "task") == ["t-done"]
+
+
+def test_task_list_status_csv_and_stale(reads: DaemonClient, cfg: Config) -> None:
+    """team-awareness/4: comma-separated status is a union; --stale inverts --since."""
+    assert set(_ids(reads.task_list(cfg, status="open,claimed", limit=None), "task")) == {
+        "t-open",
+        "t-claim",
+    }
+    # ``t-done`` is 30 days old — stale for a 7d window, and outside a 7d --since.
+    assert _ids(reads.task_list(cfg, stale="7d", limit=None), "task") == ["t-done"]
+    assert set(_ids(reads.task_list(cfg, since="7d", limit=None), "task")) == {
+        "t-open",
+        "t-claim",
+    }
+    # Combined: the band between 7 and 60 days ago also isolates ``t-done``.
+    assert _ids(reads.task_list(cfg, since="60d", stale="7d", limit=None), "task") == ["t-done"]
 
 
 def test_task_list_default_limit_is_unbounded_only_when_asked(
@@ -721,6 +744,9 @@ _CLI_READS: tuple[tuple[str, ...], ...] = (
     ("--json", "note", "list"),
     ("--json", "task", "list"),
     ("--json", "task", "list", "--mine", "--sort", "title"),
+    ("--json", "task", "list", "--status", "open,claimed"),
+    ("--json", "task", "list", "--stale", "7d"),
+    ("task", "list"),  # human text rows (id/status/claimed_by/title)
     ("--json", "status"),
     ("search", "--tags", "shared"),
 )

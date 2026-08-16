@@ -45,6 +45,10 @@ import typer
 
 from shards.cli._errors import cli_errors
 from shards.core.lenses import TASK_STATUSES
+
+# Reused rather than re-derived: the same duration grammar ``--stale`` parses.
+from shards.core.notes import _parse_since
+from shards.core.tasks import TaskView
 from shards.daemon.client import DaemonClient, default_socket_path
 from shards.schemas.config import load_config
 from shards.storage.files import atomic_write
@@ -53,6 +57,13 @@ from shards.storage.files import atomic_write
 from shards.storage.locks import _pid_alive
 
 _PID_NAME = "shards.pid"
+# The staleness window for the per-agent "stale claims" count in ``shards
+# status`` (team-awareness/4) — a claim is stale here iff it has not been
+# touched (``updated``, which bumps on every write including ``task append``)
+# in this long. Matches the illustrative threshold in product.md's own
+# board-visibility scenario; an operator who wants a different window runs the
+# equivalent query directly: ``task list --status claimed --stale <dur>``.
+_STATUS_STALE_WINDOW = "2d"
 
 
 # --------------------------------------------------------------------------- #
@@ -222,20 +233,66 @@ def daemon_status_command(ctx: typer.Context) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _agent_breakdown(views: list[TaskView]) -> dict[str, dict[str, int]]:
+    """Reduce a task list to a per-agent ``{owns_open, claimed, stale_claims}`` map (R4).
+
+    Board visibility, not a new store: every count is derived on the spot from
+    the task list ``shards status`` already fetches (:meth:`DaemonClient.task_list`
+    — warm-index served when the daemon is up, the identical on-disk walk when it
+    is down, exactly like every other read here). An identity is registered as
+    soon as it appears anywhere — as ``owner`` *or* ``claimed_by``, on a task of
+    *any* status — so an agent who currently holds nothing still gets a row of
+    zeros rather than vanishing from the report; only ``owner``-on-an-``open``-task
+    and ``claimed_by``-on-a-``claimed``-task actually increment a counter.
+
+    * ``owns_open`` — tasks this agent owns that are still ``open`` (not yet
+      claimed by anyone).
+    * ``claimed`` — tasks this agent currently holds (``status == "claimed"``).
+    * ``stale_claims`` — the subset of ``claimed`` whose ``updated`` is older
+      than :data:`_STATUS_STALE_WINDOW` — an abandoned-looking claim, the exact
+      thing ``--stale`` is for.
+    """
+    stale_cutoff = _parse_since(_STATUS_STALE_WINDOW)
+    agents: dict[str, dict[str, int]] = {}
+
+    def _register(identity: str) -> dict[str, int]:
+        return agents.setdefault(identity, {"owns_open": 0, "claimed": 0, "stale_claims": 0})
+
+    for view in views:
+        task = view.task
+        if task.owner:
+            counts = _register(task.owner)
+            if task.status == "open":
+                counts["owns_open"] += 1
+        if task.claimed_by:
+            counts = _register(task.claimed_by)
+            if task.status == "claimed":
+                counts["claimed"] += 1
+                if task.updated < stale_cutoff:
+                    counts["stale_claims"] += 1
+
+    return agents
+
+
 def status_command(ctx: typer.Context) -> None:
-    """Report vault health (counts, freshness, dangling links, stale locks).
+    """Report vault health (counts, freshness, dangling links, stale locks, team state).
 
     Counts and freshness come from the daemon's warm index when it is up and from
     a direct scan when it is down — identical payload either way, so this works
     with the daemon down. The daemon's *liveness* line is still read from its PID
     file (no socket dependency), so a daemon that is running but unresponsive is
-    reported as running.
+    reported as running. ``agents`` (team-awareness/4) is a per-identity
+    ``owns_open`` / ``claimed`` / ``stale_claims`` breakdown — see
+    :func:`_agent_breakdown` for exactly what each count measures. Human-only,
+    like the rest of this command: not exposed over MCP (root AGENTS.md keeps
+    ``status`` out of that surface, and the tool list is asserted against it).
     """
     config = load_config()
     with cli_errors():
         report = DaemonClient().vault_status(config)
         running = daemon_running(default_pid_path())
         report["daemon"] = {"running": running is not None, "pid": running}
+        report["agents"] = _agent_breakdown(DaemonClient().task_list(config, limit=None))
 
     if _json(ctx):
         typer.echo(json.dumps(report))
@@ -253,7 +310,7 @@ def _status_lines(report: dict[str, Any]) -> list[str]:
     dangling = report["dangling_links"]
     daemon = report["daemon"]
     daemon_line = f"running (pid {daemon['pid']})" if daemon["running"] else "stopped"
-    return [
+    lines = [
         f"notes: {report['notes']}",
         f"tasks: {task_line}",
         f"freshness: {freshness}",
@@ -261,6 +318,18 @@ def _status_lines(report: dict[str, Any]) -> list[str]:
         f"stale locks: {len(report['stale_locks'])}",
         f"daemon: {daemon_line}",
     ]
+    agents = report.get("agents") or {}
+    if not agents:
+        lines.append("agents: (none)")
+    else:
+        lines.append("agents:")
+        for identity in sorted(agents):
+            counts = agents[identity]
+            lines.append(
+                f"  {identity}: open={counts['owns_open']} "
+                f"claimed={counts['claimed']} stale={counts['stale_claims']}"
+            )
+    return lines
 
 
 # --------------------------------------------------------------------------- #
