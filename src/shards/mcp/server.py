@@ -16,7 +16,10 @@ declaring its effect, so an agent runtime can reason about safety before calling
   ``shards_task_get`` / ``shards_task_list`` / ``shards_search`` /
   ``shards_recent_activity`` / ``shards_build_context`` / ``shards_graph`` /
   ``shards_project`` / ``shards_session_start`` (the warm-start composite —
-  team-awareness/10 — reads three lenses and writes nothing);
+  team-awareness/10 — reads three lenses and writes nothing) /
+  ``shards_health`` (agent-usability/4 — recall-path reachability, not vault
+  contents or admin state; see below for why this one is exposed and
+  ``status`` is not);
 * **idempotent** (``idempotentHint``) — ``shards_note_update`` / ``shards_task_claim`` /
   ``shards_task_finish`` / ``shards_task_update`` / ``shards_task_release``
   (re-running lands the same state — a release re-applied to an already-open
@@ -34,6 +37,25 @@ verb, not graph work; see root ``AGENTS.md`` §6 and team-awareness/tech.md §
 local input, not an authorization boundary (root ``AGENTS.md`` §6), so breaking a
 peer's claim stays a human/CLI action, never something an agent can trigger
 through this surface.
+
+``shards_health`` (agent-usability/4) is exposed despite the withheld-admin rule
+above because it answers a different question than ``status``: not "what is in
+the vault / is the daemon-as-admin-surface up", but "would my next search hit
+real ``indexed`` recall or the substring fallback right now" — a fact an agent
+needs in order to *interpret* its own search results correctly, the same
+reachability signal the CLI already exposes via ``shards search --health``. It
+carries no vault contents, no daemon control verb, and no way to mutate
+anything — a pure read of :func:`~shards.core.search.search_health`'s four
+gates. ``shards_search`` results also carry the same signal per hit, via a
+``mode`` field (``"indexed"`` / ``"fallback"``) added only when a query ran a
+real recall (never on a tag-only pull, which is warm-index-vs-cold-scan, an
+unrelated and non-degrading distinction) — so an agent that already has a
+result set does not need a second ``shards_health`` call just to know whether
+to trust it. The marker is MCP-only: the CLI's ``hit_dict`` shape
+(:func:`shards.core.search.hit_dict`) stays unchanged for existing scripts, and
+a CLI caller already has ``shards search --health`` and stderr degradation
+notices — this surface never had that second channel, which is the whole
+reason the field exists here.
 
 Tool functions are defined as plain module-level callables and registered on the
 app afterwards, so they stay directly importable and unit-testable while the app
@@ -79,7 +101,7 @@ from shards.core.notes import (
 from shards.core.notes import (
     find_duplicate_title as find_duplicate_note_title,
 )
-from shards.core.search import hit_dict, query_search, resolve_effective_threshold
+from shards.core.search import hit_dict, query_search, resolve_effective_threshold, search_health
 from shards.core.tasks import (
     TaskView,
     append_task,
@@ -399,7 +421,21 @@ def shards_search(
         ),
     ] = False,
 ) -> list[dict[str, Any]]:
-    """Recall across notes + tasks: tag pull (no query) or scored match (query)."""
+    """Recall across notes + tasks: tag pull (no query) or scored match (query).
+
+    A query hit carries a ``mode`` field (``"indexed"`` / ``"fallback"``,
+    agent-usability/4) naming which engine actually answered — the MCP surface
+    has no stderr an agent reads, so this is the only channel a degraded
+    substring result has to identify itself as degraded (``query_search``
+    already suppresses its own notice here via ``quiet=True``; without this
+    field a fallback hit was indistinguishable from a ranked one). Computed
+    from the same gates :func:`~shards.core.search.search_health` reports —
+    call ``shards_health`` for the standalone reachability check this predicts
+    from. A tag-only pull (no ``query``) never carries ``mode``: it is served
+    from the warm daemon index or an equivalent cold folder scan, a
+    daemon-liveness distinction that never degrades recall quality, unlike the
+    indexed/fallback split a real query makes.
+    """
     config = load_config()
     if query is None:
         results = DaemonClient().tag_pull(
@@ -410,23 +446,55 @@ def shards_search(
             status=status,
             limit=limit,
         )
-    else:
-        # ``None`` propagates when neither the caller nor the config key set
-        # threshold explicitly, so the substring fallback applies its own floor
-        # rather than a silently-defaulted cutoff (root tech.md § B5).
-        effective_threshold = resolve_effective_threshold(threshold, config)
-        results = query_search(
-            config,
-            query,
-            type_filter=type_filter,
-            tags=tags,
-            owner=owner,
-            status=status,
-            limit=limit,
-            threshold=effective_threshold,
-            quiet=True,
-        )
-    return [hit_dict(result, meta_only=meta_only, full=full) for result in results]
+        return [hit_dict(result, meta_only=meta_only, full=full) for result in results]
+
+    # ``None`` propagates when neither the caller nor the config key set
+    # threshold explicitly, so the substring fallback applies its own floor
+    # rather than a silently-defaulted cutoff (root tech.md § B5).
+    effective_threshold = resolve_effective_threshold(threshold, config)
+    results = query_search(
+        config,
+        query,
+        type_filter=type_filter,
+        tags=tags,
+        owner=owner,
+        status=status,
+        limit=limit,
+        threshold=effective_threshold,
+        quiet=True,
+    )
+    # Predicts the engine `query_search` just took via the identical gates
+    # (hybrid enabled, daemon up, collection set, indexed on PATH) that
+    # `search_health` already reports standalone — not a second, independent
+    # implementation of the routing decision.
+    mode = search_health(config)["mode"]
+    hits = [hit_dict(result, meta_only=meta_only, full=full) for result in results]
+    for hit in hits:
+        hit["mode"] = mode
+    return hits
+
+
+def shards_health() -> dict[str, Any]:
+    """Report indexed reachability vs. substring fallback recall, right now.
+
+    A pure delegate to :func:`~shards.core.search.search_health` — the exact
+    call ``shards search --health`` already makes, so the two surfaces read
+    off one implementation and cannot drift apart. Returns ``mode``
+    (``"indexed"`` only when every gate below is open, ``"fallback"``
+    otherwise), the individual gates (``hybrid_configured``, ``collection``,
+    ``daemon_up``, ``indexed_binary_available``), and — only when degraded — a
+    terse ``reason`` naming the first closed gate. Never raises, even with
+    ``indexed`` entirely absent from ``PATH``; never shells ``indexed``
+    itself. Takes no parameters: the answer depends only on the current
+    config and environment, nothing a caller supplies.
+
+    Distinct from the withheld ``shards_status``: this reports recall-path
+    reachability for *interpreting search results*, never vault contents or
+    daemon admin state (see the module docstring's "unsafe / administrative
+    surface" note for the line this stays on the safe side of).
+    """
+    config = load_config()
+    return search_health(config)
 
 
 def shards_recent_activity(
@@ -1067,6 +1135,7 @@ def _register() -> None:
     app.tool(_guarded(shards_task_get), annotations=_READ_ONLY)
     app.tool(_guarded(shards_task_list), annotations=_READ_ONLY)
     app.tool(_guarded(shards_search), annotations=_READ_ONLY)
+    app.tool(_guarded(shards_health), annotations=_READ_ONLY)
     app.tool(_guarded(shards_recent_activity), annotations=_READ_ONLY)
     app.tool(_guarded(shards_build_context), annotations=_READ_ONLY)
     app.tool(_guarded(shards_graph), annotations=_READ_ONLY)

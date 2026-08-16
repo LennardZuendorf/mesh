@@ -79,10 +79,15 @@ def test_every_parameter_of_every_tool_has_a_nonempty_description() -> None:
 
 def test_no_tool_is_exempt() -> None:
     """Every registered tool has at least one parameter — none silently skips
-    the sweep above by having an empty ``properties`` object."""
+    the sweep above by having an empty ``properties`` object — except
+    ``shards_health`` (agent-usability/4), which is genuinely parameterless:
+    its answer depends only on live config/environment state, never on
+    anything a caller could supply."""
     registered = _registered()
     assert len(registered) >= 19
     for name, tool in registered.items():
+        if name == "shards_health":
+            continue
         props = tool.parameters.get("properties", {})
         assert props, f"{name} has no parameters at all — nothing to describe"
 
@@ -171,11 +176,12 @@ def test_task_list_status_stays_a_csv_string_not_a_single_literal() -> None:
 
 
 def test_tool_count_unchanged() -> None:
-    """20 tools at this point in the plan (memory/1's 17 plus team-awareness/10's
-    ``session_start``/``task_append``/``task_release`` parity additions) — the
-    brief's stale "17" reflects the spec as originally written, before those
-    later units shipped; this pins the actual current count instead."""
-    assert len(_registered()) == 20
+    """21 tools at this point in the plan (memory/1's 17, plus team-awareness/10's
+    ``session_start``/``task_append``/``task_release`` parity additions, plus
+    agent-usability/4's ``shards_health``) — the brief's stale "17"/"19" reflect
+    the spec as originally written, before those later units shipped; this pins
+    the actual current count instead."""
+    assert len(_registered()) == 21
 
 
 @pytest.mark.parametrize(

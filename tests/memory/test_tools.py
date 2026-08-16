@@ -23,6 +23,12 @@ Acceptance coverage:
   params each get a parity check against the same ``core`` function (or the CLI,
   over one fixture vault) the tool wraps, driven through the *registered* tool
   (``server.app.call_tool``), not the bare Python function.
+* **Search-mode marker + health (agent-usability/4)** — ``shards_health`` is a pure
+  delegate to ``core.search.search_health`` (same call the CLI's ``--health`` flag
+  makes); a ``shards_search`` hit carries ``mode`` (``"indexed"``/``"fallback"``)
+  only when a query ran, proven by driving the real fallback and hybrid paths
+  through the registered tool and checking the field differs, not by asserting it
+  merely exists in one mode.
 """
 
 from __future__ import annotations
@@ -40,12 +46,14 @@ from typer.testing import CliRunner
 import shards.mcp.server as server
 from shards.cli.__main__ import app as cli_app
 from shards.core.notes import NoteView
+from shards.core.notes import create_note as core_create_note
 from shards.core.tasks import append_task as core_append_task
 from shards.core.tasks import claim_task as core_claim_task
 from shards.core.tasks import create_task as core_create_task
 from shards.core.tasks import get_task as core_get_task
 from shards.core.tasks import release_task as core_release_task
 from shards.core.tasks import update_task as core_update_task
+from shards.index import indexed_client
 from shards.schemas.config import Config, load_config
 from shards.schemas.note import Note
 
@@ -67,6 +75,7 @@ _EXPECTED_TOOLS: frozenset[str] = frozenset(
         "shards_task_update",
         "shards_task_cancel",
         "shards_search",
+        "shards_health",
         "shards_recent_activity",
         "shards_build_context",
         "shards_graph",
@@ -160,6 +169,7 @@ def test_note_get_takes_typed_id_field_not_flag_string() -> None:
         "shards_task_get",
         "shards_task_list",
         "shards_search",
+        "shards_health",
         "shards_recent_activity",
         "shards_build_context",
         "shards_graph",
@@ -811,3 +821,122 @@ def test_parity_session_start_owner_and_team(cfg: Config, vault: Path) -> None:
     mcp_entries = dispatched.structured_content["result"]
 
     assert mcp_entries == cli_entries
+
+
+# --------------------------------------------------------------------------- #
+# agent-usability/4 — shards_health + the shards_search mode marker           #
+# --------------------------------------------------------------------------- #
+
+
+def test_shards_health_is_a_pure_delegate_to_core_search_health(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No parallel MCP implementation: ``shards_health`` must call the exact
+    ``core.search.search_health`` the CLI's ``--health`` flag calls, and return
+    its value unmodified — so the two surfaces read off one implementation and
+    cannot drift apart (a spy proves the *call*, not just a matching value)."""
+    sentinel: dict[str, Any] = {
+        "mode": "fallback",
+        "hybrid_configured": True,
+        "collection": "test-vault",
+        "daemon_up": False,
+        "indexed_binary_available": True,
+        "reason": "daemon down",
+    }
+    calls: list[Config] = []
+
+    def _spy(config: Config) -> dict[str, Any]:
+        calls.append(config)
+        return sentinel
+
+    monkeypatch.setattr(server, "search_health", _spy)
+    result = server.shards_health()
+
+    assert result is sentinel
+    assert len(calls) == 1
+
+
+def test_shards_health_tool_takes_no_parameters(cfg: Config) -> None:
+    """The registered schema has an empty ``properties`` object — the answer
+    depends only on live config/environment state, never caller input."""
+    props = _registered()["shards_health"].parameters["properties"]
+    assert props == {}
+
+
+def test_shards_health_registered_read_only(cfg: Config) -> None:
+    tool = _registered()["shards_health"]
+    assert tool.annotations is not None
+    assert tool.annotations.readOnlyHint is True
+
+
+def test_shards_health_withholds_status_daemon_reindex_init_and_delete(cfg: Config) -> None:
+    """The exact withheld set this unit must not widen (binding constraint 1)."""
+    names = set(_registered())
+    for withheld in (
+        "shards_status",
+        "shards_daemon",
+        "shards_daemon_start",
+        "shards_daemon_stop",
+        "shards_reindex",
+        "shards_init",
+        "shards_note_delete",
+        "shards_task_delete",
+    ):
+        assert withheld not in names
+
+
+def _seed_note_for_search(vault: Path, *, title: str) -> Path:
+    """A real note under ``vault`` whose title exactly matches ``title`` — an
+    exact-title-tier (score 1.0) hit under both the fallback scorer and a
+    mocked ``indexed`` hit, so threshold filtering never enters into it."""
+    note = core_create_note(load_config(), title)
+    return vault / "notes" / f"{note.id}.md"
+
+
+def test_mcp_search_marks_hits_fallback_when_indexed_unreachable(cfg: Config, vault: Path) -> None:
+    """No daemon, no ``indexed`` on PATH — the real fallback path runs (nothing
+    here mocks ``query_search`` itself), and the hit is marked accordingly."""
+    _seed_note_for_search(vault, title="Zephyr Marker Probe Fallback")
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_search", {"query": "Zephyr Marker Probe Fallback"})
+    )
+    hits = dispatched.structured_content["result"]
+
+    assert hits and all(h["mode"] == "fallback" for h in hits)
+
+
+def test_mcp_search_marks_hits_indexed_when_hybrid_runs(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Daemon up + a real (mocked-subprocess) ``indexed`` hit — the real hybrid
+    path runs end to end, and the hit is marked accordingly. Paired with the
+    fallback test above: the *same* field takes two different real values
+    depending on which engine genuinely answered, not a hard-coded string only
+    ever exercised in one mode."""
+    path = _seed_note_for_search(vault, title="Zephyr Marker Probe Hybrid")
+    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
+    monkeypatch.setattr(indexed_client, "indexed_available", lambda: True)
+    ndjson = json.dumps({"path": str(path), "score": 0.91, "snippet": "hybrid snippet"}) + "\n"
+    monkeypatch.setattr(indexed_client, "_run_indexed_search", lambda *a, **k: ndjson)
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_search", {"query": "Zephyr Marker Probe Hybrid"})
+    )
+    hits = dispatched.structured_content["result"]
+
+    assert hits and all(h["mode"] == "indexed" for h in hits)
+
+
+def test_mcp_search_tag_pull_carries_no_mode_marker(cfg: Config, vault: Path) -> None:
+    """A tag-only pull (no ``query``) never carries ``mode`` — it is served
+    from the warm daemon index or an equivalent cold folder scan, a
+    daemon-liveness distinction that never degrades recall, unlike the
+    indexed/fallback split a real query makes (see the tool's docstring)."""
+    core_create_note(load_config(), "Tag Pull Probe", tags=["probe"])
+
+    dispatched = asyncio.run(server.app.call_tool("shards_search", {"tags": ["probe"]}))
+    hits = dispatched.structured_content["result"]
+
+    assert hits
+    assert all("mode" not in h for h in hits)

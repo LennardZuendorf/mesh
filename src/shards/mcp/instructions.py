@@ -64,7 +64,8 @@ _COORDINATION = (
 _READING_RESULTS = (
     "## Reading results\n"
     "Every note/task has `owner`; tasks add `claimed_by` (null = open), "
-    "`status`, `path`. Search hits add a score; creation responses add "
+    "`status`, `path`. Search hits add a score, plus `mode` "
+    "(indexed/fallback) when query is set; creation responses add "
     "`warnings` (duplicate-title only). Withheld: delete, daemon controls, "
     "reindex, status, init, and task_release's --force."
 )
@@ -129,8 +130,8 @@ def _recall_section(config: Config | None) -> str:
         "## Recall\n"
         f"Hybrid configured (collection {collection}), but search degrades "
         "silently to a substring scan when the daemon or indexed is "
-        "unreachable — no field says which path answered; treat hits as "
-        "possibly substring-only."
+        "unreachable — call shards_health, or check a hit's mode field, "
+        "to see which path answered."
     )
 
 
