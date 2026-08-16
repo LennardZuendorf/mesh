@@ -97,15 +97,21 @@ class TaskNotFoundError(TaskError):
 class ClaimConflictError(TaskError):
     """The task is already claimed by a *different* agent (CLI exit 4).
 
-    Carries the ``existing_owner`` recorded in ``claimed_by`` so the CLI can name
-    who holds it. A same-agent reclaim is *not* a conflict — it is an idempotent
-    no-op (see :func:`claim_task`).
+    Carries ``task_id`` and the ``existing_owner`` recorded in ``claimed_by`` so
+    both the CLI and the MCP boundary (agent-usability/5's structured payload)
+    can name which task and who holds it — the one fact an agent needs to
+    branch on (pick another task, wait, or escalate to that agent). Per root
+    ``AGENTS.md`` §6, ``existing_owner`` is trusted local input naming who
+    *claims* to hold the task, never a verified/authorized identity. A
+    same-agent reclaim is *not* a conflict — it is an idempotent no-op (see
+    :func:`claim_task`).
     """
 
     code = 4
 
-    def __init__(self, existing_owner: str) -> None:
+    def __init__(self, task_id: str, existing_owner: str) -> None:
         super().__init__(f"task already claimed by {existing_owner}")
+        self.task_id = task_id
         self.existing_owner = existing_owner
 
 
@@ -477,7 +483,7 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
         if existing == claimer:
             return Task.model_validate(post.metadata)  # idempotent same-owner no-op
         if existing is not None:
-            raise ClaimConflictError(str(existing))
+            raise ClaimConflictError(task_id, str(existing))
         post.metadata["claimed_by"] = claimer
         post.metadata["status"] = "claimed"
         post.metadata["updated"] = _now()
@@ -542,7 +548,7 @@ def release_task(config: Config, task_id: str, releaser: str, *, force: bool = F
         if existing is None:
             return Task.model_validate(post.metadata)  # idempotent already-released no-op
         if existing != releaser and not force:
-            raise ClaimConflictError(str(existing))
+            raise ClaimConflictError(task_id, str(existing))
         post.metadata["claimed_by"] = None
         post.metadata["status"] = "open"
         post.metadata["updated"] = _now()

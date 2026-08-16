@@ -78,8 +78,10 @@ and phrasing constraints.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from functools import wraps
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
@@ -89,6 +91,8 @@ from pydantic import Field
 from shards.core.errors import ShardsError
 from shards.core.lenses import (
     SESSION_SINCE,
+    ProjectNotFoundError,
+    SeedNotFoundError,
     as_effective_agent,
     build_context,
     graph_query,
@@ -99,6 +103,8 @@ from shards.core.lenses import (
 )
 from shards.core.notes import (
     TAG_SPEC_SEMANTICS,
+    AmbiguousSlugError,
+    NoteNotFoundError,
     NoteView,
     append_note,
     create_note,
@@ -110,6 +116,8 @@ from shards.core.notes import (
 )
 from shards.core.search import hit_dict, query_search, resolve_effective_threshold, search_health
 from shards.core.tasks import (
+    ClaimConflictError,
+    TaskNotFoundError,
     TaskView,
     append_task,
     cancel_task,
@@ -126,23 +134,35 @@ from shards.core.tasks import (
 from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.mcp.instructions import build_instructions
-from shards.schemas.config import Config, load_config
+from shards.schemas.config import Config, ConfigMissingError, load_config
 from shards.schemas.note import Note, NoteType
 from shards.schemas.task import TaskStatus
+from shards.storage.locks import LockError
 
 
 def _startup_config() -> Config | None:
     """Guarded config load for the ``instructions`` block (agent-usability/1).
 
-    A missing ``config.toml`` raises ``SystemExit`` (``load_config``'s
-    documented contract); a malformed one raises ``msgspec.ValidationError``.
+    A missing ``config.toml`` raises :class:`~shards.schemas.config.ConfigMissingError`
+    (agent-usability/5 replaced the former bare ``SystemExit(2)`` — a
+    ``BaseException`` neither this ``except Exception`` nor ``_guarded`` below
+    could ever catch); a malformed one raises ``msgspec.ValidationError``.
     Neither may stop the server from starting — :func:`build_instructions`
-    renders the fully-degraded block instead, and the individual ``shards_*``
-    tools still fail per the normal error contract once actually called.
+    renders the fully-degraded block instead.
+
+    The individual ``shards_*`` tools *do* still fail per the normal error
+    contract once actually called: ``ConfigMissingError`` is a
+    :class:`~shards.core.errors.ShardsError`, a plain ``Exception``, so every
+    registered tool's ``_guarded`` wrapper catches it exactly like any other
+    domain exception and raises a structured ``ToolError`` naming
+    ``shards init`` — proven by driving real registered tools with a missing
+    config in ``tests/memory/test_errors.py``, not merely asserted here (a
+    prior version of this docstring made that claim without the coverage to
+    back it; agent-usability/5 closes that gap).
     """
     try:
         return load_config()
-    except (SystemExit, Exception):
+    except Exception:
         return None
 
 
@@ -1100,30 +1120,127 @@ _IDEMPOTENT: dict[str, Any] = {"idempotentHint": True}
 _DESTRUCTIVE: dict[str, Any] = {"destructiveHint": True}
 
 
-def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """The one MCP-boundary exception mapper (core-hardening/3), applied at
-    registration — the tool error mirror of the CLI's ``cli_errors()``.
+# --------------------------------------------------------------------------- #
+# Structured error mapping (agent-usability/5)                                #
+# --------------------------------------------------------------------------- #
 
-    Same exception families, same catch order, same one-line messages as the CLI
-    mapper (``shards.cli._errors.cli_errors``): ``ShardsError`` (``LockError``
-    included) first, then a bare ``ValueError`` (also covers msgspec's
-    ``ValidationError``, a ``ValueError`` subclass — e.g. an unknown owner or an
-    unknown token in a ``status`` CSV filter; ``note_type``, task ``status``,
-    task ``priority``, and ``shards_graph``'s ``direction`` are all now
-    schema-enum-typed (agent-usability/2 — ``priority``/``direction`` joined
-    ``note_type``/``status`` in round 2, closing the same gap for the same
-    reason), so an out-of-vocabulary value for any of those never reaches this
-    wrapper, rejected instead by FastMCP's own argument validation before the
-    tool body runs; ``sort`` stays an un-typed ``str`` — see the ``sort``
-    parameter descriptions for why — so an invalid ``sort`` field is still the
-    one filter-vocabulary ``ValueError`` that does land here), then any other
-    ``OSError``. MCP has no
-    process exit code to map to, so each branch raises a clean
-    ``fastmcp.exceptions.ToolError`` instead of letting FastMCP's own generic
-    catch-all re-wrap an arbitrary traceback string. The full structured-error
-    payload (codes, fields) is agent-usability/5's contract; this stays a plain
-    message. The module-level ``shards_*`` functions are left unwrapped so they
-    stay directly importable/unit-testable (see the module docstring) — only the
+# One discriminant per exception *class*, checked in this order (most specific
+# first) so a subclass never falls through to a less precise ancestor's kind.
+# ``kind`` is the field an agent branches on programmatically; it is deliberately
+# a closed, small vocabulary rather than the exception's class name, so it stays
+# stable even if a class gets renamed/split later.
+_KIND_BY_TYPE: tuple[tuple[type[ShardsError], str], ...] = (
+    (ConfigMissingError, "config_missing"),
+    (ClaimConflictError, "claim_conflict"),
+    (LockError, "lock_conflict"),
+    (AmbiguousSlugError, "ambiguous_slug"),
+    (NoteNotFoundError, "not_found"),
+    (TaskNotFoundError, "not_found"),
+    (SeedNotFoundError, "not_found"),
+    (ProjectNotFoundError, "not_found"),
+)
+# Fallback for a ShardsError not named above (e.g. a future subclass): derive a
+# kind from its exit-code tier rather than leaving it unclassified.
+_KIND_BY_CODE: dict[int, str] = {2: "validation", 3: "not_found", 4: "conflict"}
+
+# A terse, actionable next step per kind — never an authorization decision (root
+# AGENTS.md §6: identity fields here are trusted local input, not verified), and
+# never a restatement of infrastructure internals (.spec/design.md — structured
+# fields, not prose, carry the machine-readable part; this is the one prose field
+# the shape allows, kept short and purely actionable).
+_NEXT_ACTION_BY_KIND: dict[str, str] = {
+    "config_missing": "run `shards init` to create a config, then retry",
+    "claim_conflict": "pick a different task, wait, or ask the named agent to release it",
+    "lock_conflict": "retry shortly — another process is mid-write on this entity",
+    "ambiguous_slug": "retry using one of the listed ids instead of the slug",
+    "not_found": "check the id and retry, or list to find the right one",
+    "validation": "fix the input and retry",
+    "conflict": "resolve the conflict and retry",
+}
+
+# Exception attributes worth surfacing as their own structured fields when
+# present — the domain facts an agent needs to branch on (e.g. ``task_id``,
+# ``existing_owner`` from a claim conflict), never folded into the prose
+# ``message``. ``Path`` values are stringified for JSON.
+_STRUCTURED_ATTRS: tuple[str, ...] = (
+    "task_id",
+    "existing_owner",
+    "id_or_slug",
+    "slug",
+    "ids",
+    "seed_id",
+    "project_id",
+    "cfg_path",
+)
+
+
+def _error_kind(exc: ShardsError) -> str:
+    for cls, kind in _KIND_BY_TYPE:
+        if isinstance(exc, cls):
+            return kind
+    return _KIND_BY_CODE.get(exc.code, "error")
+
+
+def _structured_fields(exc: Exception) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for name in _STRUCTURED_ATTRS:
+        if not hasattr(exc, name):
+            continue
+        value = getattr(exc, name)
+        fields[name] = str(value) if isinstance(value, Path) else value
+    return fields
+
+
+def _tool_error(kind: str, message: str, **fields: Any) -> ToolError:
+    """Build a ``ToolError`` whose message is the JSON-encoded structured payload.
+
+    ``fastmcp.exceptions.ToolError`` carries only a text message — there is no
+    separate structured-data channel on a raised tool error — so the
+    ``{kind, message, next_action, ...fields}`` contract travels as JSON text,
+    parseable by any agent that reads the tool error string. ``kind`` is the
+    field to branch on; ``message`` is the same one-line wording the CLI prints
+    to stderr for the identical exception; ``next_action`` is a short,
+    non-authoritative suggestion (never a command the server executes).
+    """
+    payload = {
+        "kind": kind,
+        "message": message,
+        "next_action": _NEXT_ACTION_BY_KIND.get(kind, "fix the input and retry"),
+        **fields,
+    }
+    return ToolError(json.dumps(payload))
+
+
+def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """The one MCP-boundary exception mapper (core-hardening/3, structured payload
+    per agent-usability/5), applied at registration.
+
+    Same exception families and catch order as the CLI mapper
+    (``shards.cli._errors.cli_errors``) — ``ShardsError`` (``LockError`` and
+    ``ConfigMissingError`` included) first, then a bare ``ValueError`` (also
+    covers msgspec's ``ValidationError``, a ``ValueError`` subclass — e.g. an
+    unknown owner or an unknown token in a ``status``/``sort`` filter; most
+    enum-shaped parameters are schema-typed and rejected by FastMCP's own
+    validation before the tool body runs, per the agent-usability/2 sweep —
+    then any other ``OSError``. Unlike the CLI, MCP has no process exit code to
+    map to, so every branch raises a clean ``fastmcp.exceptions.ToolError``
+    whose *message* is a JSON object — ``{kind, message, next_action}`` plus
+    whatever of the exception's own fields matter (``task_id``,
+    ``existing_owner``, ...; see :data:`_STRUCTURED_ATTRS`) — instead of a bare
+    English sentence an agent would have to parse, and instead of letting
+    FastMCP's own generic catch-all re-wrap an arbitrary traceback string.
+
+    ``ConfigMissingError`` (agent-usability/5) is what actually closes the
+    ``BaseException`` escape this unit fixes: it replaces the former
+    ``load_config`` ``SystemExit(2)``, which was a ``BaseException`` neither
+    this wrapper's ``except Exception``-rooted branches nor FastMCP's own
+    dispatcher (`server.py`'s ``except Exception`` around ``tool._run``) could
+    ever have caught — a missing config on an MCP-only machine would have
+    escaped the first real tool call as an unhandled crash instead of a clean
+    tool error naming ``shards init``.
+
+    The module-level ``shards_*`` functions are left unwrapped so they stay
+    directly importable/unit-testable (see the module docstring) — only the
     registered tool goes through this wrapper.
     """
 
@@ -1132,11 +1249,11 @@ def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
         try:
             return fn(*args, **kwargs)
         except ShardsError as exc:
-            raise ToolError(str(exc)) from exc
+            raise _tool_error(_error_kind(exc), str(exc), **_structured_fields(exc)) from exc
         except ValueError as exc:
-            raise ToolError(str(exc)) from exc
+            raise _tool_error("validation", str(exc)) from exc
         except OSError as exc:
-            raise ToolError(f"io error: {exc}") from exc
+            raise _tool_error("io_error", f"io error: {exc}") from exc
 
     return wrapper
 

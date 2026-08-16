@@ -38,6 +38,7 @@ import typer
 from typer.core import TyperGroup
 
 from shards import __version__
+from shards.cli._errors import cli_errors
 
 if TYPE_CHECKING:
     # Match ``TyperGroup.get_command``'s own annotations, which use typer's
@@ -109,6 +110,28 @@ class _LazyCommandGroup(TyperGroup):
 
     def list_commands(self, ctx: Context) -> list[str]:
         return list(_ORDER)
+
+    def invoke(self, ctx: Context) -> Any:
+        """Wrap the whole dispatch chain in the one CLI boundary mapper (agent-usability/5).
+
+        Every leaf command already opens its own ``with cli_errors():`` around
+        the domain call it makes, but ``load_config()`` runs *before* that
+        block in every one of them (a bare call at the top of the command
+        body) — a :class:`~shards.schemas.config.ConfigMissingError` raised
+        there would otherwise walk straight out of Click's dispatch chain
+        uncaught, since nothing downstream is holding it yet. Wrapping the
+        *whole* invocation here — which recurses through every nested
+        sub-app's own ``TyperGroup.invoke`` (``note``/``task``/``search``/
+        ``daemon``), since ``super().invoke()`` is what performs that
+        recursion — closes the gap in the one place, without scattering a
+        second ``with cli_errors():`` above every ``load_config()`` call site.
+        A ``typer.Exit`` raised by an error ``cli_errors()`` already resolved
+        deeper in the stack passes through unchanged (it is a ``RuntimeError``,
+        never a ``ShardsError``/``ValueError``/``OSError``), so this never
+        double-handles anything.
+        """
+        with cli_errors():
+            return super().invoke(ctx)
 
     def get_command(self, ctx: Context, cmd_name: str) -> Command | None:
         if cmd_name in _SUBAPPS:

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from shards.core.ids import generate_note_id, generate_task_id
-from shards.schemas.config import Config, load_config
+from shards.schemas.config import Config, ConfigMissingError, load_config
 from shards.schemas.note import Note
 
 # --------------------------------------------------------------------------- #
@@ -71,11 +71,17 @@ def test_config_expands_tilde_in_path(config_path: Path) -> None:
     assert cfg.core.tolaria_path == Path.home() / "vault"
 
 
-def test_missing_config_raises_systemexit_2(tmp_path: Path) -> None:
+def test_missing_config_raises_config_missing_error(tmp_path: Path) -> None:
+    # agent-usability/5: load_config now raises a typed ConfigMissingError
+    # (a ShardsError, plain Exception) instead of SystemExit(2) — the old
+    # BaseException could walk past both the CLI and MCP boundary mappers,
+    # which catch Exception. The CLI still exits 2 (ConfigMissingError.code),
+    # now via cli_errors() like every other domain exception.
     missing = tmp_path / "does-not-exist.toml"
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(ConfigMissingError) as exc:
         load_config(missing)
     assert exc.value.code == 2
+    assert exc.value.cfg_path == missing
 
 
 def test_shards_config_path_override_is_authoritative(
@@ -85,9 +91,10 @@ def test_shards_config_path_override_is_authoritative(
     # and it silently fell back to ~/.shards/config.toml this would not raise.
     missing = tmp_path / "nope.toml"
     monkeypatch.setenv("SHARDS_CONFIG_PATH", str(missing))
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(ConfigMissingError) as exc:
         load_config()
     assert exc.value.code == 2
+    assert exc.value.cfg_path == missing
 
 
 def test_shards_config_path_isolates_from_home(shards_config: Path, vault: Path) -> None:
