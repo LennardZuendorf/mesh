@@ -1,7 +1,7 @@
 """shards CLI entry point.
 
 Thin Typer app. Three verbs (`note`, `task`, `search`) plus human-only admin
-(`daemon`, `status`, `reindex`) and the Phase-2 session lenses. Sub-app command
+(`init`, `daemon`, `status`, `reindex`) and the Phase-2 session lenses. Sub-app command
 bodies live in their feature modules; this module only wires the surface together
 so `shards --help` is always honest about the shape.
 
@@ -24,7 +24,7 @@ as — honoured on creation (defaults the written `owner`) and on filters
 (`note list`/`task list`/`search`), unchanged on `task claim`/`task
 release`/`session-start` (already read it), and deliberately *not* folded
 into `task update`'s reassignment `--owner` (opt-in only — see
-`cli/task.py::update_command`). Admin commands (`daemon`/`status`/`reindex`)
+`cli/task.py::update_command`). Admin commands (`init`/`daemon`/`status`/`reindex`)
 are out of scope for this contract; their reader is a later unit's refactor.
 """
 
@@ -53,6 +53,11 @@ _SUBAPPS: dict[str, tuple[str, str]] = {
 }
 # Leaf commands (plain callables Typer wraps): ``name -> (module, function, help)``.
 _LEAVES: dict[str, tuple[str, str, str]] = {
+    "init": (
+        "shards.cli.admin",
+        "init_command",
+        "Write ~/.shards/config.toml (or $SHARDS_CONFIG_PATH); --force to overwrite.",
+    ),
     "status": (
         "shards.cli.admin",
         "status_command",

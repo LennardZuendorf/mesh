@@ -194,7 +194,7 @@ def test_command_table_covers_the_actual_tree() -> None:
     hasn't silently gone stale against a newly-added command."""
     from shards.cli.__main__ import _LEAVES, _SUBAPPS
 
-    admin_leaves = {"status", "reindex"}
+    admin_leaves = {"init", "status", "reindex"}
     admin_subapps = {"daemon"}
     non_admin_leaves = set(_LEAVES) - admin_leaves
     non_admin_subapps = set(_SUBAPPS) - admin_subapps

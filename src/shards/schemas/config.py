@@ -6,13 +6,16 @@ runtime agent identity (``[core].agent``) is in turn overridable by
 ``$SHARDS_AGENT`` — when both are present, the environment wins.
 
 A missing config file is a validation error: ``load_config`` raises
-``SystemExit(2)`` (exit code 2 == validation, per the root tech contract). A
-malformed config raises :class:`msgspec.ValidationError`.
+``SystemExit(2)`` (exit code 2 == validation, per the root tech contract), after
+printing a stderr line naming the resolved path and the one required key
+(agent-usability/7 — see :func:`_missing_config_message`). A malformed config
+raises :class:`msgspec.ValidationError`.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -87,6 +90,26 @@ class Config(msgspec.Struct, kw_only=True):
         return self.core.agent
 
 
+def _missing_config_message(cfg_path: Path) -> str:
+    """The stderr line printed when ``cfg_path`` does not exist (agent-usability/7).
+
+    Names the exact resolved path (not just "the config") and the one key
+    ``load_config`` cannot default its way around, so a first-run agent or
+    operator is pointed at both the fix (``shards init``) and the shape it
+    produces, instead of a bare exit 2. This is a message only — the exit
+    code and exception type are the pre-existing, documented contract
+    (agent-usability/5 replaces ``SystemExit`` with a typed, catchable error;
+    that restructuring is out of scope here).
+    """
+    return (
+        f"shards: no config found at {cfg_path}\n"
+        "run `shards init` to create one (honours $SHARDS_CONFIG_PATH), "
+        "or point $SHARDS_CONFIG_PATH at an existing config.\n"
+        "required: [core].tolaria_path (path to your Tolaria vault folder); "
+        "[core].agent, [search], and [tasks] are optional and default."
+    )
+
+
 def resolve_config_path() -> Path:
     """Config path: ``$SHARDS_CONFIG_PATH`` if set, else ``~/.shards/config.toml``."""
     override = os.environ.get(_ENV_CONFIG_PATH)
@@ -105,6 +128,7 @@ def load_config(path: Path | None = None) -> Config:
     """
     cfg_path = path if path is not None else resolve_config_path()
     if not cfg_path.is_file():
+        print(_missing_config_message(cfg_path), file=sys.stderr)
         raise SystemExit(_VALIDATION_EXIT_CODE)
 
     with cfg_path.open("rb") as fh:

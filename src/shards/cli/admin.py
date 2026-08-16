@@ -1,4 +1,4 @@
-"""Admin surface: ``daemon`` lifecycle, ``shards status``, ``shards reindex``.
+"""Admin surface: ``shards init``, ``daemon`` lifecycle, ``status``, ``reindex``.
 
 These are *admin* commands (spec R4), not new verbs — the three-verb rule
 (``note`` / ``task`` / ``search``) is untouched. Everything here honours the
@@ -7,6 +7,16 @@ reads vault health from the warm index when the daemon is up and falls back to
 the identical direct filesystem scan when it is down, and ``reindex`` degrades to
 a notice, so both work with the daemon down.
 
+* **``shards init``** (agent-usability/7) — writes ``~/.shards/config.toml`` (or
+  ``$SHARDS_CONFIG_PATH``): vault path, agent identity, roster, search settings.
+  Refuses to overwrite an existing config without ``--force`` (the file is left
+  byte-for-byte alone on refusal — no read-then-rewrite-identical), so running it
+  twice is always safe. Every path it writes or creates is ``expanduser()``'d
+  first (the same rule ``CoreConfig.__post_init__`` enforces on load — a literal
+  ``~/vault`` must never become a relative ``./~/vault`` directory). Human-only:
+  withheld from the MCP surface like the rest of this module — nothing here is
+  agent-safe to trigger remotely, since it writes the very config every other
+  command depends on.
 * **``daemon start|stop|status``** — supervise a detached socket server. Its PID
   lives in a state file beside the socket (``$XDG_RUNTIME_DIR/shards.pid``, else
   ``~/.shards/run/shards.pid``), written atomically (temp file + ``os.replace``).
@@ -50,13 +60,18 @@ from shards.core.lenses import TASK_STATUSES
 from shards.core.notes import _parse_since
 from shards.core.tasks import TaskView
 from shards.daemon.client import DaemonClient, default_socket_path
-from shards.schemas.config import load_config
+from shards.schemas.config import load_config, resolve_config_path
 from shards.storage.files import atomic_write
 
 # Reuse the canonical liveness rule rather than re-deriving it.
 from shards.storage.locks import _pid_alive
 
 _PID_NAME = "shards.pid"
+# ``shards init`` defaults — a first run with no flags at all still produces a
+# working config (agent-usability/7's load-bearing test: note new / task list
+# actually succeed afterward, not just "a file exists").
+_DEFAULT_VAULT_PATH = Path.home() / ".shards" / "vault"
+_DEFAULT_AGENT = "agent"
 # The staleness window for the per-agent "stale claims" count in ``shards
 # status`` (team-awareness/4) — a claim is stale here iff it has not been
 # touched (``updated``, which bumps on every write including ``task append``)
@@ -161,6 +176,144 @@ def _emit(ctx: typer.Context, payload: dict[str, Any], human: str) -> None:
         typer.echo(json.dumps(payload))
     elif not _quiet(ctx):
         typer.echo(human)
+
+
+# --------------------------------------------------------------------------- #
+# shards init                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def _parse_roster(raw: str | None) -> list[str]:
+    """``--collections`` (comma-separated) into a roster list.
+
+    ``None``/empty → ``[]``, the open-roster default: ``[tasks].collections``
+    empty means any ``--owner`` string is accepted (``core/notes.py``,
+    ``core/tasks.py`` both special-case it that way already).
+    """
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _toml_string(value: str) -> str:
+    """A TOML basic-string literal for ``value`` (escapes backslash and quote)."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def render_config_toml(
+    *,
+    tolaria_path: Path,
+    agent: str,
+    collections: list[str],
+    search_collection: str | None,
+    hybrid: bool,
+    threshold: float,
+) -> str:
+    """Render a complete, ``load_config``-parseable ``config.toml``.
+
+    Every ``[core]``/``[search]``/``[tasks]`` key is written explicitly rather
+    than left to the schema's own defaults, so the file this writes is a
+    legible reference by itself — mirroring the shape of the committed
+    ``config.example.toml`` at the repo root.
+    """
+    lines = [
+        "[core]",
+        f"tolaria_path = {_toml_string(str(tolaria_path))}",
+        f"agent = {_toml_string(agent)}",
+        "",
+        "[search]",
+        f"hybrid = {'true' if hybrid else 'false'}",
+        f"threshold = {threshold}",
+    ]
+    if search_collection:
+        lines.append(f"collection = {_toml_string(search_collection)}")
+    roster = ", ".join(_toml_string(item) for item in collections)
+    lines.extend(["", "[tasks]", f"collections = [{roster}]", ""])
+    return "\n".join(lines)
+
+
+def init_command(
+    ctx: typer.Context,
+    path: str | None = typer.Option(
+        None,
+        "--path",
+        help="Vault folder ([core].tolaria_path). Defaults to ~/.shards/vault.",
+    ),
+    agent: str | None = typer.Option(
+        None,
+        "--agent",
+        help="This agent's identity ([core].agent). Defaults to $SHARDS_AGENT, else 'agent'.",
+    ),
+    collections: str | None = typer.Option(
+        None,
+        "--collections",
+        help=(
+            "Comma-separated roster of valid --owner identities ([tasks].collections). "
+            "Default: empty — an open roster, any owner string accepted."
+        ),
+    ),
+    search_collection: str | None = typer.Option(
+        None,
+        "--search-collection",
+        help="indexed collection name ([search].collection). Default: unset.",
+    ),
+    hybrid: bool = typer.Option(
+        True,
+        "--hybrid/--no-hybrid",
+        help="Hybrid lexical+vector search via indexed ([search].hybrid). Default: on.",
+    ),
+    threshold: float = typer.Option(
+        0.65,
+        "--threshold",
+        help="Substring-fallback score floor ([search].threshold). Default: 0.65.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing config. Default: refuse."
+    ),
+) -> None:
+    """Write ~/.shards/config.toml (or $SHARDS_CONFIG_PATH); refuses to overwrite without --force.
+
+    Admin (root AGENTS.md §6), not a fourth verb — beside ``daemon`` / ``status`` /
+    ``reindex``, and withheld from the MCP surface for the same reason they are:
+    this writes the very config every other command (CLI and MCP alike) depends
+    on, so triggering it remotely is never agent-safe. Idempotent and
+    non-destructive: with an existing config and no ``--force``, the file is
+    never opened for writing at all (refuse-first, no read-then-rewrite of
+    identical content) — running ``init`` twice in a row is always safe.
+    ``--path`` is ``expanduser()``'d before it is used for anything (creating
+    the vault directory or writing it into the config), the same rule
+    ``CoreConfig.__post_init__`` enforces on load.
+    """
+    cfg_path = resolve_config_path()
+    with cli_errors():
+        if cfg_path.is_file() and not force:
+            raise ValueError(f"config already exists at {cfg_path} — pass --force to overwrite")
+
+        resolved_vault = Path(path).expanduser() if path else _DEFAULT_VAULT_PATH
+        resolved_agent = agent or os.environ.get("SHARDS_AGENT") or _DEFAULT_AGENT
+        roster = _parse_roster(collections)
+
+        resolved_vault.mkdir(parents=True, exist_ok=True)
+        content = render_config_toml(
+            tolaria_path=resolved_vault,
+            agent=resolved_agent,
+            collections=roster,
+            search_collection=search_collection,
+            hybrid=hybrid,
+            threshold=threshold,
+        )
+        atomic_write(cfg_path, content)
+
+    _emit(
+        ctx,
+        {
+            "path": str(cfg_path),
+            "tolaria_path": str(resolved_vault),
+            "agent": resolved_agent,
+        },
+        f"wrote config to {cfg_path}",
+    )
 
 
 # --------------------------------------------------------------------------- #
