@@ -196,8 +196,8 @@ def _format_stamp(iso: str, agent: str | None) -> str:
     ``## Cancelled``) both call through here rather than each formatting their
     own line, so the "who wrote this" prose stays one formatter, not two drifting
     copies. ``agent`` is **who is actually running the command** — resolved by
-    each caller from ``config.agent`` (the only identity available at these call
-    sites; none of them take a separate ``--owner`` override) — never the note's
+    each caller from an ``actor`` override when given (representing a resolved
+    ``--owner`` or global setting), else from ``config.agent`` — never the note's
     ``owner`` field, which only names who a task/note is accountable to and may
     be a completely different agent than the one appending right now (the bug
     this unit fixes: an editor's append was silently attributed to the creator).
