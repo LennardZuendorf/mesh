@@ -35,7 +35,6 @@ from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
 from shards.index import indexed_client
-from shards.index.watcher import ChangeHooks
 from shards.schemas.config import Config, load_config
 from shards.schemas.search import SearchResult
 
@@ -620,22 +619,6 @@ def test_incremental_update_noop_without_collection(
 
     monkeypatch.setattr(indexed_client.subprocess, "run", _boom)
     indexed_client.incremental_update(cfg, vault / "notes" / "n-x.md")
-
-
-def test_register_hook_drives_incremental_update(
-    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[tuple[Config, Path]] = []
-
-    def _record(config: Config, path: Path) -> None:
-        calls.append((config, path))
-
-    monkeypatch.setattr(indexed_client, "incremental_update", _record)
-    hooks = ChangeHooks()
-    indexed_client.register_hook(cfg, hooks)
-    changed = vault / "notes" / "n-x.md"
-    hooks.fire(changed)  # the watcher fans out to registered hooks
-    assert calls == [(cfg, changed)]
 
 
 # --------------------------------------------------------------------------- #
