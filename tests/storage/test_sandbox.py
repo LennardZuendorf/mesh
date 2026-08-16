@@ -54,7 +54,7 @@ def _call_tool(name: str, params: dict[str, object]) -> dict[str, object]:
 
 
 def _write_note_frontmatter(path: Path, note_id: str, title: str) -> None:
-    meta = {
+    meta: dict[str, object] = {
         "id": note_id,
         "type": "note",
         "title": title,
@@ -65,7 +65,9 @@ def _write_note_frontmatter(path: Path, note_id: str, title: str) -> None:
         "related": [],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(frontmatter.dumps(frontmatter.Post("seed body", **meta)), encoding="utf-8")
+    post = frontmatter.Post("seed body")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #

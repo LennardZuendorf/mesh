@@ -49,7 +49,7 @@ def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
 
 def _seed_body_only_hit(vault: Path) -> None:
     """A note whose title/tags don't match but whose body contains 'eTA'."""
-    meta = {
+    meta: dict[str, object] = {
         "id": "n-visa",
         "type": "note",
         "title": "Travel Notes",
@@ -62,9 +62,9 @@ def _seed_body_only_hit(vault: Path) -> None:
     body = "Remember to apply for the eTA before the flight."
     folder = vault / "notes"
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "n-visa.md").write_text(
-        frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8"
-    )
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    (folder / "n-visa.md").write_text(frontmatter.dumps(post), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -206,7 +206,7 @@ def test_explicit_config_threshold_065_behaves_as_today(shards_config: Path, vau
 
 def test_tier_matrix_unchanged(cfg_default_threshold: Config, vault: Path) -> None:
     """Direct scoring check: all four tiers keep their pinned values."""
-    meta_base = {
+    meta_base: dict[str, object] = {
         "type": "note",
         "owner": "seed-agent",
         "created": "2026-06-01T00:00:00+00:00",
@@ -217,10 +217,10 @@ def test_tier_matrix_unchanged(cfg_default_threshold: Config, vault: Path) -> No
     folder.mkdir(parents=True, exist_ok=True)
 
     def _write(entry_id: str, title: str, tags: list[str], body: str) -> None:
-        meta = {"id": entry_id, "title": title, "tags": tags, **meta_base}
-        (folder / f"{entry_id}.md").write_text(
-            frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8"
-        )
+        meta: dict[str, object] = {"id": entry_id, "title": title, "tags": tags, **meta_base}
+        post = frontmatter.Post(body)
+        post.metadata = meta
+        (folder / f"{entry_id}.md").write_text(frontmatter.dumps(post), encoding="utf-8")
 
     _write("n-exact", "Matrix Probe", [], "irrelevant body")
     _write("n-sub", "Prefixed Matrix Probe Suffix", [], "irrelevant body")

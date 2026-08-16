@@ -31,7 +31,7 @@ from pathlib import Path
 
 import frontmatter
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 import shards.daemon.client as daemon_client
 from shards.cli.__main__ import app
@@ -92,7 +92,9 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
@@ -127,13 +129,15 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("body", **meta)), encoding="utf-8")
+    post = frontmatter.Post("body")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
 
 
-def _invoke(args: list[str]) -> object:
+def _invoke(args: list[str]) -> Result:
     return CliRunner().invoke(app, args)
 
 
@@ -187,7 +191,9 @@ def test_recent_activity_fallback_is_scan_recent(
     cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The daemon-down path routes through ``shards.index.warm.scan_recent``."""
-    sentinel = [{"id": "n-z", "type": "note", "title": "Z", "path": "/z.md", "mtime": _NOW}]
+    sentinel: list[dict[str, object]] = [
+        {"id": "n-z", "type": "note", "title": "Z", "path": "/z.md", "mtime": _NOW}
+    ]
     seen: dict[str, object] = {}
 
     def _spy(config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> list[dict[str, object]]:

@@ -129,7 +129,9 @@ def test_serve_forever_binds_config_ful_warm_handlers(socket_path: Path, cfg: Co
 
     reply = asyncio.run(_run())
     assert reply["ok"] is True, reply
-    assert set(reply["result"]) == {"note_count", "task_statuses", "newest"}
+    result = reply["result"]
+    assert isinstance(result, dict)
+    assert set(result) == {"note_count", "task_statuses", "newest"}
 
 
 # --------------------------------------------------------------------------- #
@@ -251,7 +253,7 @@ def test_handle_client_swallows_reset_while_writing_the_reply(
     reader = _OneShotReader(line)
     writer = _DyingWriter(exc_type)
 
-    asyncio.run(server._handle_client(reader, writer))  # type: ignore[arg-type]
+    asyncio.run(server._handle_client(reader, writer))  # ty: ignore[invalid-argument-type]
 
     assert writer.closed  # the connection is still cleaned up on the way out
 
@@ -295,7 +297,7 @@ def test_stop_tolerates_a_watcher_without_hooks(socket_path: Path) -> None:
     async def _run() -> _FakeWatcher:
         server = DaemonServer(socket_path)
         watcher = _FakeWatcher()
-        server._watcher = watcher  # type: ignore[assignment]
+        server._watcher = watcher  # ty: ignore[invalid-assignment]
         server._hooks = None
         await server.stop()
         assert server._watcher is None

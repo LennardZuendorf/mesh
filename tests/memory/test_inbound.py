@@ -78,7 +78,9 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -111,7 +113,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -235,10 +239,10 @@ def test_inbound_skips_a_foreign_file_with_no_shards_id(cfg: Config, vault: Path
     _seed_note(vault, note_id="n-target", title="Target")
 
     foreign = vault / "notes" / "not-a-shard.md"
-    foreign_meta = {"title": "Foreign", "related": ["n-target"]}
-    foreign.write_text(
-        frontmatter.dumps(frontmatter.Post("foreign body", **foreign_meta)), encoding="utf-8"
-    )
+    foreign_meta: dict[str, object] = {"title": "Foreign", "related": ["n-target"]}
+    foreign_post = frontmatter.Post("foreign body")
+    foreign_post.metadata = foreign_meta
+    foreign.write_text(frontmatter.dumps(foreign_post), encoding="utf-8")
 
     assert inbound_ids(cfg, "n-target") == []
 

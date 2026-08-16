@@ -86,7 +86,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("Task body.", **meta)), encoding="utf-8")
+    post = frontmatter.Post("Task body.")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 

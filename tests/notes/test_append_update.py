@@ -12,7 +12,9 @@ from __future__ import annotations
 import multiprocessing as mp
 import re
 from datetime import UTC, datetime
+from multiprocessing.synchronize import Barrier as MpBarrier
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -63,7 +65,9 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -199,7 +203,7 @@ def test_append_adds_text_and_bumps_updated(cfg: Config, vault: Path) -> None:
     reloaded = _reload(path)
     assert "Confirmed J/C" in reloaded.content
     assert "Body line." in reloaded.content  # original body preserved
-    assert reloaded.metadata["updated"] > _OLD  # bumped
+    assert cast(datetime, reloaded.metadata["updated"]) > _OLD  # bumped
     assert reloaded.metadata["created"] == _OLD  # created untouched
     assert note.updated > _OLD
     assert note.id == "n-seed"
@@ -398,7 +402,7 @@ def test_append_acquires_entity_lock(
 # --------------------------------------------------------------------------- #
 
 
-def _append_worker(config_path: str, note_id: str, text: str, barrier: object) -> None:
+def _append_worker(config_path: str, note_id: str, text: str, barrier: MpBarrier) -> None:
     """Child-process body: load config, wait on the barrier, append once."""
     import os
 
@@ -407,7 +411,7 @@ def _append_worker(config_path: str, note_id: str, text: str, barrier: object) -
     from shards.schemas.config import load_config as _load
 
     child_cfg = _load()
-    barrier.wait()  # type: ignore[attr-defined]
+    barrier.wait()
     _append(child_cfg, note_id, text)
 
 
@@ -449,7 +453,7 @@ def test_update_tags_delta_add_remove(cfg: Config, vault: Path) -> None:
     meta = _reload(path).metadata
     assert meta["tags"] == ["ndc", "flights"]
     assert note.tags == ["ndc", "flights"]
-    assert meta["updated"] > _OLD
+    assert cast(datetime, meta["updated"]) > _OLD
 
 
 def test_update_tags_delta_remove_absent_is_noop(cfg: Config, vault: Path) -> None:

@@ -54,16 +54,18 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
 def _seed_tolaria(vault: Path, name: str, meta: dict[str, object]) -> Path:
     """Write a non-shards Markdown file (id is not a shards ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
-    path.write_text(
-        frontmatter.dumps(frontmatter.Post("Tolaria content.", **meta)), encoding="utf-8"
-    )
+    post = frontmatter.Post("Tolaria content.")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -169,7 +171,9 @@ def _seed_task(
     folder = vault / rel
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 

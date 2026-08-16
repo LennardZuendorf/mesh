@@ -42,6 +42,7 @@ from typing import Any
 
 import frontmatter
 import pytest
+from fastmcp.tools.base import ToolResult
 from typer.testing import CliRunner
 
 import shards.mcp.server as server
@@ -57,6 +58,14 @@ from shards.core.tasks import update_task as core_update_task
 from shards.index import indexed_client
 from shards.schemas.config import Config, load_config
 from shards.schemas.note import Note
+
+
+def _content(dispatched: ToolResult) -> dict[str, Any]:
+    """Narrow ``ToolResult.structured_content`` (``dict[str, Any] | None``) for tests
+    that know a given tool call always returns structured content."""
+    assert dispatched.structured_content is not None
+    return dispatched.structured_content
+
 
 # The tech.md tool table, braces expanded — the complete public MCP surface.
 _EXPECTED_TOOLS: frozenset[str] = frozenset(
@@ -368,8 +377,8 @@ def test_note_new_duplicate_title_warning_reaches_structured_content(
         server.app.call_tool("shards_note_new", {"title": "Structured Dup", "body": "y"})
     )
     assert dispatched.structured_content is not None
-    assert len(dispatched.structured_content["warnings"]) == 1
-    assert "duplicate title" in dispatched.structured_content["warnings"][0]
+    assert len(_content(dispatched)["warnings"]) == 1
+    assert "duplicate title" in _content(dispatched)["warnings"][0]
 
 
 # --------------------------------------------------------------------------- #
@@ -497,7 +506,7 @@ def default_threshold_config(
 
 def _seed_body_only_hit(vault: Path) -> None:
     """A note whose title/tags don't match but whose body contains 'eTA'."""
-    meta = {
+    meta: dict[str, object] = {
         "id": "n-visa",
         "type": "note",
         "title": "Travel Notes",
@@ -510,9 +519,9 @@ def _seed_body_only_hit(vault: Path) -> None:
     body = "Remember to apply for the eTA before the flight."
     folder = vault / "notes"
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "n-visa.md").write_text(
-        frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8"
-    )
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    (folder / "n-visa.md").write_text(frontmatter.dumps(post), encoding="utf-8")
 
 
 def test_mcp_search_default_config_no_indexed_returns_body_hit(
@@ -526,7 +535,7 @@ def test_mcp_search_default_config_no_indexed_returns_body_hit(
 
     dispatched = asyncio.run(server.app.call_tool("shards_search", {"query": "eTA"}))
 
-    hits = dispatched.structured_content["result"]
+    hits = _content(dispatched)["result"]
     assert {h["id"] for h in hits} == {"n-visa"}
     assert hits[0]["score"] == 0.4
 
@@ -543,7 +552,7 @@ def test_mcp_search_explicit_threshold_param_still_excludes_body_hit(
         server.app.call_tool("shards_search", {"query": "eTA", "threshold": 0.7})
     )
 
-    assert dispatched.structured_content["result"] == []
+    assert _content(dispatched)["result"] == []
 
 
 def test_mcp_search_explicit_config_threshold_behaves_as_today(cfg: Config, vault: Path) -> None:
@@ -553,7 +562,7 @@ def test_mcp_search_explicit_config_threshold_behaves_as_today(cfg: Config, vaul
 
     dispatched = asyncio.run(server.app.call_tool("shards_search", {"query": "eTA"}))
 
-    assert dispatched.structured_content["result"] == []
+    assert _content(dispatched)["result"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -639,7 +648,7 @@ def test_task_append_tool_calls_core_append_task(
     )
 
     assert seen == {"task_id": "t-fake", "text": "hi", "section": "Log", "timestamp": False}
-    assert dispatched.structured_content["title"] == "spy result"
+    assert _content(dispatched)["title"] == "spy result"
 
 
 def test_task_release_tool_calls_core_release_task(
@@ -658,7 +667,7 @@ def test_task_release_tool_calls_core_release_task(
     )
 
     assert seen == {"task_id": "t-fake", "releaser": "test-agent"}
-    assert dispatched.structured_content["title"] == "spy released"
+    assert _content(dispatched)["title"] == "spy released"
 
 
 def test_session_start_tool_calls_core_session_start_entries(
@@ -677,7 +686,7 @@ def test_session_start_tool_calls_core_session_start_entries(
 
     dispatched = asyncio.run(server.app.call_tool("shards_session_start", {}))
 
-    assert dispatched.structured_content["result"] == sentinel
+    assert _content(dispatched)["result"] == sentinel
     assert seen == {"meta_only": False}
 
 
@@ -697,7 +706,7 @@ def test_parity_task_append(cfg: Config, vault: Path) -> None:
             {"task_id": twin.id, "text": "same note text", "section": "Log"},
         )
     )
-    result = dispatched.structured_content
+    result = _content(dispatched)
 
     assert result["status"] == expected.status
     assert core_get_task(cfg, oracle.id).body == core_get_task(cfg, twin.id).body
@@ -715,7 +724,7 @@ def test_parity_task_release(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
         server.app.call_tool("shards_task_release", {"task_id": twin.id, "owner": "test-agent"})
     )
-    result = dispatched.structured_content
+    result = _content(dispatched)
 
     assert result["status"] == expected.status == "open"
     assert result["claimed_by"] is expected.claimed_by is None
@@ -731,7 +740,7 @@ def test_parity_task_update_owner(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
         server.app.call_tool("shards_task_update", {"task_id": twin.id, "owner": "other-agent"})
     )
-    result = dispatched.structured_content
+    result = _content(dispatched)
 
     assert result["owner"] == expected.owner == "other-agent"
     # Reassignment never touches claimed_by (root AGENTS.md's owner/claim split).
@@ -749,7 +758,7 @@ def test_parity_task_list_available_and_priority_sort(cfg: Config, vault: Path) 
     cli_ids = [row["id"] for row in _cli(["--json", "task", "list", "--available"])]
 
     dispatched = asyncio.run(server.app.call_tool("shards_task_list", {"available": True}))
-    mcp_ids = [row["id"] for row in dispatched.structured_content["result"]]
+    mcp_ids = [row["id"] for row in _content(dispatched)["result"]]
 
     assert mcp_ids == cli_ids
     assert claimed.id not in mcp_ids
@@ -765,7 +774,7 @@ def test_parity_task_list_stale(cfg: Config, vault: Path) -> None:
     cli_ids = [row["id"] for row in _cli(["--json", "task", "list", "--stale", "9999d"])]
 
     dispatched = asyncio.run(server.app.call_tool("shards_task_list", {"stale": "9999d"}))
-    mcp_ids = [row["id"] for row in dispatched.structured_content["result"]]
+    mcp_ids = [row["id"] for row in _content(dispatched)["result"]]
 
     assert mcp_ids == cli_ids == []
 
@@ -778,7 +787,7 @@ def test_parity_task_list_status_csv(cfg: Config, vault: Path) -> None:
     core_claim_task(cfg, claimed_task.id, "test-agent")
 
     dispatched = asyncio.run(server.app.call_tool("shards_task_list", {"status": "open,claimed"}))
-    mcp_ids = {row["id"] for row in dispatched.structured_content["result"]}
+    mcp_ids = {row["id"] for row in _content(dispatched)["result"]}
 
     assert {open_task.id, claimed_task.id} <= mcp_ids
 
@@ -802,7 +811,7 @@ def test_parity_session_start(cfg: Config, vault: Path) -> None:
 
     cli_entries = _cli(["session-start", "--json"])
     dispatched = asyncio.run(server.app.call_tool("shards_session_start", {}))
-    mcp_entries = dispatched.structured_content["result"]
+    mcp_entries = _content(dispatched)["result"]
 
     assert mcp_entries == cli_entries
     reasons_by_id = {e["id"]: e["reason"] for e in mcp_entries}
@@ -819,7 +828,7 @@ def test_parity_session_start_owner_and_team(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
         server.app.call_tool("shards_session_start", {"owner": "other-agent", "team": True})
     )
-    mcp_entries = dispatched.structured_content["result"]
+    mcp_entries = _content(dispatched)["result"]
 
     assert mcp_entries == cli_entries
 
@@ -902,7 +911,7 @@ def test_mcp_search_marks_hits_fallback_when_indexed_unreachable(cfg: Config, va
     dispatched = asyncio.run(
         server.app.call_tool("shards_search", {"query": "Zephyr Marker Probe Fallback"})
     )
-    hits = dispatched.structured_content["result"]
+    hits = _content(dispatched)["result"]
 
     assert hits and all(h["mode"] == "fallback" for h in hits)
 
@@ -924,7 +933,7 @@ def test_mcp_search_marks_hits_indexed_when_hybrid_runs(
     dispatched = asyncio.run(
         server.app.call_tool("shards_search", {"query": "Zephyr Marker Probe Hybrid"})
     )
-    hits = dispatched.structured_content["result"]
+    hits = _content(dispatched)["result"]
 
     assert hits and all(h["mode"] == "indexed" for h in hits)
 
@@ -956,7 +965,7 @@ def test_mcp_search_marks_hits_fallback_on_indexed_runtime_failure(
     dispatched = asyncio.run(
         server.app.call_tool("shards_search", {"query": "Zephyr Marker Probe Runtime Failure"})
     )
-    hits = dispatched.structured_content["result"]
+    hits = _content(dispatched)["result"]
 
     # The substring fallback genuinely found the note (proves the fallback
     # really ran, not just that the mode field happens to read "fallback").
@@ -972,7 +981,7 @@ def test_mcp_search_tag_pull_carries_no_mode_marker(cfg: Config, vault: Path) ->
     core_create_note(load_config(), "Tag Pull Probe", tags=["probe"])
 
     dispatched = asyncio.run(server.app.call_tool("shards_search", {"tags": ["probe"]}))
-    hits = dispatched.structured_content["result"]
+    hits = _content(dispatched)["result"]
 
     assert hits
     assert all("mode" not in h for h in hits)

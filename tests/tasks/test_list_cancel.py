@@ -24,6 +24,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -96,7 +97,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -105,9 +108,9 @@ def _seed_foreign(vault: Path, sub: str, name: str, meta: dict[str, object] | No
     folder = vault / "tasks" / sub
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}.md"
-    path.write_text(
-        frontmatter.dumps(frontmatter.Post("Foreign.", **(meta or {}))), encoding="utf-8"
-    )
+    post = frontmatter.Post("Foreign.")
+    post.metadata = meta or {}
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -578,7 +581,7 @@ def test_cancel_open_appends_section_and_moves(cfg: Config, vault: Path) -> None
 
     post = _reload(_done_path(vault))
     assert post.metadata["status"] == "cancelled"
-    assert post.metadata["updated"] > _OLD  # bumped on the cancelling write
+    assert cast(datetime, post.metadata["updated"]) > _OLD  # bumped on the cancelling write
     assert post.metadata["created"] == _OLD  # birth instant untouched
     assert "Original body." in post.content  # body preserved
     assert "## Cancelled" in post.content

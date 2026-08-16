@@ -87,7 +87,9 @@ def _seed(
     folder = vault / rel
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{entry_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -112,7 +114,9 @@ def _seed_foreign(
     folder = vault / rel
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 

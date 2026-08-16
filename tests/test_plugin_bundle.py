@@ -31,6 +31,7 @@ from typing import Any
 import pytest
 import typer
 import yaml
+from typer.core import TyperGroup
 
 from tests.memory.test_instructions import _AUTH_DENYLIST
 
@@ -245,8 +246,8 @@ def _cli_note_task_subcommands() -> dict[str, set[str]]:
     from shards.cli.task import task_app
 
     return {
-        "note": {c.name for c in note_app.registered_commands},
-        "task": {c.name for c in task_app.registered_commands},
+        "note": {c.name for c in note_app.registered_commands if c.name is not None},
+        "task": {c.name for c in task_app.registered_commands if c.name is not None},
     }
 
 
@@ -257,20 +258,30 @@ def _cli_top_level_names() -> set[str]:
 
 
 def _cli_flags(*, group: str, command: str) -> set[str]:
-    """Every ``--flag`` a real CLI command accepts, via click introspection."""
+    """Every ``--flag`` a real CLI command accepts, via click introspection.
+
+    Typer 0.26 vendors its own click fork under ``typer._click`` (the ``app``'s
+    resolved command tree is built from *that* ``Command``/``Context``, not the
+    ``click`` package on PyPI) — so introspection here goes through
+    ``typer.core.TyperGroup`` / ``typer._click.core.Context``, the same vendored
+    types ``cli/__main__.py`` itself is annotated against.
+    """
+    from typer._click.core import Context as ClickContext
+
     from shards.cli.__main__ import app
 
     click_app = typer.main.get_command(app)
-    import click
+    assert isinstance(click_app, TyperGroup)
 
-    ctx = click.Context(click_app)
+    ctx = ClickContext(click_app)
     if group == "":
         target = click_app.get_command(ctx, command)
     else:
         sub = click_app.get_command(ctx, group)
         assert sub is not None
-        sub_ctx = click.Context(sub, parent=ctx)
-        target = sub.get_command(sub_ctx, command)  # type: ignore[attr-defined]
+        assert isinstance(sub, TyperGroup)
+        sub_ctx = ClickContext(sub, parent=ctx)
+        target = sub.get_command(sub_ctx, command)
     assert target is not None, f"no such CLI command: {group} {command}".strip()
     opts: set[str] = set()
     for param in target.params:

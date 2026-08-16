@@ -14,7 +14,7 @@ import pytest
 from msgspec import ValidationError
 
 from shards.core.ids import generate_task_id
-from shards.schemas.task import Task
+from shards.schemas.task import Task, TaskStatus
 from shards.storage.files import task_folder
 
 # --------------------------------------------------------------------------- #
@@ -89,8 +89,8 @@ def test_task_status_rejects_unknown_value() -> None:
 
 
 @pytest.mark.parametrize("status", ["open", "claimed", "done", "cancelled"])
-def test_task_status_accepts_all_lifecycle_values(status: str) -> None:
-    task = Task(id="t-c7d1", title="x", created=_now(), updated=_now(), status=status)  # type: ignore[arg-type]
+def test_task_status_accepts_all_lifecycle_values(status: TaskStatus) -> None:
+    task = Task(id="t-c7d1", title="x", created=_now(), updated=_now(), status=status)
     assert task.status == status
 
 

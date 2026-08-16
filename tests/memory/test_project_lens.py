@@ -55,7 +55,9 @@ def _seed_project_note(vault: Path, *, note_id: str = "n-proj", title: str = "Q3
     folder = note_folder("project", vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("scope", **meta)), encoding="utf-8")
+    post = frontmatter.Post("scope")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -83,7 +85,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("body", **meta)), encoding="utf-8")
+    post = frontmatter.Post("body")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 

@@ -71,7 +71,8 @@ def test_shards_note_list_body_returns_matching_on_disk_notes(cfg: Config, vault
     n2 = create_note(cfg, "Second Listed Note", body="two")
 
     entries = asyncio.run(server.app.call_tool("shards_note_list", {"limit": 1}))
-    rows = entries.structured_content["result"]  # type: ignore[index]
+    assert entries.structured_content is not None
+    rows = entries.structured_content["result"]
     assert len(rows) == 1
     assert rows[0]["id"] == n2.id  # newest-first default sort: n2 created last
     assert (vault / "notes" / f"{n2.id}.md").exists()

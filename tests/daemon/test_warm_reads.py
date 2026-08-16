@@ -65,7 +65,9 @@ def cfg(shards_config: Path) -> Config:
 
 def _write(path: Path, meta: dict[str, Any], body: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 

@@ -28,10 +28,11 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from shards.cli.__main__ import app
 from shards.cli.admin import (
@@ -51,7 +52,7 @@ from shards.storage.locks import LOCK_TTL_SECONDS
 _STALE_AGE = LOCK_TTL_SECONDS + 100.0  # comfortably past the 300 s TTL
 
 
-def vault_status(config: Config) -> dict[str, object]:
+def vault_status(config: Config) -> dict[str, Any]:
     """The daemon-down ``vault.status`` payload: the client's own file-op fallback.
 
     core-hardening/5 moved the report assembly into
@@ -83,7 +84,7 @@ def runtime_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return run
 
 
-def _invoke(args: list[str]) -> object:
+def _invoke(args: list[str]) -> Result:
     return CliRunner().invoke(app, args)
 
 
@@ -121,7 +122,9 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -155,7 +158,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 

@@ -33,7 +33,10 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+from multiprocessing.synchronize import Barrier as MpBarrier
+from multiprocessing.synchronize import Event as MpEvent
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 import pytest
@@ -63,7 +66,11 @@ def _reload(path: Path) -> frontmatter.Post:
 
 
 def _claim_worker(
-    config_path: str, task_id: str, owner: str, barrier: object, queue: object
+    config_path: str,
+    task_id: str,
+    owner: str,
+    barrier: MpBarrier,
+    queue: multiprocessing.Queue[tuple[str, int]],
 ) -> None:
     """Run in a spawned child process: invoke the real CLI ``task claim``."""
     import os as _os
@@ -73,9 +80,9 @@ def _claim_worker(
 
     from shards.cli.__main__ import app
 
-    barrier.wait()  # type: ignore[attr-defined]
+    barrier.wait()
     result = CliRunner().invoke(app, ["--owner", owner, "task", "claim", task_id])
-    queue.put((owner, result.exit_code))  # type: ignore[attr-defined]
+    queue.put((owner, result.exit_code))
 
 
 def test_concurrent_task_claim_cross_process_exactly_one_winner(
@@ -141,7 +148,8 @@ def _spawn_and_reap() -> int:
     proc.start()
     proc.join(timeout=10)
     assert proc.exitcode == 0
-    return proc.pid  # type: ignore[return-value]
+    assert proc.pid is not None
+    return proc.pid
 
 
 def test_stale_lock_with_genuinely_reaped_pid_is_reclaimed(vault: Path) -> None:
@@ -179,45 +187,53 @@ def _seed_dead_lock(lock_path: Path) -> int:
 
 
 def _slow_paused_reclaimer(
-    lock_path_str: str, ready_evt: object, go_evt: object, queue: object
+    lock_path_str: str,
+    ready_evt: MpEvent,
+    go_evt: MpEvent,
+    queue: multiprocessing.Queue[tuple[str, Any]],
+) -> None:
+    import shards.storage.locks as _locks
+
+    target = Path(lock_path_str)
+    real_is_stale = _locks._is_stale
+    paused = {"done": False}
+
+    def paused_is_stale(lock_path: Path) -> bool:
+        result = real_is_stale(lock_path)
+        if lock_path == target and result and not paused["done"]:
+            paused["done"] = True
+            ready_evt.set()
+            go_evt.wait(timeout=_EVENT_TIMEOUT)
+        return result
+
+    _locks._is_stale = paused_is_stale  # ty: ignore[invalid-assignment]
+    try:
+        with _locks.acquire(target):
+            queue.put(("acquired", os.getpid()))
+    except _locks.LockError:
+        queue.put(("refused", os.getpid()))
+    except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
+        queue.put(("error", repr(exc)))
+
+
+def _fast_full_cycle(
+    lock_path_str: str,
+    ready_evt: MpEvent,
+    go_evt: MpEvent,
+    queue: multiprocessing.Queue[tuple[str, Any]],
 ) -> None:
     import shards.storage.locks as _locks
 
     lock_path = Path(lock_path_str)
-    real_is_stale = _locks._is_stale
-    paused = {"done": False}
-
-    def paused_is_stale(path: Path) -> bool:
-        result = real_is_stale(path)
-        if path == lock_path and result and not paused["done"]:
-            paused["done"] = True
-            ready_evt.set()  # type: ignore[attr-defined]
-            go_evt.wait(timeout=_EVENT_TIMEOUT)  # type: ignore[attr-defined]
-        return result
-
-    _locks._is_stale = paused_is_stale  # type: ignore[assignment]
-    try:
-        with _locks.acquire(lock_path):
-            queue.put(("acquired", os.getpid()))  # type: ignore[attr-defined]
-    except _locks.LockError:
-        queue.put(("refused", os.getpid()))  # type: ignore[attr-defined]
-    except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
-        queue.put(("error", repr(exc)))  # type: ignore[attr-defined]
-
-
-def _fast_full_cycle(lock_path_str: str, ready_evt: object, go_evt: object, queue: object) -> None:
-    import shards.storage.locks as _locks
-
-    lock_path = Path(lock_path_str)
-    ready_evt.wait(timeout=_EVENT_TIMEOUT)  # type: ignore[attr-defined]
+    ready_evt.wait(timeout=_EVENT_TIMEOUT)
     try:
         with _locks.acquire(lock_path):
             pass  # reclaim the stale lock, create a fresh one, immediately release it
-        queue.put(("cleared", os.getpid()))  # type: ignore[attr-defined]
+        queue.put(("cleared", os.getpid()))
     except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
-        queue.put(("error", repr(exc)))  # type: ignore[attr-defined]
+        queue.put(("error", repr(exc)))
     finally:
-        go_evt.set()  # type: ignore[attr-defined]
+        go_evt.set()
 
 
 def test_cas_race_stale_lock_vanishes_before_reopen(vault: Path) -> None:
@@ -255,21 +271,26 @@ def test_cas_race_stale_lock_vanishes_before_reopen(vault: Path) -> None:
 #    loser's stat finds it gone once it finally gets the flock                #
 
 
-def _barrier_synced_reclaimer(lock_path_str: str, barrier: object, queue: object, tag: str) -> None:
+def _barrier_synced_reclaimer(
+    lock_path_str: str,
+    barrier: MpBarrier,
+    queue: multiprocessing.Queue[tuple[Any, ...]],
+    tag: str,
+) -> None:
     import os as _os
 
     lock_path = Path(lock_path_str)
     real_open = _os.open
     fired = {"done": False}
 
-    def patched_open(path: object, flags: int, *a: object, **kw: object) -> int:
-        fd = real_open(path, flags, *a, **kw)  # type: ignore[arg-type]
+    def patched_open(path: str | bytes | os.PathLike[str], flags: int, *a: Any, **kw: Any) -> int:
+        fd = real_open(path, flags, *a, **kw)
         if path == str(lock_path) and not (flags & _os.O_CREAT) and not fired["done"]:
             fired["done"] = True
-            barrier.wait(timeout=_EVENT_TIMEOUT)  # type: ignore[attr-defined]
+            barrier.wait(timeout=_EVENT_TIMEOUT)
         return fd
 
-    _os.open = patched_open  # type: ignore[assignment]
+    _os.open = patched_open  # ty: ignore[invalid-assignment]
     import shards.storage.locks as _locks
 
     try:
@@ -280,9 +301,9 @@ def _barrier_synced_reclaimer(lock_path_str: str, barrier: object, queue: object
         # ride out exactly that, so it is what proves "both eventually get a
         # turn" without racing the winner's release on raw scheduler luck.
         with _locks.hold(lock_path):
-            queue.put((tag, "acquired", os.getpid()))  # type: ignore[attr-defined]
+            queue.put((tag, "acquired", os.getpid()))
     except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
-        queue.put((tag, "error", repr(exc)))  # type: ignore[attr-defined]
+        queue.put((tag, "error", repr(exc)))
 
 
 def test_cas_race_two_reclaimers_open_same_stale_inode(vault: Path) -> None:
@@ -322,44 +343,48 @@ def test_cas_race_two_reclaimers_open_same_stale_inode(vault: Path) -> None:
 
 def _slow_paused_reclaimer_vs_live(
     lock_path_str: str,
-    checked_evt: object,
-    go_evt: object,
-    done_evt: object,
-    queue: object,
+    checked_evt: MpEvent,
+    go_evt: MpEvent,
+    done_evt: MpEvent,
+    queue: multiprocessing.Queue[tuple[str, Any]],
 ) -> None:
     import shards.storage.locks as _locks
 
-    lock_path = Path(lock_path_str)
+    target = Path(lock_path_str)
     real_is_stale = _locks._is_stale
     paused = {"done": False}
 
-    def paused_is_stale(path: Path) -> bool:
-        result = real_is_stale(path)
-        if path == lock_path and result and not paused["done"]:
+    def paused_is_stale(lock_path: Path) -> bool:
+        result = real_is_stale(lock_path)
+        if lock_path == target and result and not paused["done"]:
             paused["done"] = True
             # Announce "I have judged the *original* lock stale" before pausing,
             # so fast is only ever released to run after this happened — never
             # racing ahead of it (which would let fast win outright and make
             # slow's later refusal trivial/uninformative instead of proving the
             # re-check).
-            checked_evt.set()  # type: ignore[attr-defined]
-            go_evt.wait(timeout=_EVENT_TIMEOUT)  # type: ignore[attr-defined]
+            checked_evt.set()
+            go_evt.wait(timeout=_EVENT_TIMEOUT)
         return result
 
-    _locks._is_stale = paused_is_stale  # type: ignore[assignment]
+    _locks._is_stale = paused_is_stale  # ty: ignore[invalid-assignment]
     try:
-        with _locks.acquire(lock_path):
+        with _locks.acquire(target):
             queue.put(("stole-it", os.getpid()))  # only a BROKEN CAS reaches this
     except _locks.LockError:
         queue.put(("correctly-refused", os.getpid()))
     except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
         queue.put(("error", repr(exc)))
     finally:
-        done_evt.set()  # type: ignore[attr-defined]
+        done_evt.set()
 
 
 def _fast_holds_a_live_lock(
-    lock_path_str: str, checked_evt: object, ready_evt: object, done_evt: object, queue: object
+    lock_path_str: str,
+    checked_evt: MpEvent,
+    ready_evt: MpEvent,
+    done_evt: MpEvent,
+    queue: multiprocessing.Queue[tuple[str, Any]],
 ) -> None:
     import shards.storage.locks as _locks
 
@@ -368,12 +393,12 @@ def _fast_holds_a_live_lock(
     # *original* dead-PID lock as stale — otherwise fast could win the race to
     # replace it before slow ever looked, and slow's later refusal would prove
     # nothing about the re-check under test.
-    checked_evt.wait(timeout=_EVENT_TIMEOUT)  # type: ignore[attr-defined]
+    checked_evt.wait(timeout=_EVENT_TIMEOUT)
     try:
         with _locks.acquire(lock_path):
             queue.put(("holding", os.getpid()))
-            ready_evt.set()  # type: ignore[attr-defined]
-            done_evt.wait(timeout=_EVENT_TIMEOUT)  # type: ignore[attr-defined]
+            ready_evt.set()
+            done_evt.wait(timeout=_EVENT_TIMEOUT)
         queue.put(("released", os.getpid()))
     except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
         queue.put(("error", repr(exc)))
@@ -486,10 +511,10 @@ def test_reclaim_if_stale_retries_when_stat_vanishes_under_flock(
 
     real_stat = Path.stat
 
-    def vanished_stat(self: Path, *a: object, **kw: object) -> os.stat_result:
+    def vanished_stat(self: Path, *a: Any, **kw: Any) -> os.stat_result:
         if self == lock:
             raise FileNotFoundError
-        return real_stat(self, *a, **kw)  # type: ignore[no-any-return]
+        return real_stat(self, *a, **kw)
 
     monkeypatch.setattr(Path, "stat", vanished_stat)
     assert locks_mod._reclaim_if_stale(lock) is True  # peer reclaimed under our flock -> retry
@@ -582,10 +607,10 @@ def test_is_stale_tolerates_vanishing_between_stat_and_read(
 
     real_read_text = Path.read_text
 
-    def flaky_read_text(self: Path, *a: object, **kw: object) -> str:
+    def flaky_read_text(self: Path, *a: Any, **kw: Any) -> str:
         if self == lock:
             raise FileNotFoundError
-        return real_read_text(self, *a, **kw)  # type: ignore[no-any-return]
+        return real_read_text(self, *a, **kw)
 
     monkeypatch.setattr(Path, "read_text", flaky_read_text)
     assert locks_mod._is_stale(lock) is False

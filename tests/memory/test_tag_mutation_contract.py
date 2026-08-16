@@ -26,6 +26,8 @@ from typing import Any
 
 import pytest
 import typer
+from fastmcp.tools.base import ToolResult
+from typer.core import TyperGroup, TyperOption
 
 import shards.mcp.server as server
 from shards.core.notes import TAG_SPEC_SEMANTICS
@@ -48,14 +50,24 @@ def _registered() -> dict[str, Any]:
     return {tool.name: tool for tool in tools}
 
 
+def _content(dispatched: ToolResult) -> dict[str, Any]:
+    """Narrow ``ToolResult.structured_content`` (``dict[str, Any] | None``) for tests
+    that know a given tool call always returns structured content."""
+    assert dispatched.structured_content is not None
+    return dispatched.structured_content
+
+
 def _cli_tags_help(sub_app: typer.Typer, command: str) -> str:
     """The exact ``--tags`` help string typer stores for ``<sub_app> <command>``,
     read off the click ``Parameter`` directly — bypasses Rich's line-wrapped
     ``--help`` rendering, which would otherwise fracture the sentence across
     box-drawing lines and defeat a substring check."""
-    click_command = typer.main.get_command(sub_app).commands[command]
+    click_group = typer.main.get_command(sub_app)
+    assert isinstance(click_group, TyperGroup)
+    click_command = click_group.commands[command]
     for param in click_command.params:
         if param.name == "tags":
+            assert isinstance(param, TyperOption)
             assert param.help is not None
             return param.help
     raise AssertionError(f"no --tags option on {sub_app} {command}")
@@ -105,13 +117,13 @@ def test_mcp_note_update_bare_tags_is_additive_not_replace(cfg: Config, vault: P
             {"title": "Silent Wipe Regression", "tags": ["infra", "urgent", "q3"]},
         )
     )
-    note_id = dispatched.structured_content["id"]
+    note_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_update", {"target": note_id, "tags": "urgent"})
     )
 
-    assert dispatched.structured_content["tags"] == ["infra", "urgent", "q3"]
+    assert _content(dispatched)["tags"] == ["infra", "urgent", "q3"]
 
 
 def test_mcp_task_update_bare_tags_is_additive_not_replace(cfg: Config, vault: Path) -> None:
@@ -123,13 +135,13 @@ def test_mcp_task_update_bare_tags_is_additive_not_replace(cfg: Config, vault: P
             "shards_task_new", {"title": "Silent Wipe Twin", "tags": ["infra", "urgent", "q3"]}
         )
     )
-    task_id = dispatched.structured_content["id"]
+    task_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
         server.app.call_tool("shards_task_update", {"task_id": task_id, "tags": "urgent"})
     )
 
-    assert dispatched.structured_content["tags"] == ["infra", "urgent", "q3"]
+    assert _content(dispatched)["tags"] == ["infra", "urgent", "q3"]
     assert oracle.id != task_id  # oracle only exists to keep the vault non-empty
 
 
@@ -142,43 +154,43 @@ def test_mcp_note_update_delta_adds_and_removes(cfg: Config, vault: Path) -> Non
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_new", {"title": "Delta Note", "tags": ["ndc", "stale"]})
     )
-    note_id = dispatched.structured_content["id"]
+    note_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_update", {"target": note_id, "tags": "+flights,-stale"})
     )
-    assert dispatched.structured_content["tags"] == ["ndc", "flights"]
+    assert _content(dispatched)["tags"] == ["ndc", "flights"]
 
 
 def test_mcp_note_update_delta_remove_absent_is_noop(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_new", {"title": "Delta Noop Note", "tags": ["ndc"]})
     )
-    note_id = dispatched.structured_content["id"]
+    note_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_update", {"target": note_id, "tags": "-nope"})
     )
-    assert dispatched.structured_content["tags"] == ["ndc"]
+    assert _content(dispatched)["tags"] == ["ndc"]
 
 
 def test_mcp_note_update_explicit_replace_only_path_that_replaces(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_new", {"title": "Replace Note", "tags": ["ndc", "stale"]})
     )
-    note_id = dispatched.structured_content["id"]
+    note_id = _content(dispatched)["id"]
 
     # Bare list: additive, does not replace.
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_update", {"target": note_id, "tags": "x"})
     )
-    assert dispatched.structured_content["tags"] == ["ndc", "stale", "x"]
+    assert _content(dispatched)["tags"] == ["ndc", "stale", "x"]
 
     # Explicit "=" prefix: the only path that replaces.
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_update", {"target": note_id, "tags": "=y,z"})
     )
-    assert dispatched.structured_content["tags"] == ["y", "z"]
+    assert _content(dispatched)["tags"] == ["y", "z"]
 
 
 # --------------------------------------------------------------------------- #
@@ -194,7 +206,7 @@ def test_mcp_note_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, va
     dispatched = asyncio.run(
         server.app.call_tool("shards_note_new", {"title": "Mixed Spec Note", "tags": ["ndc"]})
     )
-    note_id = dispatched.structured_content["id"]
+    note_id = _content(dispatched)["id"]
 
     with pytest.raises(ToolError) as exc_info:
         asyncio.run(server.app.call_tool("shards_note_update", {"target": note_id, "tags": "+x,y"}))
@@ -203,7 +215,7 @@ def test_mcp_note_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, va
 
     # Rejected before any write — the tag list is untouched.
     dispatched = asyncio.run(server.app.call_tool("shards_note_get", {"id": note_id}))
-    assert dispatched.structured_content["tags"] == ["ndc"]
+    assert _content(dispatched)["tags"] == ["ndc"]
 
 
 def test_mcp_task_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, vault: Path) -> None:
@@ -212,7 +224,7 @@ def test_mcp_task_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, va
     dispatched = asyncio.run(
         server.app.call_tool("shards_task_new", {"title": "Mixed Spec Task", "tags": ["ndc"]})
     )
-    task_id = dispatched.structured_content["id"]
+    task_id = _content(dispatched)["id"]
 
     with pytest.raises(ToolError) as exc_info:
         asyncio.run(

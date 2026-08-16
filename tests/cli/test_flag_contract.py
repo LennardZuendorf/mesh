@@ -49,6 +49,7 @@ from typing import get_args
 
 import pytest
 import typer
+from typer.core import TyperGroup, TyperOption
 from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
@@ -76,9 +77,12 @@ def _unique(prefix: str) -> str:
 
 def _help_text(sub_app, command: str, option: str) -> str:  # type: ignore[no-untyped-def]
     """The exact help string typer/click stores for ``<sub_app> <command> <option>``."""
-    click_command = typer.main.get_command(sub_app).commands[command]
+    click_group = typer.main.get_command(sub_app)
+    assert isinstance(click_group, TyperGroup)
+    click_command = click_group.commands[command]
     for param in click_command.params:
         if option in param.opts:
+            assert isinstance(param, TyperOption)
             assert param.help is not None
             return param.help
     raise AssertionError(f"no {option} option on {sub_app} {command}")

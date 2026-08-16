@@ -214,6 +214,7 @@ def _mcp_health() -> dict[str, Any]:
     """Dispatch the real *registered* ``shards_health`` tool (not the bare
     module function), mirroring how an MCP client actually calls it."""
     dispatched = asyncio.run(server.app.call_tool("shards_health", {}))
+    assert dispatched.structured_content is not None
     result: dict[str, Any] = dispatched.structured_content
     return result
 

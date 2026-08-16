@@ -28,7 +28,10 @@ from __future__ import annotations
 
 import multiprocessing
 import time
+from collections.abc import Callable
+from multiprocessing.synchronize import Barrier as MpBarrier
 from pathlib import Path
+from types import ModuleType
 
 import frontmatter
 
@@ -45,10 +48,10 @@ def _install_fixed_digest() -> None:
     def _fixed(created_iso: str, title: str) -> str:
         return _FIXED_DIGEST
 
-    ids_mod._digest_b32 = _fixed  # type: ignore[assignment]
+    ids_mod._digest_b32 = _fixed  # ty: ignore[invalid-assignment]
 
 
-def _install_toctou_delay(module: object) -> None:
+def _install_toctou_delay(module: ModuleType) -> None:
     """Wrap ``module._id_taken`` to sleep between its scan and its return.
 
     Widens the real ``_id_taken`` -> ``atomic_write`` TOCTOU window so a real race
@@ -57,17 +60,22 @@ def _install_toctou_delay(module: object) -> None:
     already serialized through this window one at a time, so the sleep only slows
     the serialized loop down — it never changes which id wins.
     """
-    original = module._id_taken  # type: ignore[attr-defined]
+    original = module._id_taken
 
     def _slow(config: object, candidate: str) -> bool:
         result = original(config, candidate)
         time.sleep(_TOCTOU_DELAY)
         return result
 
-    module._id_taken = _slow  # type: ignore[attr-defined]
+    module._id_taken = _slow  # ty: ignore[unresolved-attribute]
 
 
-def _note_worker(config_path: str, index: int, barrier: object, queue: object) -> None:
+def _note_worker(
+    config_path: str,
+    index: int,
+    barrier: MpBarrier,
+    queue: multiprocessing.Queue[tuple[str, str, str]],
+) -> None:
     """Run in a spawned child process: create one racing note."""
     import os
 
@@ -82,15 +90,20 @@ def _note_worker(config_path: str, index: int, barrier: object, queue: object) -
 
     cfg = load_config()
     body = f"racer-{index}-body"
-    barrier.wait()  # type: ignore[attr-defined]
+    barrier.wait()
     try:
         note = notes_mod.create_note(cfg, f"Racer {index}", body=body)
-        queue.put(("ok", note.id, body))  # type: ignore[attr-defined]
+        queue.put(("ok", note.id, body))
     except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
-        queue.put(("error", repr(exc), body))  # type: ignore[attr-defined]
+        queue.put(("error", repr(exc), body))
 
 
-def _task_worker(config_path: str, index: int, barrier: object, queue: object) -> None:
+def _task_worker(
+    config_path: str,
+    index: int,
+    barrier: MpBarrier,
+    queue: multiprocessing.Queue[tuple[str, str, str]],
+) -> None:
     """Run in a spawned child process: create one racing task."""
     import os
 
@@ -105,19 +118,19 @@ def _task_worker(config_path: str, index: int, barrier: object, queue: object) -
 
     cfg = load_config()
     body = f"racer-{index}-body"
-    barrier.wait()  # type: ignore[attr-defined]
+    barrier.wait()
     try:
         task = tasks_mod.create_task(cfg, f"Racer {index}", body=body)
-        queue.put(("ok", task.id, body))  # type: ignore[attr-defined]
+        queue.put(("ok", task.id, body))
     except Exception as exc:  # pragma: no cover - surfaced via assertion on RED
-        queue.put(("error", repr(exc), body))  # type: ignore[attr-defined]
+        queue.put(("error", repr(exc), body))
 
 
-def _run_race(worker: object, config_path: Path, n: int) -> list[tuple[str, str, str]]:
+def _run_race(worker: Callable[..., None], config_path: Path, n: int) -> list[tuple[str, str, str]]:
     """Spawn ``n`` separate OS processes running ``worker`` and collect their results."""
     ctx = multiprocessing.get_context("spawn")
     barrier = ctx.Barrier(n)
-    queue: multiprocessing.Queue = ctx.Queue()
+    queue: multiprocessing.Queue[tuple[str, str, str]] = ctx.Queue()
     procs = [
         ctx.Process(target=worker, args=(str(config_path), i, barrier, queue)) for i in range(n)
     ]

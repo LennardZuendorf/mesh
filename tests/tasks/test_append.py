@@ -19,6 +19,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -74,7 +75,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -93,7 +96,9 @@ def _seed_note(vault: Path, note_id: str, title: str = "Note") -> Path:
     folder = note_folder("note", vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("Note body.", **meta)), encoding="utf-8")
+    post = frontmatter.Post("Note body.")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -133,7 +138,7 @@ def test_append_claimed_task_leaves_status_and_folder(cfg: Config, vault: Path) 
     assert reloaded.metadata["claimed_by"] == "flights-agent"
     assert "blocked on progress" in reloaded.content
     assert "Task body." in reloaded.content  # original body preserved
-    assert reloaded.metadata["updated"] > _OLD  # bumped
+    assert cast(datetime, reloaded.metadata["updated"]) > _OLD  # bumped
     assert reloaded.metadata["created"] == _OLD  # created untouched
     assert task.updated > _OLD
 

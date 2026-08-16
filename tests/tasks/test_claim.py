@@ -36,6 +36,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -101,7 +102,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -122,7 +125,7 @@ def test_claim_unclaimed_writes_durable_claim(cfg: Config, vault: Path) -> None:
     meta = _reload(path).metadata
     assert meta["claimed_by"] == "test-agent"
     assert meta["status"] == "claimed"
-    assert meta["updated"] > _OLD  # bumped on the claiming write
+    assert cast(datetime, meta["updated"]) > _OLD  # bumped on the claiming write
     assert meta["created"] == _OLD  # birth instant untouched
 
 
@@ -430,7 +433,7 @@ def test_release_holder_clears_claim_and_reopens(cfg: Config, vault: Path) -> No
     meta = _reload(path).metadata
     assert meta["claimed_by"] is None
     assert meta["status"] == "open"
-    assert meta["updated"] > _OLD  # bumped on the releasing write
+    assert cast(datetime, meta["updated"]) > _OLD  # bumped on the releasing write
 
 
 def test_release_stays_in_open_folder(cfg: Config, vault: Path) -> None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -95,7 +96,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -297,7 +300,7 @@ def test_update_task_priority_bumps_updated(cfg: Config, vault: Path) -> None:
     meta = _reload(path).metadata
     assert meta["priority"] == "high"
     assert task.priority == "high"
-    assert meta["updated"] > _OLD
+    assert cast(datetime, meta["updated"]) > _OLD
     assert meta["created"] == _OLD
 
 
@@ -412,7 +415,7 @@ def test_update_task_owner_reassigns(cfg: Config, vault: Path) -> None:
     assert task.owner == "other-agent"
     meta = _reload(path).metadata
     assert meta["owner"] == "other-agent"
-    assert meta["updated"] > _OLD
+    assert cast(datetime, meta["updated"]) > _OLD
 
 
 def test_update_task_owner_does_not_disturb_claimed_by(cfg: Config, vault: Path) -> None:

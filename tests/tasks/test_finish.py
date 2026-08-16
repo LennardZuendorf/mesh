@@ -24,6 +24,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -87,7 +88,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -115,7 +118,7 @@ def test_finish_open_appends_outcome_and_moves(cfg: Config, vault: Path) -> None
 
     post = _reload(_done_path(vault))
     assert post.metadata["status"] == "done"
-    assert post.metadata["updated"] > _OLD  # bumped on the finishing write
+    assert cast(datetime, post.metadata["updated"]) > _OLD  # bumped on the finishing write
     assert post.metadata["created"] == _OLD  # birth instant untouched
     # Original body survives; the outcome section is appended after it.
     assert "Original body." in post.content
@@ -308,10 +311,9 @@ def test_finish_reconciles_crash_stranded_file(cfg: Config, vault: Path) -> None
         "blocked_by": [],
     }
     stranded = task_folder("open", vault) / "t-crash.md"
-    stranded.write_text(
-        frontmatter.dumps(frontmatter.Post("Body.\n\n## Outcome\n\nx", **meta)),
-        encoding="utf-8",
-    )
+    stranded_post = frontmatter.Post("Body.\n\n## Outcome\n\nx")
+    stranded_post.metadata = meta
+    stranded.write_text(frontmatter.dumps(stranded_post), encoding="utf-8")
     task = finish_task(cfg, "t-crash", "ignored")
     assert task.status == "done"
     assert _done_path(vault, "t-crash").exists()
