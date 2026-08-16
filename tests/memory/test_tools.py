@@ -419,20 +419,27 @@ def test_invalid_owner_surfaces_as_clean_tool_error(cfg: Config) -> None:
     assert "Traceback" not in str(exc_info.value)
 
 
-def test_invalid_note_type_surfaces_as_clean_tool_error(cfg: Config) -> None:
-    """A bare ``ValueError`` (invalid ``note_type``) also becomes a clean
-    ``ToolError`` — the same real, unmocked path via ``create_note``."""
-    from fastmcp.exceptions import ToolError
+def test_invalid_note_type_rejected_by_schema_before_reaching_core(cfg: Config) -> None:
+    """agent-usability/2: ``note_type`` is now typed ``NoteType`` (``schemas/note.py``)
+    on the tool signature, so an out-of-vocabulary value is rejected by FastMCP's own
+    schema validation *before* ``create_note``'s ``ValueError`` branch is ever reached
+    — superseding the prior ``ToolError``-via-``_guarded`` assertion this test used to
+    make (``create_note`` is never even called; nothing is written). Still a clean,
+    listable rejection naming the valid values, never a raw traceback — the same
+    "no crash, no partial write" guarantee, just enforced one layer earlier."""
+    from pydantic import ValidationError
 
-    with pytest.raises(ToolError) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         asyncio.run(
             server.app.call_tool(
                 "shards_note_new", {"title": "x", "note_type": "bogus", "body": "y"}
             )
         )
 
-    assert "invalid note type" in str(exc_info.value)
-    assert "Traceback" not in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "note_type" in message
+    assert "note" in message and "decision" in message  # the schema enum, named in the error
+    assert "Traceback" not in message
 
 
 # --------------------------------------------------------------------------- #

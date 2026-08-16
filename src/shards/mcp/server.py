@@ -51,10 +51,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import wraps
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from pydantic import Field
 
 from shards.core.errors import ShardsError
 from shards.core.lenses import (
@@ -96,7 +97,8 @@ from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
 from shards.mcp.instructions import build_instructions
 from shards.schemas.config import Config, load_config
-from shards.schemas.note import Note
+from shards.schemas.note import Note, NoteType
+from shards.schemas.task import TaskStatus
 
 
 def _startup_config() -> Config | None:
@@ -144,20 +146,61 @@ def _task_get_dict(view: TaskView) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def shards_note_get(id: str) -> dict[str, Any]:
+def shards_note_get(
+    id: Annotated[
+        str,
+        Field(
+            description=(
+                "Note id (n-...) or a title slug (case/whitespace-normalized match). "
+                "A slug matching more than one note raises an error naming the candidates."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
     """Read one note by id or title slug: frontmatter, body, and path."""
     config = load_config()
     return _note_get_dict(get_note(config, id))
 
 
 def shards_note_list(
-    tags: list[str] | None = None,
-    any_tag: bool = False,
-    owner: str | None = None,
-    note_type: str | None = None,
-    since: str | None = None,
-    sort: str = "updated",
-    limit: int = 20,
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Keep only notes carrying every one of these tags (AND)."),
+    ] = None,
+    any_tag: Annotated[
+        bool, Field(description="Match any tag in tags instead of requiring all of them.")
+    ] = False,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Exact match on the note's owner field — trusted local input, "
+                "not a verified caller identity."
+            )
+        ),
+    ] = None,
+    note_type: Annotated[
+        NoteType | None, Field(description="Restrict to one note type; omit to list every type.")
+    ] = None,
+    since: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Recency floor on updated: duration shorthand ('7d', '12h', '2w') "
+                "or an ISO-8601 date/datetime; omit for no floor."
+            )
+        ),
+    ] = None,
+    sort: Annotated[
+        str,
+        Field(
+            description=(
+                "'updated'/'created' (newest first) or 'title' (A-Z); an "
+                "unrecognised value is rejected."
+            )
+        ),
+    ] = "updated",
+    limit: Annotated[int, Field(description="Maximum rows returned.")] = 20,
 ) -> list[dict[str, Any]]:
     """List shards notes with tag/owner/type/recency filters, sorted and capped."""
     config = load_config()
@@ -174,24 +217,89 @@ def shards_note_list(
     return [_entry(v.note, body=None, path=str(v.path)) for v in views]
 
 
-def shards_task_get(id: str) -> dict[str, Any]:
+def shards_task_get(
+    id: Annotated[
+        str, Field(description="Task id (t-...) — id-only; unlike notes, no title-slug match.")
+    ],
+) -> dict[str, Any]:
     """Read one task by id: frontmatter, body, and path."""
     config = load_config()
     return _task_get_dict(get_task(config, id))
 
 
 def shards_task_list(
-    status: str | None = None,
-    owner: str | None = None,
-    mine: bool = False,
-    tags: list[str] | None = None,
-    any_tag: bool = False,
-    project: str | None = None,
-    since: str | None = None,
-    stale: str | None = None,
-    available: bool = False,
-    sort: str | None = None,
-    limit: int = 20,
+    status: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Comma-separated status filter, e.g. 'open,claimed' (union match). "
+                "Each token must be one of open/claimed/done/cancelled."
+            )
+        ),
+    ] = None,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Exact match on the task's owner field (who it is accountable to) — "
+                "trusted local input, not a verified caller identity."
+            )
+        ),
+    ] = None,
+    mine: Annotated[
+        bool,
+        Field(
+            description=("Restrict to tasks where owner or claimed_by equals the configured agent.")
+        ),
+    ] = False,
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Keep only tasks carrying every one of these tags (AND)."),
+    ] = None,
+    any_tag: Annotated[
+        bool, Field(description="Match any tag in tags instead of requiring all of them.")
+    ] = False,
+    project: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Exact match on the task's project soft link — an unvalidated note id, "
+                "never checked for existence."
+            )
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Recency floor on updated: duration shorthand ('7d', '12h', '2w') or an "
+                "ISO-8601 date/datetime; keeps updated >= since."
+            )
+        ),
+    ] = None,
+    stale: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Recency ceiling on updated — the inverse of since: keeps updated < stale. "
+                "Conjunctive with since when both are given."
+            )
+        ),
+    ] = None,
+    available: Annotated[
+        bool, Field(description="Takeable work only: status == 'open' and claimed_by is unset.")
+    ] = False,
+    sort: Annotated[
+        str | None,
+        Field(
+            description=(
+                "'updated'/'created' (newest first), 'title' (A-Z), or 'priority' "
+                "(high, then normal, then low, then unprioritized). Omit to default to "
+                "'priority' under available=True and 'updated' otherwise."
+            )
+        ),
+    ] = None,
+    limit: Annotated[int, Field(description="Maximum rows returned.")] = 20,
 ) -> list[dict[str, Any]]:
     """List shards tasks (open and done) with status/owner/mine/project filters, sorted.
 
@@ -227,15 +335,68 @@ def shards_task_list(
 
 
 def shards_search(
-    query: str | None = None,
-    type_filter: str | None = None,
-    tags: list[str] | None = None,
-    owner: str | None = None,
-    status: str | None = None,
-    limit: int = 10,
-    threshold: float | None = None,
-    meta_only: bool = False,
-    full: bool = False,
+    query: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Search text, scored and ranked. Omit for a tag-only pull (unscored, "
+                "meta_only by nature) instead of a search."
+            )
+        ),
+    ] = None,
+    type_filter: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Exact match on frontmatter type: a note type (note/log/decision/"
+                "reference/project) or 'task'."
+            )
+        ),
+    ] = None,
+    tags: Annotated[
+        list[str] | None,
+        Field(description="Keep only rows carrying every one of these tags (AND)."),
+    ] = None,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Exact match on owner — trusted local input, not a verified caller identity."
+            )
+        ),
+    ] = None,
+    status: Annotated[
+        TaskStatus | None,
+        Field(
+            description=(
+                "Exact task-status filter. Notes carry no status field, so this excludes "
+                "every note hit whenever it is set."
+            )
+        ),
+    ] = None,
+    limit: Annotated[int, Field(description="Maximum hits returned.")] = 10,
+    threshold: Annotated[
+        float | None,
+        Field(
+            description=(
+                "Minimum score (0-1) a hit must clear to be kept. Unset defers to "
+                "[search].threshold, or the substring fallback's own floor when neither "
+                "is set."
+            )
+        ),
+    ] = None,
+    meta_only: Annotated[
+        bool, Field(description="Drop the snippet entirely (id/type/title/score/path only).")
+    ] = False,
+    full: Annotated[
+        bool,
+        Field(
+            description=(
+                "Return the whole body as the snippet instead of a short excerpt; "
+                "ignored when meta_only is set."
+            )
+        ),
+    ] = False,
 ) -> list[dict[str, Any]]:
     """Recall across notes + tasks: tag pull (no query) or scored match (query)."""
     config = load_config()
@@ -268,10 +429,33 @@ def shards_search(
 
 
 def shards_recent_activity(
-    since: str | None = None,
-    owner: str | None = None,
-    mine: bool = False,
-    limit: int = DEFAULT_RECENT_LIMIT,
+    since: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Recency floor: duration shorthand ('7d', '12h', '2w') or an ISO-8601 "
+                "date/datetime; omit for no floor."
+            )
+        ),
+    ] = None,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Restrict to rows owned by this agent (exact match) — trusted local "
+                "input, not a verified caller identity."
+            )
+        ),
+    ] = None,
+    mine: Annotated[
+        bool,
+        Field(
+            description=(
+                "Restrict to rows owned by (or, for tasks, claimed by) the configured agent."
+            )
+        ),
+    ] = False,
+    limit: Annotated[int, Field(description="Maximum rows returned.")] = DEFAULT_RECENT_LIMIT,
 ) -> list[dict[str, Any]]:
     """Recent vault changes (newest first), each row carrying identity.
 
@@ -281,13 +465,63 @@ def shards_recent_activity(
     return recent_activity(config, since=since, owner=owner, mine=mine, limit=limit)
 
 
-def shards_build_context(seed_id: str, depth: int = 1) -> list[dict[str, Any]]:
+def shards_build_context(
+    seed_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Seed note id (n-...) or task id (t-...) to expand from; must resolve "
+                "or the call errors."
+            )
+        ),
+    ],
+    depth: Annotated[
+        int,
+        Field(
+            description=(
+                "BFS hops from the seed (0 = seed only, 1 = seed plus its direct related "
+                "entries). Each extra hop reads every newly discovered node off disk, so "
+                "cost grows with the graph's branching factor — keep this small."
+            )
+        ),
+    ] = 1,
+) -> list[dict[str, Any]]:
     """Expand the ``related`` graph around a seed id (BFS to depth, seed first)."""
     config = load_config()
     return build_context(config, seed_id, depth=depth)
 
 
-def shards_graph(seed_id: str, depth: int = 1, direction: str = "out") -> dict[str, Any]:
+def shards_graph(
+    seed_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Seed note id (n-...) or task id (t-...) to query from; must resolve "
+                "or the call errors."
+            )
+        ),
+    ],
+    depth: Annotated[
+        int,
+        Field(
+            description=(
+                "BFS hops from the seed (0 = seed only). Each extra hop reads every "
+                "newly discovered node off disk, so cost grows with the graph's "
+                "branching factor — keep this small."
+            )
+        ),
+    ] = 1,
+    direction: Annotated[
+        str,
+        Field(
+            description=(
+                "'out' (forward related links, the default), 'in' (who links to this "
+                "node — backlinks/notify), or 'both'. 'in'/'both' additionally scan the "
+                "whole vault once to build the backlink index."
+            )
+        ),
+    ] = "out",
+) -> dict[str, Any]:
     """Query what's connected to a seed id: ``{seed, nodes, edges}`` (BFS to depth).
 
     ``direction`` is ``"out"`` (default, forward ``related``), ``"in"`` (who
@@ -297,16 +531,52 @@ def shards_graph(seed_id: str, depth: int = 1, direction: str = "out") -> dict[s
     return graph_query(config, seed_id, depth=depth, direction=direction).to_dict()
 
 
-def shards_project(project_id: str) -> dict[str, Any]:
+def shards_project(
+    project_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Project note id (n-...) or title slug. Every task whose project field "
+                "points at it is returned, regardless of status — project is a soft "
+                "link, never validated against type: project."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
     """Show a project note and the tasks scoped to it: ``{project, tasks}``."""
     config = load_config()
     return project_view(config, project_id).to_dict()
 
 
 def shards_session_start(
-    owner: str | None = None,
-    team: bool = False,
-    meta_only: bool = False,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Show this agent's warm start instead of the caller's own — substitutes "
+                "the effective identity for every source (tasks, mentions, activity)."
+            )
+        ),
+    ] = None,
+    team: Annotated[
+        bool,
+        Field(
+            description=(
+                "Widen the recent-activity section to the whole team instead of just the "
+                "effective agent's rows. The task queue and mentions always stay scoped "
+                "to the effective agent."
+            )
+        ),
+    ] = False,
+    meta_only: Annotated[
+        bool,
+        Field(
+            description=(
+                "Drop task bodies from the task section. Mentions and activity rows "
+                "never carry a body regardless."
+            )
+        ),
+    ] = False,
 ) -> list[dict[str, Any]]:
     """Warm-start payload: my open/claimed tasks + mentions of me + recent activity.
 
@@ -370,11 +640,39 @@ def _with_warnings(payload: dict[str, Any], existing_id: str | None) -> dict[str
 
 
 def shards_note_new(
-    title: str,
-    note_type: str = "note",
-    tags: list[str] | None = None,
-    owner: str | None = None,
-    body: str = "",
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "Note title. A slug-normalized duplicate against an existing note "
+                "returns a non-blocking warning, not an error."
+            )
+        ),
+    ],
+    note_type: Annotated[
+        NoteType,
+        Field(
+            description=(
+                "Note kind — also selects the storage folder: notes/ (note) or "
+                "notes/{logs,decisions,references,projects}/ for the others."
+            )
+        ),
+    ] = "note",
+    tags: Annotated[list[str] | None, Field(description="Initial tag list.")] = None,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Defaults to the configured agent. An explicit value must be in "
+                "[tasks].collections when that roster is non-empty — a value check, "
+                "not a verified identity."
+            )
+        ),
+    ] = None,
+    body: Annotated[
+        str,
+        Field(description="Initial Markdown body; [[wikilinks]] inside populate related."),
+    ] = "",
 ) -> dict[str, Any]:
     """Create a note (routed by type) and return its frontmatter plus any warnings."""
     config = load_config()
@@ -386,10 +684,26 @@ def shards_note_new(
 
 
 def shards_note_append(
-    target: str,
-    text: str,
-    section: str | None = None,
-    timestamp: bool = False,
+    target: Annotated[str, Field(description="Note id (n-...) or title slug to append to.")],
+    text: Annotated[str, Field(description="Text appended verbatim; stored, never interpreted.")],
+    section: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Append under this '## {section}' heading, creating it at the end of "
+                "the body if absent. Omit to append at the very end of the body instead."
+            )
+        ),
+    ] = None,
+    timestamp: Annotated[
+        bool,
+        Field(
+            description=(
+                "Prefix the appended block with '<iso> — <agent>', naming the agent "
+                "making this call — not the note's owner."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Append text to a note's body (optionally under a section / timestamped)."""
     config = load_config()
@@ -398,14 +712,61 @@ def shards_note_append(
 
 
 def shards_task_new(
-    title: str,
-    priority: str | None = None,
-    tags: list[str] | None = None,
-    owner: str | None = None,
-    body: str = "",
-    project: str | None = None,
-    blocks: list[str] | None = None,
-    blocked_by: list[str] | None = None,
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "Task title. A slug-normalized duplicate against an existing task "
+                "returns a non-blocking warning, not an error."
+            )
+        ),
+    ],
+    priority: Annotated[
+        str | None,
+        Field(description="One of high/normal/low; any other value is rejected."),
+    ] = None,
+    tags: Annotated[list[str] | None, Field(description="Initial tag list.")] = None,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Defaults to the configured agent. An explicit value must be in "
+                "[tasks].collections when that roster is non-empty — a value check, "
+                "not a verified identity."
+            )
+        ),
+    ] = None,
+    body: Annotated[
+        str,
+        Field(description="Initial Markdown body; [[wikilinks]] inside populate related."),
+    ] = "",
+    project: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional soft link to a project note's id — a plain string, never "
+                "validated or checked for existence."
+            )
+        ),
+    ] = None,
+    blocks: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Task ids this task blocks. Recorded but inert in v1 — no readiness "
+                "or gating logic reads this yet."
+            )
+        ),
+    ] = None,
+    blocked_by: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Task ids blocking this task. Recorded but inert in v1 — does not "
+                "prevent claim/finish/cancel."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Create a task in tasks/open/ (status open, unclaimed) and return it plus any warnings."""
     config = load_config()
@@ -427,10 +788,26 @@ def shards_task_new(
 
 
 def shards_task_append(
-    task_id: str,
-    text: str,
-    section: str | None = None,
-    timestamp: bool = False,
+    task_id: Annotated[str, Field(description="Task id (t-...) — id-only.")],
+    text: Annotated[str, Field(description="Text appended verbatim; stored, never interpreted.")],
+    section: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Append under this '## {section}' heading, creating it at the end of "
+                "the body if absent. Omit to append at the very end of the body instead."
+            )
+        ),
+    ] = None,
+    timestamp: Annotated[
+        bool,
+        Field(
+            description=(
+                "Prefix the appended block with '<iso> — <agent>', naming the agent "
+                "making this call — not the task's owner."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Append text to a task's body (no status/folder change; mirrors note append)."""
     config = load_config()
@@ -444,9 +821,24 @@ def shards_task_append(
 
 
 def shards_note_update(
-    target: str,
-    tags: str | None = None,
-    new_type: str | None = None,
+    target: Annotated[str, Field(description="Note id (n-...) or title slug.")],
+    tags: Annotated[
+        str | None,
+        Field(
+            description=(
+                "'+x,-y' adds/removes tags (delta). A bare 'x,y' with no +/- prefixes "
+                "REPLACES the whole tag list."
+            )
+        ),
+    ] = None,
+    new_type: Annotated[
+        NoteType | None,
+        Field(
+            description=(
+                "Moves the file into the matching folder; omit to leave the type unchanged."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Update a note's fields (tags, type — moving its folder) and bump updated."""
     config = load_config()
@@ -454,7 +846,19 @@ def shards_note_update(
     return note.model_dump(mode="json")
 
 
-def shards_task_claim(task_id: str, claimer: str | None = None) -> dict[str, Any]:
+def shards_task_claim(
+    task_id: Annotated[str, Field(description="Task id (t-...) to claim.")],
+    claimer: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Acting agent identity; defaults to [core].agent. A same-agent reclaim "
+                "is a no-op; a different agent already holding it raises a conflict; "
+                "claiming a terminal (done/cancelled) task is also a no-op."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
     """Claim a task for an agent (atomic test-and-set; same-owner reclaim is a no-op)."""
     config = load_config()
     who = claimer if claimer is not None else config.agent
@@ -464,7 +868,20 @@ def shards_task_claim(task_id: str, claimer: str | None = None) -> dict[str, Any
     return task.model_dump(mode="json")
 
 
-def shards_task_release(task_id: str, owner: str | None = None) -> dict[str, Any]:
+def shards_task_release(
+    task_id: Annotated[str, Field(description="Task id (t-...) to release.")],
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Acting agent identity; defaults to [core].agent. Releasing your own "
+                "claim, an already-open task, or a terminal task are all idempotent "
+                "no-ops. Releasing someone else's live claim raises a conflict — this "
+                "surface carries no force override."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
     """Release a claim, returning the task to open (atomic compare-and-clear; idempotent).
 
     Ships as of team-awareness/10 (previously withheld as a Phase-3 item — see
@@ -486,7 +903,19 @@ def shards_task_release(task_id: str, owner: str | None = None) -> dict[str, Any
     return task.model_dump(mode="json")
 
 
-def shards_task_finish(task_id: str, outcome: str | None = None) -> dict[str, Any]:
+def shards_task_finish(
+    task_id: Annotated[str, Field(description="Task id (t-...) to finish.")],
+    outcome: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional outcome text appended under a new '## Outcome' section "
+                "before the task moves to tasks/done/. Idempotent: a re-finish never "
+                "adds a second section."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
     """Finish a task: append an outcome and move it to tasks/done/ (idempotent)."""
     config = load_config()
     task = finish_task(config, task_id, outcome)
@@ -494,14 +923,61 @@ def shards_task_finish(task_id: str, outcome: str | None = None) -> dict[str, An
 
 
 def shards_task_update(
-    task_id: str,
-    priority: str | None = None,
-    tags: str | None = None,
-    title: str | None = None,
-    project: str | None = None,
-    owner: str | None = None,
-    blocks: list[str] | None = None,
-    blocked_by: list[str] | None = None,
+    task_id: Annotated[str, Field(description="Task id (t-...) to update.")],
+    priority: Annotated[
+        str | None,
+        Field(description="One of high/normal/low; any other value is rejected."),
+    ] = None,
+    tags: Annotated[
+        str | None,
+        Field(
+            description=(
+                "'+x,-y' adds/removes tags (delta). A bare 'x,y' with no +/- prefixes "
+                "REPLACES the whole tag list."
+            )
+        ),
+    ] = None,
+    title: Annotated[
+        str | None,
+        Field(description="New title. Only renames the task; the id never changes."),
+    ] = None,
+    project: Annotated[
+        str | None,
+        Field(
+            description=(
+                "New soft link to a project note's id — a plain string, never "
+                "validated or checked for existence."
+            )
+        ),
+    ] = None,
+    owner: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Reassigns accountability; must be in [tasks].collections when that "
+                "roster is non-empty. Never touches claimed_by — use task_claim/"
+                "task_release for the execution handle."
+            )
+        ),
+    ] = None,
+    blocks: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Task ids this task blocks; replaces the whole list verbatim. "
+                "Recorded but inert in v1 — no readiness or gating logic reads this yet."
+            )
+        ),
+    ] = None,
+    blocked_by: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Task ids blocking this task; replaces the whole list verbatim. "
+                "Recorded but inert in v1 — does not prevent claim/finish/cancel."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Update a task's fields (priority, tags, title, project, owner, blocks/blocked_by).
 
@@ -529,7 +1005,19 @@ def shards_task_update(
 # --------------------------------------------------------------------------- #
 
 
-def shards_task_cancel(task_id: str, reason: str | None = None) -> dict[str, Any]:
+def shards_task_cancel(
+    task_id: Annotated[str, Field(description="Task id (t-...) to cancel.")],
+    reason: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional reason text appended under a new '## Cancelled' section "
+                "before the task moves to tasks/done/. Idempotent: a re-cancel never "
+                "adds a second section."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
     """Cancel a task: append a reason and move it to tasks/done/ (idempotent)."""
     config = load_config()
     task = cancel_task(config, task_id, reason)
@@ -552,8 +1040,12 @@ def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
     Same exception families, same catch order, same one-line messages as the CLI
     mapper (``shards.cli._errors.cli_errors``): ``ShardsError`` (``LockError``
     included) first, then a bare ``ValueError`` (also covers msgspec's
-    ``ValidationError``, a ``ValueError`` subclass — e.g. an unknown owner or an
-    invalid ``note_type``/sort field), then any other ``OSError``. MCP has no
+    ``ValidationError``, a ``ValueError`` subclass — e.g. an unknown owner, an
+    invalid task ``priority``, an unknown token in a ``status`` CSV filter, or
+    an invalid ``sort`` field; ``note_type``/task ``status`` themselves are now
+    schema-enum-typed — agent-usability/2 — so an out-of-vocabulary value there
+    never reaches this wrapper, rejected instead by FastMCP's own argument
+    validation before the tool body runs), then any other ``OSError``. MCP has no
     process exit code to map to, so each branch raises a clean
     ``fastmcp.exceptions.ToolError`` instead of letting FastMCP's own generic
     catch-all re-wrap an arbitrary traceback string. The full structured-error
