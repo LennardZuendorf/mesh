@@ -282,7 +282,7 @@ def _seed_task(
     task_id: str,
     title: str = "A Task",
     status: str = "open",
-    owner: str = "test-agent",
+    owner: str | None = "test-agent",
     claimed_by: str | None = None,
     related: list[str] | None = None,
     updated: datetime | None = None,
@@ -553,6 +553,40 @@ def test_mention_delivered_across_two_agent_identities(cfg: Config, vault: Path)
     assert by_id["n-9qq2"]["reason"] == "mention"
     ids = _ids(arr)
     assert ids.index("t-184g") < ids.index("n-9qq2")  # tasks before mentions
+
+
+def test_session_start_with_no_identity_delivers_no_mentions_of_others_work(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX2 (final review): with no configured identity and no ``--owner``,
+    ``session-start`` must not deliver mentions of other agents' work.
+
+    Before the fix, ``select_tasks``'s unsound ``spec.mine`` (an unset ``me``
+    passed both inequality checks against an ``owner: null`` task) put a task
+    nobody claims-as-mine into the effective agent's queue, and the mentions
+    target set built from that queue then surfaced a mention of it — exactly
+    the plugin's ``session-start --meta-only --json`` boot hook path, run on
+    every install whose config lacks ``[core].agent``.
+    """
+    _seed_task(vault, task_id="t-nullowner", status="open", owner=None, claimed_by="other-agent")
+    _seed_note(
+        vault,
+        note_id="n-mentions-null",
+        owner="third-agent",
+        related=["t-nullowner"],
+    )
+    cfg_file = tmp_path / "noagent.toml"
+    cfg_file.write_text("\n".join(("[core]", f'tolaria_path = "{vault}"', "")), encoding="utf-8")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+
+    result = _invoke(["session-start", "--json"])
+    assert result.exit_code == 0, result.output
+    arr = json.loads(result.stdout)
+
+    reasons = {e["id"]: e["reason"] for e in arr}
+    assert "t-nullowner" not in reasons or reasons["t-nullowner"] != "task"
+    assert reasons.get("n-mentions-null") != "mention"
 
 
 def test_mentions_ordered_between_tasks_and_activity(cfg: Config, vault: Path) -> None:

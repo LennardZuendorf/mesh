@@ -307,24 +307,30 @@ def append_note(
     *,
     section: str | None = None,
     timestamp: bool = False,
+    actor: str | None = None,
 ) -> Note:
     """Append ``text`` to a note's body and bump ``updated``.
 
     With ``section`` the text lands under a ``## {section}`` heading (created at
     end-of-body if missing). With ``timestamp`` an ISO-8601 UTC line is prepended
     to the text block, naming the acting agent (``<iso> — <agent>``, team-awareness/8
-    — see :func:`_format_stamp`) resolved from ``config.agent``: the identity of
-    *this* call, not the note's ``owner``, so an editor's append is attributed to
-    the editor even when it lands on a note it does not own — the observed gap
-    this unit closes. The whole read-modify-write runs under the entity lock and
-    the result is written atomically. The re-read inside the lock goes through
-    :func:`shards.storage.files.read_post`; a file that vanishes or turns
-    unreadable between resolution and the lock raises
+    — see :func:`_format_stamp`) resolved from ``actor`` when given, else
+    ``config.agent``: the identity of *this* call, not the note's ``owner``, so an
+    editor's append is attributed to the editor even when it lands on a note it
+    does not own — the observed gap this unit closes. ``actor`` exists so a CLI
+    caller can thread the resolved ``--owner``/``[core].agent`` acting identity
+    through (the same identity ``note new``'s ``owner`` default and ``task
+    claim``/``release`` already resolve) rather than the stamp silently falling
+    back to ``config.agent`` regardless of ``--owner`` (agent-usability/`--owner`
+    role 5 — the fifth durable identity surface). The whole read-modify-write runs
+    under the entity lock and the result is written atomically. The re-read inside
+    the lock goes through :func:`shards.storage.files.read_post`; a file that
+    vanishes or turns unreadable between resolution and the lock raises
     :class:`NoteNotFoundError`, matching :func:`get_note`.
     """
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
-    block = _format_block(text, timestamp, config.agent)
+    block = _format_block(text, timestamp, actor if actor is not None else config.agent)
     with hold(_lock_path(config, note_id)):
         post = read_post(path)
         if post is None:

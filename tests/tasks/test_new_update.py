@@ -659,6 +659,41 @@ def test_cli_task_update_owner_reassigns(cfg: Config, vault: Path) -> None:
     assert _reload(path).metadata["owner"] == "other-agent"
 
 
+def test_cli_task_update_owner_carve_out_survives_global_owner_flag(
+    cfg: Config, vault: Path
+) -> None:
+    """FIX1 (final review): the global ``--owner`` (acting identity) must not
+    fold into ``task update``'s opt-in reassignment ``--owner`` — a local
+    ``--owner`` still means "reassign to this value", never "act as bob"."""
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    result = _invoke(
+        [
+            "--owner",
+            "bob",
+            "task",
+            "update",
+            "t-c7d1",
+            "--priority",
+            "high",
+            "--owner",
+            "other-agent",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert _reload(path).metadata["owner"] == "other-agent"
+
+
+def test_cli_task_update_owner_carve_out_leaves_owner_untouched_without_local_flag(
+    cfg: Config, vault: Path
+) -> None:
+    """No local ``--owner`` on ``task update`` must never reassign to the global
+    acting identity, even when one is given."""
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    result = _invoke(["--owner", "bob", "task", "update", "t-c7d1", "--priority", "high"])
+    assert result.exit_code == 0, result.output
+    assert _reload(path).metadata["owner"] == "operator"
+
+
 def test_cli_task_update_invalid_priority_exits_2_and_writes_nothing(
     cfg: Config, vault: Path
 ) -> None:

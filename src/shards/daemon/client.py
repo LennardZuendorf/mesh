@@ -470,7 +470,13 @@ def _decode_status(result: Any) -> dict[str, Any] | None:
 
     The daemon ships only what its index can derive — ``note_count``,
     ``task_statuses`` and the one-row ``newest`` window; anything missing or
-    ill-typed means the client computes the whole report itself.
+    ill-typed means the client computes the whole report itself. ``newest``'s
+    element shape is validated too (a dict carrying a numeric ``mtime``), all or
+    nothing — matching the sibling decoders (:func:`_decode_rows`,
+    :func:`_decode_results`): a version-skewed daemon answering ``ok: true`` with
+    a ``newest`` row missing ``mtime`` must fall back to the on-disk scan rather
+    than let :func:`shards.core.lenses.status_report`'s ``newest[0]["mtime"]``
+    raise a bare ``KeyError`` past the CLI boundary mapper.
     """
     if not isinstance(result, dict):
         return None
@@ -483,4 +489,10 @@ def _decode_status(result: Any) -> dict[str, Any] | None:
         return None
     if not isinstance(newest, list):
         return None
+    for row in newest:
+        if not isinstance(row, dict):
+            return None
+        mtime = row.get("mtime")
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)):
+            return None
     return {"note_count": note_count, "task_statuses": statuses, "newest": newest}

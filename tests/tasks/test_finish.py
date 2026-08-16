@@ -440,6 +440,19 @@ def test_cli_finish_json_object(cfg: Config, vault: Path) -> None:
     assert "updated" in obj
 
 
+def test_cli_finish_owner_flag_stamps_the_acting_agent(cfg: Config, vault: Path) -> None:
+    """FIX1 (final review): ``--owner`` names the ``## Outcome`` stamp, not the
+    config agent. ``cfg`` sets ``[core].agent = "test-agent"``; ``--owner bob``
+    must still be the identity the stamp records."""
+    _seed_task(vault, task_id="t-xxx", status="open")
+    result = _invoke(["--owner", "bob", "task", "finish", "t-xxx", "--outcome", "Shipped."])
+    assert result.exit_code == 0, result.output
+    content = _reload(_done_path(vault, "t-xxx")).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    assert stamp_line.endswith("— bob")
+    assert "test-agent" not in stamp_line
+
+
 def test_cli_finish_not_found_exits_3(cfg: Config, vault: Path) -> None:
     _seed_task(vault, task_id="t-here", status="open")
     result = _invoke(["task", "finish", "t-missing"])

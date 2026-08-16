@@ -766,6 +766,23 @@ def test_cli_list_mine_status_json_is_array(cfg: Config, vault: Path) -> None:
     assert arr[0]["status"] == "claimed"
 
 
+def test_cli_list_mine_with_no_identity_returns_empty_not_null_owner_tasks(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIX2 (final review): with no configured identity and no ``--owner``,
+    ``--mine`` must degrade to matching nothing — not silently pass every
+    ``owner: null`` task through both inequality checks (``select_tasks``'s
+    unsound ``spec.me is None`` case)."""
+    _seed_task(vault, task_id="t-null-owner", owner=None, status="open")
+    cfg_file = _write_agent_config(tmp_path, vault, None)
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+
+    result = _invoke(["--json", "task", "list", "--mine"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == []
+
+
 def test_cli_list_quiet_one_id_per_line(cfg: Config, vault: Path) -> None:
     _seed_task(vault, task_id="t-a", updated=_now())
     _seed_task(vault, task_id="t-b", updated=_now() - timedelta(minutes=1))
@@ -1042,6 +1059,19 @@ def test_cli_cancel_idempotent_exits_0(cfg: Config, vault: Path) -> None:
     post = _reload(_done_path(vault, "t-xxx"))
     assert post.content.count("## Cancelled") == 1
     assert "again" not in post.content
+
+
+def test_cli_cancel_owner_flag_stamps_the_acting_agent(cfg: Config, vault: Path) -> None:
+    """FIX1 (final review): ``--owner`` names the ``## Cancelled`` stamp, not the
+    config agent. ``cfg`` sets ``[core].agent = "test-agent"``; ``--owner bob``
+    must still be the identity the stamp records."""
+    _seed_task(vault, task_id="t-xxx", status="open")
+    result = _invoke(["--owner", "bob", "task", "cancel", "t-xxx", "--reason", "not needed"])
+    assert result.exit_code == 0, result.output
+    content = _reload(_done_path(vault, "t-xxx")).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    assert stamp_line.endswith("— bob")
+    assert "test-agent" not in stamp_line
 
 
 def test_cli_cancel_not_found_exits_3(cfg: Config, vault: Path) -> None:

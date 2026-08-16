@@ -196,12 +196,12 @@ def session_start_command(
         task_views = DaemonClient().task_list(effective_config, mine=True, limit=None)
         # Every note the effective agent owns — the note half of "my nodes" for
         # the mentions target set (a task has claimed_by too; a note does not).
-        # ``owner=None`` means *unfiltered* to note_list/select_notes (unlike
-        # task_list's ``mine``, which degrades to empty against a ``None`` me —
-        # core/tasks.py's ``task.owner != spec.me`` never matches ``None``) — so
-        # with no configured identity this must skip the fetch, not pass
-        # ``owner=None`` through and silently claim every note in the vault as
-        # "mine".
+        # ``owner=None`` means *unfiltered* to note_list/select_notes — unlike
+        # task_list's ``mine``, which correctly degrades to empty against a
+        # ``None`` me (core/tasks.py's ``select_tasks`` treats an unset ``spec.me``
+        # as matching nothing) — so with no configured identity this must skip
+        # the fetch here too, not pass ``owner=None`` through and silently claim
+        # every note in the vault as "mine".
         note_views = DaemonClient().note_list(effective_config, owner=me, limit=None) if me else []
         # Source B — inbound mentions of my nodes (team-awareness/7): one
         # whole-vault reverse-``related`` pass, reused across every target in

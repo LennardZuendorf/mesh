@@ -660,6 +660,18 @@ def test_tag_pull_falls_back_when_the_reply_cannot_be_decoded(
         {"note_count": 3, "task_statuses": [1], "newest": []},
         {"note_count": 3, "task_statuses": [], "newest": "no"},
         {"note_count": True, "task_statuses": [], "newest": []},  # bool is not a count
+        {"note_count": 3, "task_statuses": [], "newest": ["not-a-dict"]},  # FIX3: element shape
+        {"note_count": 3, "task_statuses": [], "newest": [{"id": "n-x"}]},  # FIX3: missing mtime
+        {
+            "note_count": 3,
+            "task_statuses": [],
+            "newest": [{"mtime": True}],  # FIX3: bool is not an mtime
+        },
+        {
+            "note_count": 3,
+            "task_statuses": [],
+            "newest": [{"mtime": "yesterday"}],  # FIX3: wrong-typed mtime
+        },
     ],
 )
 def test_vault_status_falls_back_when_the_reply_cannot_be_decoded(

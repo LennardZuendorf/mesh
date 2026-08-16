@@ -32,6 +32,7 @@ field changed.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -56,6 +57,7 @@ from shards.schemas.config import Config, load_config
 from shards.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
+_ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 @pytest.fixture
@@ -713,6 +715,22 @@ def test_cli_release_note_appends_exactly_one_block(cfg: Config, vault: Path) ->
     assert post.metadata["status"] == "open"
     assert post.content.count("blocked on infra") == 1
     assert "Original body." in post.content
+
+
+def test_cli_release_note_owner_flag_stamps_the_acting_agent(cfg: Config, vault: Path) -> None:
+    """FIX1 (final review): ``--owner`` names the ``--note`` stamp, not the
+    config agent. ``cfg`` sets ``[core].agent = "test-agent"``; ``--owner bob``
+    must still be the identity the appended handoff note records."""
+    path = _seed_task(
+        vault, task_id="t-note2", status="claimed", claimed_by="bob", body="Original body."
+    )
+    result = _invoke(["--owner", "bob", "task", "release", "t-note2", "--note", "blocked on infra"])
+    assert result.exit_code == 0, result.output
+    content = _reload(path).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    assert stamp_line.endswith("— bob")
+    assert "test-agent" not in stamp_line
+    assert "blocked on infra" in content
 
 
 def test_cli_release_agentless_config_exits_2(

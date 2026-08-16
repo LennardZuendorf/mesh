@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +126,26 @@ def test_release_conflict_over_mcp_yields_structured_fields(cfg: Config) -> None
     assert payload["kind"] == "claim_conflict"
     assert payload["task_id"] == task.id
     assert payload["existing_owner"] == "other-agent"
+
+
+def test_lock_conflict_over_mcp_yields_lock_conflict_kind(cfg: Config, vault: Path) -> None:
+    """A contended entity lock is ``LockError``, distinct from ``claim_conflict``
+    — ``_KIND_BY_TYPE`` maps it to its own ``kind="lock_conflict"`` (previously
+    an untested branch)."""
+    task = core_create_task(cfg, "Locked Task", body="details")
+    lock_path = vault / "tasks" / ".locks" / f"{task.id}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # A live lock: this process's own pid, so it reads as held (not stale).
+    lock_path.write_text(str(os.getpid()), encoding="utf-8")
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(
+            server.app.call_tool("shards_task_append", {"task_id": task.id, "text": "blocked"})
+        )
+
+    payload = json.loads(str(exc_info.value))
+    assert payload["kind"] == "lock_conflict"
+    assert "next_action" in payload and payload["next_action"]
 
 
 # --------------------------------------------------------------------------- #

@@ -193,7 +193,10 @@ def append_command(
     config = load_config()
     _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
-        task = append_task(config, task_id, text, section=section, timestamp=timestamp)
+        # The stamp names the acting agent — global --owner override, else the
+        # configured identity (agent-usability's `--owner` role 5: the body stamp).
+        actor = getattr(ctx.obj, "owner", None) or config.agent
+        task = append_task(config, task_id, text, section=section, timestamp=timestamp, actor=actor)
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="appended", fields={"status": task.status}
     )
@@ -244,7 +247,10 @@ def release_command(
         task = release_task(config, task_id, releaser, force=force)
         if note is not None:
             # Reuses append_task (R2) rather than a second body-writing path.
-            task = append_task(config, task_id, note)
+            # Stamped and attributed to the releaser (agent-usability's `--owner`
+            # role 5: the body stamp) — a handoff note is exactly the accountability
+            # record team-awareness/8 stamps everywhere else.
+            task = append_task(config, task_id, note, timestamp=True, actor=releaser)
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="released", fields={"status": task.status}
     )
@@ -264,7 +270,10 @@ def finish_command(
     config = load_config()
     _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
-        task = finish_task(config, task_id, outcome)
+        # The ## Outcome stamp names the acting agent — global --owner override,
+        # else the configured identity (agent-usability's `--owner` role 5).
+        actor = getattr(ctx.obj, "owner", None) or config.agent
+        task = finish_task(config, task_id, outcome, actor=actor)
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="finished", fields={"status": task.status}
     )
@@ -284,7 +293,10 @@ def cancel_command(
     config = load_config()
     _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
-        task = cancel_task(config, task_id, reason)
+        # The ## Cancelled stamp names the acting agent — global --owner override,
+        # else the configured identity (agent-usability's `--owner` role 5).
+        actor = getattr(ctx.obj, "owner", None) or config.agent
+        task = cancel_task(config, task_id, reason, actor=actor)
     _output.emit_mutation(
         ctx, obj_id=task.id, updated=task.updated, verb="cancelled", fields={"status": task.status}
     )

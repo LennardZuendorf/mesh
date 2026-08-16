@@ -144,7 +144,10 @@ def append_command(
     config = load_config()
     _output.coalesce_flags(ctx, json_out=json_out, quiet=quiet)
     with cli_errors():
-        note = append_note(config, target, text, section=section, timestamp=timestamp)
+        # The stamp names the acting agent — global --owner override, else the
+        # configured identity (agent-usability's `--owner` role 5: the body stamp).
+        actor = getattr(ctx.obj, "owner", None) or config.agent
+        note = append_note(config, target, text, section=section, timestamp=timestamp, actor=actor)
     _output.emit_mutation(
         ctx, obj_id=note.id, updated=note.updated, verb="appended", fields={"type": note.type}
     )

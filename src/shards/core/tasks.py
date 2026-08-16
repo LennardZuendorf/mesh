@@ -110,7 +110,11 @@ class ClaimConflictError(TaskError):
     code = 4
 
     def __init__(self, task_id: str, existing_owner: str) -> None:
-        super().__init__(f"task already claimed by {existing_owner}")
+        # Named once here (shared by claim and release) so a batch script's
+        # stderr line carries the id, not just the holder — MCP already exposes
+        # ``task_id`` structurally via ``_STRUCTURED_ATTRS``; only the CLI's
+        # plain ``str(exc)`` line was missing it.
+        super().__init__(f"task {task_id} already claimed by {existing_owner}")
         self.task_id = task_id
         self.existing_owner = existing_owner
 
@@ -385,6 +389,7 @@ def append_task(
     *,
     section: str | None = None,
     timestamp: bool = False,
+    actor: str | None = None,
 ) -> Task:
     """Append ``text`` to a task's body and bump ``updated`` (R2).
 
@@ -405,8 +410,11 @@ def append_task(
     text becomes discoverable via ``graph --direction in`` from the mentioned id.
 
     A ``timestamp`` line names the acting agent (``<iso> — <agent>``,
-    team-awareness/8), resolved from ``config.agent`` — the identity of *this*
-    call, not the task's ``owner`` — exactly as :func:`shards.core.notes.append_note`.
+    team-awareness/8), resolved from ``actor`` when given, else ``config.agent`` —
+    the identity of *this* call, not the task's ``owner`` — exactly as
+    :func:`shards.core.notes.append_note`. ``actor`` lets a CLI caller thread the
+    resolved ``--owner``/``[core].agent`` acting identity through, rather than the
+    stamp silently falling back to ``config.agent`` regardless of ``--owner``.
 
     Mechanics mirror :func:`update_task`: the id is resolved *inside*
     ``hold(_lock_path(config, task_id))`` (the lock name derives from ``task_id``,
@@ -417,7 +425,7 @@ def append_task(
     before this read (via :func:`shards.storage.files.read_post`) — matching
     :func:`get_task`.
     """
-    block = _format_block(text, timestamp, config.agent)
+    block = _format_block(text, timestamp, actor if actor is not None else config.agent)
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         post = read_post(path)
@@ -570,6 +578,7 @@ def _terminate_task(
     heading: str,
     status: str,
     text: str | None,
+    actor: str | None = None,
 ) -> Task:
     """Shared machinery behind :func:`finish_task` and :func:`cancel_task`.
 
@@ -578,9 +587,12 @@ def _terminate_task(
     (``created`` untouched), recompute ``related`` from the amended body, write
     atomically in place, then move the file into ``tasks/done/``. The stamp
     names the acting agent (``<iso> — <agent>``, team-awareness/8, via
-    :func:`shards.core.notes._format_stamp`) resolved from ``config.agent`` —
-    the identity of *this* call finishing/cancelling the task, not its
-    ``owner`` — degrading to a bare ``iso`` when unset.
+    :func:`shards.core.notes._format_stamp`) resolved from ``actor`` when given,
+    else ``config.agent`` — the identity of *this* call finishing/cancelling the
+    task, not its ``owner`` — degrading to a bare ``iso`` when unset. ``actor``
+    lets a CLI caller thread the resolved ``--owner``/``[core].agent`` acting
+    identity through, rather than the stamp silently falling back to
+    ``config.agent`` regardless of ``--owner``.
 
     The id is resolved *inside* the lock because a concurrent terminator renames
     the file open→done; the lock id derives from ``task_id`` (not the file
@@ -607,7 +619,7 @@ def _terminate_task(
             return Task.model_validate(post.metadata)
 
         now = _now()
-        stamp = _format_stamp(_iso_utc(now), config.agent)
+        stamp = _format_stamp(_iso_utc(now), actor if actor is not None else config.agent)
         block = f"{stamp}\n{text}" if text else stamp
         section = f"{heading}\n\n{block}"
         base = post.content.rstrip("\n")
@@ -624,7 +636,9 @@ def _terminate_task(
     return task
 
 
-def finish_task(config: Config, task_id: str, outcome: str | None = None) -> Task:
+def finish_task(
+    config: Config, task_id: str, outcome: str | None = None, *, actor: str | None = None
+) -> Task:
     """Finish a task: append a ``## Outcome`` section and move it to ``tasks/done/`` (R3).
 
     Appends a ``## Outcome`` section (ISO-8601 UTC timestamp + optional ``outcome``
@@ -633,13 +647,18 @@ def finish_task(config: Config, task_id: str, outcome: str | None = None) -> Tas
     (a re-finish never adds a second ``## Outcome`` and the file stays in
     ``tasks/done/``). ``related`` is recomputed from the amended body; the body is
     inert data. Behaves identically with the daemon down. Raises
-    :class:`TaskNotFoundError` when the id resolves to no file. See
-    :func:`_terminate_task` for the shared lock/write/move mechanics.
+    :class:`TaskNotFoundError` when the id resolves to no file. ``actor`` threads
+    the resolved acting identity into the stamp — see :func:`_terminate_task`
+    for the shared lock/write/move mechanics.
     """
-    return _terminate_task(config, task_id, heading=_OUTCOME_HEADING, status="done", text=outcome)
+    return _terminate_task(
+        config, task_id, heading=_OUTCOME_HEADING, status="done", text=outcome, actor=actor
+    )
 
 
-def cancel_task(config: Config, task_id: str, reason: str | None = None) -> Task:
+def cancel_task(
+    config: Config, task_id: str, reason: str | None = None, *, actor: str | None = None
+) -> Task:
     """Cancel a task: append a ``## Cancelled`` section and move it to ``done/`` (R5).
 
     The mirror image of :func:`finish_task`: appends a ``## Cancelled`` section
@@ -647,11 +666,17 @@ def cancel_task(config: Config, task_id: str, reason: str | None = None) -> Task
     and moves the file open→done. Accepted from any non-terminal status;
     **idempotent** on a terminal status (a re-cancel never adds a second section
     and the file stays in ``tasks/done/``). Behaves identically with the daemon
-    down. Raises :class:`TaskNotFoundError` when the id resolves to no file. See
+    down. Raises :class:`TaskNotFoundError` when the id resolves to no file.
+    ``actor`` threads the resolved acting identity into the stamp — see
     :func:`_terminate_task` for the shared mechanics.
     """
     return _terminate_task(
-        config, task_id, heading=_CANCELLED_HEADING, status="cancelled", text=reason
+        config,
+        task_id,
+        heading=_CANCELLED_HEADING,
+        status="cancelled",
+        text=reason,
+        actor=actor,
     )
 
 
@@ -903,7 +928,10 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
     foreign / malformed rows are skipped silently. Filters (all conjunctive):
     ``status`` membership (a CSV set — ``open,claimed`` matches either; a single
     value matches exactly as before), exact ``owner`` (on the ``owner`` field),
-    ``mine`` (``owner`` *or* ``claimed_by`` equals ``spec.me``), ``tags`` (AND, or
+    ``mine`` (``owner`` *or* ``claimed_by`` equals ``spec.me``; an unset ``spec.me``
+    degrades ``mine`` to matching nothing rather than passing every ``owner: null``
+    task through — the same degrade-to-empty convention unset identity gets
+    elsewhere), ``tags`` (AND, or
     OR with ``any_tag``), exact ``project`` (the project-scoped view — only tasks
     whose ``project`` soft link matches), the ``cutoff`` recency *floor* on
     ``updated`` (``--since``: keep ``updated >= cutoff``), and the
@@ -937,7 +965,13 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
             continue
         if spec.owner is not None and task.owner != spec.owner:
             continue
-        if spec.mine and task.owner != spec.me and task.claimed_by != spec.me:
+        # An unset ``me`` degrades ``mine`` to matching nothing (the codebase's
+        # established convention for unset identity) rather than passing every
+        # ``owner: null`` task through both inequality checks — the unsound
+        # half of team-awareness/3 this closes.
+        if spec.mine and (
+            spec.me is None or (task.owner != spec.me and task.claimed_by != spec.me)
+        ):
             continue
         if spec.project is not None and task.project != spec.project:
             continue

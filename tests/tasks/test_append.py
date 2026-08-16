@@ -463,6 +463,21 @@ def test_cli_append_section_and_timestamp(shards_config: Path, vault: Path) -> N
     assert "logged" in content
 
 
+def test_cli_append_owner_flag_stamps_the_acting_agent(shards_config: Path, vault: Path) -> None:
+    """FIX1 (final review): ``--owner`` names the stamp, not the config agent.
+
+    ``shards_config`` sets ``[core].agent = "test-agent"``; ``--owner bob`` must
+    still be the identity the stamp records — the fifth durable identity surface
+    (agent-usability's ``--owner`` roles) that was missed."""
+    path = _seed_task(vault)
+    result = _invoke(["--owner", "bob", "task", "append", "t-seed", "logged", "--timestamp"])
+    assert result.exit_code == 0, result.output
+    content = _reload(path).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    assert stamp_line.endswith("— bob")
+    assert "test-agent" not in stamp_line
+
+
 def test_cli_append_quiet_emits_id_only(shards_config: Path, vault: Path) -> None:
     _seed_task(vault)
     result = _invoke(["--quiet", "task", "append", "t-seed", "x"])
