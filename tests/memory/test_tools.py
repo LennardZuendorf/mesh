@@ -6,8 +6,9 @@ Acceptance coverage:
   its exact ``shards_*`` name, and *only* those (a set-equality check catches both a
   missing tool and a stray extra one in a single assertion).
 * **Withholding** — the unsafe / admin surface (``note_delete``, ``task_delete``,
-  ``daemon`` controls, ``reindex``, ``status``, and the Phase-3 ``task_release``) is
-  absent.
+  ``daemon`` controls, ``reindex``, ``status``) is absent. ``shards_task_release``
+  is *not* withheld as of team-awareness/10 (it shipped, the Phase-3 deferral
+  note it used to carry is gone) — but it carries no ``force`` parameter.
 * **Typed params, not flag strings** — a tool's input schema exposes real typed
   fields (``shards_note_get`` takes ``id: str``), never ``--id`` CLI option strings.
 * **Annotation mapping** — at least one tool per class: read-only
@@ -17,20 +18,34 @@ Acceptance coverage:
   layer, and the two lens tools call ``core.activity.recent_activity`` /
   ``core.context.build_context`` (memory/2 & memory/3) rather than re-implementing
   them.
+* **MCP parity (team-awareness/10)** — ``shards_session_start``, ``shards_task_append``,
+  ``shards_task_release``, and the new ``shards_task_list``/``shards_task_update``
+  params each get a parity check against the same ``core`` function (or the CLI,
+  over one fixture vault) the tool wraps, driven through the *registered* tool
+  (``server.app.call_tool``), not the bare Python function.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import frontmatter
 import pytest
+from typer.testing import CliRunner
 
 import shards.mcp.server as server
+from shards.cli.__main__ import app as cli_app
 from shards.core.notes import NoteView
+from shards.core.tasks import append_task as core_append_task
+from shards.core.tasks import claim_task as core_claim_task
+from shards.core.tasks import create_task as core_create_task
+from shards.core.tasks import get_task as core_get_task
+from shards.core.tasks import release_task as core_release_task
+from shards.core.tasks import update_task as core_update_task
 from shards.schemas.config import Config, load_config
 from shards.schemas.note import Note
 
@@ -43,9 +58,11 @@ _EXPECTED_TOOLS: frozenset[str] = frozenset(
         "shards_note_list",
         "shards_note_update",
         "shards_task_new",
+        "shards_task_append",
         "shards_task_get",
         "shards_task_list",
         "shards_task_claim",
+        "shards_task_release",
         "shards_task_finish",
         "shards_task_update",
         "shards_task_cancel",
@@ -54,10 +71,13 @@ _EXPECTED_TOOLS: frozenset[str] = frozenset(
         "shards_build_context",
         "shards_graph",
         "shards_project",
+        "shards_session_start",
     }
 )
 
-# Explicitly withheld: delete + daemon/admin, and the Phase-3 release verb.
+# Explicitly withheld: delete + daemon/admin surface. ``shards_task_release``
+# ships as of team-awareness/10 (no longer Phase-3-deferred) — see the module
+# docstring — so it is intentionally *not* in this set.
 _WITHHELD_TOOLS: frozenset[str] = frozenset(
     {
         "shards_note_delete",
@@ -67,17 +87,17 @@ _WITHHELD_TOOLS: frozenset[str] = frozenset(
         "shards_daemon",
         "shards_reindex",
         "shards_status",
-        "shards_task_release",
     }
 )
 
-# Substrings that must never appear in any registered tool name.
+# Substrings that must never appear in any registered tool name. "release" is
+# no longer forbidden (``shards_task_release`` is now a legitimate tool name);
+# its absence is instead pinned by asserting it carries no ``force`` param.
 _FORBIDDEN_SUBSTRINGS: tuple[str, ...] = (
     "delete",
     "daemon",
     "reindex",
     "status",
-    "release",
 )
 
 
@@ -143,6 +163,8 @@ def test_note_get_takes_typed_id_field_not_flag_string() -> None:
         "shards_recent_activity",
         "shards_build_context",
         "shards_graph",
+        "shards_project",
+        "shards_session_start",
     ],
 )
 def test_read_tools_are_read_only(name: str) -> None:
@@ -153,7 +175,13 @@ def test_read_tools_are_read_only(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["shards_note_update", "shards_task_claim", "shards_task_finish", "shards_task_update"],
+    [
+        "shards_note_update",
+        "shards_task_claim",
+        "shards_task_release",
+        "shards_task_finish",
+        "shards_task_update",
+    ],
 )
 def test_mutating_tools_are_idempotent(name: str) -> None:
     tool = _registered()[name]
@@ -161,7 +189,10 @@ def test_mutating_tools_are_idempotent(name: str) -> None:
     assert tool.annotations.idempotentHint is True
 
 
-@pytest.mark.parametrize("name", ["shards_note_new", "shards_note_append", "shards_task_new"])
+@pytest.mark.parametrize(
+    "name",
+    ["shards_note_new", "shards_note_append", "shards_task_new", "shards_task_append"],
+)
 def test_write_tools_carry_no_special_hint(name: str) -> None:
     """Plain writes get *no* hint (not read-only, not idempotent, not destructive)."""
     tool = _registered()[name]
@@ -505,3 +536,271 @@ def test_mcp_search_explicit_config_threshold_behaves_as_today(cfg: Config, vaul
     dispatched = asyncio.run(server.app.call_tool("shards_search", {"query": "eTA"}))
 
     assert dispatched.structured_content["result"] == []
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/10 — MCP parity sweep                                        #
+# --------------------------------------------------------------------------- #
+#
+# Every test below drives the *registered* tool (``server.app.call_tool``),
+# never the bare module function, and asserts the result matches the same
+# ``core`` function (or the CLI, which itself routes through that ``core``
+# function) over one fixture vault — the parity contract this unit exists to
+# close.
+
+
+def _cli(args: list[str]) -> Any:
+    """Invoke the real CLI app and parse its ``--json`` stdout."""
+    result = CliRunner().invoke(cli_app, args)
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)
+
+
+# --- enumeration / schema — the new params exist with the right shape ------ #
+
+
+def test_task_list_new_params_present_with_correct_types(cfg: Config) -> None:
+    """``stale`` / ``available`` / ``sort`` (35f7301, 3235de3) reach the schema."""
+    props = _registered()["shards_task_list"].parameters["properties"]
+    assert "stale" in props  # nullable str -> {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert props["available"]["type"] == "boolean"
+    assert "sort" in props
+
+
+def test_task_update_owner_param_present(cfg: Config) -> None:
+    """``owner`` (tech.md's R10 parity table: ``shards_task_update(owner=…)``)."""
+    props = _registered()["shards_task_update"].parameters["properties"]
+    assert "owner" in props
+
+
+def test_task_release_has_no_force_param(cfg: Config) -> None:
+    """The binding constraint, pinned at the schema: ``--force`` never reaches MCP."""
+    props = _registered()["shards_task_release"].parameters["properties"]
+    assert "force" not in props
+    assert set(props) == {"task_id", "owner"}
+
+
+def test_graph_direction_param_present_with_out_default(cfg: Config) -> None:
+    """8854319 landed ``direction`` already — verify, don't rebuild (debt item 5)."""
+    props = _registered()["shards_graph"].parameters["properties"]
+    assert props["direction"]["default"] == "out"
+
+
+def test_session_start_params_present(cfg: Config) -> None:
+    props = _registered()["shards_session_start"].parameters["properties"]
+    assert set(props) == {"owner", "team", "meta_only"}
+
+
+def test_module_docstring_phase3_deferral_note_is_corrected() -> None:
+    """The stale ``mcp/server.py`` header comment (test scenario 5) is gone."""
+    assert server.__doc__ is not None
+    assert "Phase-3" not in server.__doc__
+    assert "not the Phase-3" not in server.__doc__
+    assert "shards_task_release" in server.__doc__
+
+
+# --- routing — mocked core layer, no second implementation ----------------- #
+
+
+def test_task_append_tool_calls_core_append_task(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _spy(config: Config, task_id: str, text: str, *, section: str | None, timestamp: bool):
+        seen["task_id"], seen["text"] = task_id, text
+        seen["section"], seen["timestamp"] = section, timestamp
+        return core_create_task(config, "spy result")
+
+    monkeypatch.setattr(server, "append_task", _spy)
+
+    dispatched = asyncio.run(
+        server.app.call_tool(
+            "shards_task_append", {"task_id": "t-fake", "text": "hi", "section": "Log"}
+        )
+    )
+
+    assert seen == {"task_id": "t-fake", "text": "hi", "section": "Log", "timestamp": False}
+    assert dispatched.structured_content["title"] == "spy result"
+
+
+def test_task_release_tool_calls_core_release_task(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _spy(config: Config, task_id: str, releaser: str):
+        seen["task_id"], seen["releaser"] = task_id, releaser
+        return core_create_task(config, "spy released")
+
+    monkeypatch.setattr(server, "release_task", _spy)
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_task_release", {"task_id": "t-fake", "owner": "test-agent"})
+    )
+
+    assert seen == {"task_id": "t-fake", "releaser": "test-agent"}
+    assert dispatched.structured_content["title"] == "spy released"
+
+
+def test_session_start_tool_calls_core_session_start_entries(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """team-awareness/10's headline tool composes the same core composer the CLI
+    does — not a re-implementation of the tasks/mentions/activity merge."""
+    sentinel = [{"id": "t-1", "type": "task", "reason": "task", "title": "One", "path": "/p"}]
+    seen: dict[str, Any] = {}
+
+    def _spy(task_views, activity, mentions, *, meta_only):
+        seen["meta_only"] = meta_only
+        return sentinel
+
+    monkeypatch.setattr(server, "session_start_entries", _spy)
+
+    dispatched = asyncio.run(server.app.call_tool("shards_session_start", {}))
+
+    assert dispatched.structured_content["result"] == sentinel
+    assert seen == {"meta_only": False}
+
+
+# --- parity — the registered tool matches the core/CLI path it wraps ------- #
+
+
+def test_parity_task_append(cfg: Config, vault: Path) -> None:
+    """``shards_task_append`` lands the identical body edit ``core.append_task``
+    (and hence ``task append``) produces for the same input."""
+    oracle = core_create_task(cfg, "Parity Append Oracle")
+    expected = core_append_task(cfg, oracle.id, "same note text", section="Log")
+
+    twin = core_create_task(cfg, "Parity Append Twin")
+    dispatched = asyncio.run(
+        server.app.call_tool(
+            "shards_task_append",
+            {"task_id": twin.id, "text": "same note text", "section": "Log"},
+        )
+    )
+    result = dispatched.structured_content
+
+    assert result["status"] == expected.status
+    assert core_get_task(cfg, oracle.id).body == core_get_task(cfg, twin.id).body
+
+
+def test_parity_task_release(cfg: Config, vault: Path) -> None:
+    """``shards_task_release`` lands the identical claimed->open transition
+    ``core.release_task`` (and hence ``task release``) produces."""
+    oracle = core_create_task(cfg, "Parity Release Oracle")
+    core_claim_task(cfg, oracle.id, "test-agent")
+    expected = core_release_task(cfg, oracle.id, "test-agent")
+
+    twin = core_create_task(cfg, "Parity Release Twin")
+    core_claim_task(cfg, twin.id, "test-agent")
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_task_release", {"task_id": twin.id, "owner": "test-agent"})
+    )
+    result = dispatched.structured_content
+
+    assert result["status"] == expected.status == "open"
+    assert result["claimed_by"] is expected.claimed_by is None
+
+
+def test_parity_task_update_owner(cfg: Config, vault: Path) -> None:
+    """``shards_task_update(owner=…)`` lands the identical reassignment
+    ``core.update_task`` (and hence ``task update --owner``) produces."""
+    oracle = core_create_task(cfg, "Parity Owner Oracle")
+    expected = core_update_task(cfg, oracle.id, owner="other-agent")
+
+    twin = core_create_task(cfg, "Parity Owner Twin")
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_task_update", {"task_id": twin.id, "owner": "other-agent"})
+    )
+    result = dispatched.structured_content
+
+    assert result["owner"] == expected.owner == "other-agent"
+    # Reassignment never touches claimed_by (root AGENTS.md's owner/claim split).
+    assert result["claimed_by"] is None
+
+
+def test_parity_task_list_available_and_priority_sort(cfg: Config, vault: Path) -> None:
+    """``shards_task_list(available=True)`` returns the same ids, same
+    priority-sorted order, as ``task list --available --json`` (35f7301, 3235de3)."""
+    core_create_task(cfg, "Low prio available", priority="low")
+    core_create_task(cfg, "High prio available", priority="high")
+    claimed = core_create_task(cfg, "Not available (claimed)", priority="high")
+    core_claim_task(cfg, claimed.id, "test-agent")
+
+    cli_ids = [row["id"] for row in _cli(["--json", "task", "list", "--available"])]
+
+    dispatched = asyncio.run(server.app.call_tool("shards_task_list", {"available": True}))
+    mcp_ids = [row["id"] for row in dispatched.structured_content["result"]]
+
+    assert mcp_ids == cli_ids
+    assert claimed.id not in mcp_ids
+
+
+def test_parity_task_list_stale(cfg: Config, vault: Path) -> None:
+    """``shards_task_list(stale=…)`` — the inverse of ``since`` — matches the CLI.
+
+    A freshly created task is never older than a 9999-day window, so both
+    surfaces must agree it is excluded (empty result)."""
+    core_create_task(cfg, "Stale filter task")
+
+    cli_ids = [row["id"] for row in _cli(["--json", "task", "list", "--stale", "9999d"])]
+
+    dispatched = asyncio.run(server.app.call_tool("shards_task_list", {"stale": "9999d"}))
+    mcp_ids = [row["id"] for row in dispatched.structured_content["result"]]
+
+    assert mcp_ids == cli_ids == []
+
+
+def test_parity_task_list_status_csv(cfg: Config, vault: Path) -> None:
+    """CSV ``status`` (already worked transparently) stays undocumented-but-live;
+    pinned here now that the docstring calls it out explicitly."""
+    open_task = core_create_task(cfg, "CSV status open")
+    claimed_task = core_create_task(cfg, "CSV status claimed")
+    core_claim_task(cfg, claimed_task.id, "test-agent")
+
+    dispatched = asyncio.run(server.app.call_tool("shards_task_list", {"status": "open,claimed"}))
+    mcp_ids = {row["id"] for row in dispatched.structured_content["result"]}
+
+    assert {open_task.id, claimed_task.id} <= mcp_ids
+
+
+def test_parity_session_start(cfg: Config, vault: Path) -> None:
+    """``shards_session_start`` returns the identical payload ``session-start
+    --json`` does over the same vault state — tasks, then mentions, then
+    activity, deduped by id, each entry carrying ``reason``."""
+    mine = core_create_task(cfg, "My live queue task")
+    core_claim_task(cfg, mine.id, "test-agent")
+
+    # A note owned by someone else mentioning my task — the notify half (R7).
+    from shards.core.notes import create_note
+
+    create_note(
+        cfg,
+        "Mentions my task",
+        owner="other-agent",
+        body=f"see [[{mine.id}]]",
+    )
+
+    cli_entries = _cli(["session-start", "--json"])
+    dispatched = asyncio.run(server.app.call_tool("shards_session_start", {}))
+    mcp_entries = dispatched.structured_content["result"]
+
+    assert mcp_entries == cli_entries
+    reasons_by_id = {e["id"]: e["reason"] for e in mcp_entries}
+    assert reasons_by_id[mine.id] == "task"
+    assert "mention" in reasons_by_id.values()
+
+
+def test_parity_session_start_owner_and_team(cfg: Config, vault: Path) -> None:
+    """``owner=`` swaps the effective identity; ``team=True`` widens the activity
+    half only — matching ``--owner``/``--team`` on the CLI side."""
+    core_create_task(cfg, "Other agent's task", owner="other-agent")
+
+    cli_entries = _cli(["session-start", "--json", "--owner", "other-agent", "--team"])
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_session_start", {"owner": "other-agent", "team": True})
+    )
+    mcp_entries = dispatched.structured_content["result"]
+
+    assert mcp_entries == cli_entries

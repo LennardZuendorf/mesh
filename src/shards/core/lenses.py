@@ -49,6 +49,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import msgspec.structs
+
 from shards.core.activity import recent_activity
 from shards.core.context import (
     GraphResult,
@@ -74,7 +76,9 @@ __all__ = [
     "GraphResult",
     "ProjectNotFoundError",
     "ProjectResult",
+    "SESSION_SINCE",
     "SeedNotFoundError",
+    "as_effective_agent",
     "build_context",
     "graph_query",
     "project_view",
@@ -92,6 +96,31 @@ TASK_STATUSES: tuple[str, ...] = ("open", "claimed", "done", "cancelled")
 # session-start only surfaces the caller's *live* queue — the non-terminal
 # statuses. Terminal (done/cancelled) tasks are dropped from the task section.
 _OPEN_STATUSES: frozenset[str] = frozenset({"open", "claimed"})
+
+# The recency window ``session_start_entries``' mentions/activity halves share
+# (team-awareness/7) — one constant so the CLI's ``session-start`` and the MCP
+# ``shards_session_start`` mirror cannot drift apart on the window itself.
+SESSION_SINCE: str = "7d"
+
+
+def as_effective_agent(config: Config, agent: str | None) -> Config:
+    """``config`` with ``[core].agent`` substituted for ``agent`` (a no-op if unset).
+
+    ``--owner``/``owner=`` on ``session-start`` means "show me *that* agent's
+    warm start", and every source the composite draws on (``task_list(mine=True)``,
+    ``note_list(owner=...)``, ``recent_activity(mine=True)``,
+    :func:`session_mentions`) resolves "me" from ``config.agent`` — so
+    substituting the identity once, here, drives every source through its
+    existing ``mine``/``me`` semantics unchanged, rather than threading a second
+    "effective agent" parameter through each one. Shared by both surfaces'
+    ``session-start`` (``cli/session.py`` and ``mcp/server.py``) so the identity
+    swap has exactly one implementation. ``Config`` is an unfrozen
+    :class:`msgspec.Struct`, so this is a cheap, local copy — the caller's own
+    ``config`` (and anyone else holding it) is never mutated.
+    """
+    if agent is None:
+        return config
+    return msgspec.structs.replace(config, core=msgspec.structs.replace(config.core, agent=agent))
 
 
 def _updated_key(entry: dict[str, Any]) -> float:

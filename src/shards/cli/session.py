@@ -52,11 +52,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import msgspec.structs
 import typer
 
 from shards.cli._errors import cli_errors
 from shards.core.lenses import (
+    SESSION_SINCE,
+    as_effective_agent,
     build_context,
     graph_query,
     project_view,
@@ -66,10 +67,9 @@ from shards.core.lenses import (
 )
 from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
-from shards.schemas.config import Config, load_config
+from shards.schemas.config import load_config
 
 _DAEMON_DOWN_NOTICE = "recent-activity: daemon down, scanning the folder directly"
-_SESSION_SINCE = "7d"
 
 
 def _daemon_up() -> bool:
@@ -99,24 +99,6 @@ def _coalesce_owner(ctx: typer.Context, owner: str | None) -> str | None:
     on either side of the command name takes effect.
     """
     return owner if owner is not None else getattr(ctx.obj, "owner", None)
-
-
-def _as_agent(config: Config, agent: str | None) -> Config:
-    """``config`` with ``[core].agent`` substituted for ``agent`` (a no-op if unset).
-
-    ``--owner`` on ``session-start`` means "show me *that* agent's warm start",
-    and every source this command composes (``task_list(mine=True)``,
-    ``note_list(owner=...)``, ``recent_activity(mine=True)``,
-    :func:`~shards.core.lenses.session_mentions`) resolves "me" from
-    ``config.agent`` — so substituting the identity once, here, drives every
-    source through its existing ``mine``/``me`` semantics unchanged, rather than
-    threading a second "effective agent" parameter through each one. ``Config``
-    is an unfrozen :class:`msgspec.Struct`, so this is a cheap, local copy — the
-    caller's own ``config`` (and anyone else holding it) is never mutated.
-    """
-    if agent is None:
-        return config
-    return msgspec.structs.replace(config, core=msgspec.structs.replace(config.core, agent=agent))
 
 
 def _identity_columns(entry: dict[str, Any]) -> tuple[str, str]:
@@ -206,7 +188,7 @@ def session_start_command(
     ``--owner <agent>`` (honoured on both sides of the command name — coalesced
     with the root callback's global ``--owner``, like every other cross-cutting
     flag) substitutes ``agent`` for the effective identity on *every* source —
-    "what would that agent's warm start show" — via :func:`_as_agent`.
+    "what would that agent's warm start show" — via :func:`~shards.core.lenses.as_effective_agent`.
     ``--team`` drops the identity filter on the activity half only; the task
     half (and the mentions target set, which is built from that same task
     queue) always stays the effective agent's own.
@@ -217,7 +199,7 @@ def session_start_command(
     # either side of the command name takes effect.
     json_out, quiet = _coalesce(ctx, json_out, quiet)
     owner = _coalesce_owner(ctx, owner)
-    effective_config = _as_agent(config, owner)
+    effective_config = as_effective_agent(config, owner)
     me = effective_config.agent
 
     with cli_errors():
@@ -239,14 +221,14 @@ def session_start_command(
         # whole-vault reverse-``related`` pass, reused across every target in
         # task_views/note_views rather than walked once per target.
         mentions = session_mentions(
-            effective_config, task_views, note_views, me=me, since=_SESSION_SINCE
+            effective_config, task_views, note_views, me=me, since=SESSION_SINCE
         )
         # Source C — recent changes. --team drops the identity filter here only;
         # the task queue above (and the mentions target set built from it) never
         # widens — dedup happens in the compose step below.
         activity = recent_activity(
             effective_config,
-            since=_SESSION_SINCE,
+            since=SESSION_SINCE,
             owner=None,
             mine=not team,
             limit=DEFAULT_RECENT_LIMIT,
