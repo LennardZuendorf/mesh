@@ -38,6 +38,13 @@ through this surface.
 Tool functions are defined as plain module-level callables and registered on the
 app afterwards, so they stay directly importable and unit-testable while the app
 introspection still reports the correct names, schemas, and annotations.
+
+The app also carries an ``instructions`` block (agent-usability/1) — built once at
+import time by :func:`shards.mcp.instructions.build_instructions` from a guarded
+config load (:func:`_startup_config`). It is the one artifact every MCP client
+receives on connect, before any tool call, including Cowork sessions that never
+read a local skill directory; see ``shards/mcp/instructions.py`` for its content
+and phrasing constraints.
 """
 
 from __future__ import annotations
@@ -87,10 +94,27 @@ from shards.core.tasks import (
 )
 from shards.daemon.client import DaemonClient
 from shards.index.warm import DEFAULT_RECENT_LIMIT
-from shards.schemas.config import load_config
+from shards.mcp.instructions import build_instructions
+from shards.schemas.config import Config, load_config
 from shards.schemas.note import Note
 
-app = FastMCP("shards")
+
+def _startup_config() -> Config | None:
+    """Guarded config load for the ``instructions`` block (agent-usability/1).
+
+    A missing ``config.toml`` raises ``SystemExit`` (``load_config``'s
+    documented contract); a malformed one raises ``msgspec.ValidationError``.
+    Neither may stop the server from starting — :func:`build_instructions`
+    renders the fully-degraded block instead, and the individual ``shards_*``
+    tools still fail per the normal error contract once actually called.
+    """
+    try:
+        return load_config()
+    except (SystemExit, Exception):
+        return None
+
+
+app = FastMCP("shards", instructions=build_instructions(_startup_config()))
 
 
 # --------------------------------------------------------------------------- #
