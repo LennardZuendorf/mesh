@@ -53,13 +53,25 @@ from shards.storage.sandbox import safe_resolve
 
 _ID_PREFIX = "t-"
 _TASK_SUBDIRS: tuple[str, ...] = ("open", "done")
-_SORT_FIELDS: tuple[str, ...] = ("updated", "created", "title")
+_SORT_FIELDS: tuple[str, ...] = ("updated", "created", "title", "priority")
 _DEFAULT_LIMIT = 20
 # The write-boundary status vocabulary, reused as the *read*-boundary vocabulary
 # for ``--status`` (team-awareness/4): a CSV entry outside this set is a caller
 # error (exit 2), never a silent empty result. Derived from the schema's own
 # ``Literal`` — one vocabulary, not a second copy that could drift from it.
 _TASK_STATUSES: tuple[str, ...] = get_args(TaskStatus)
+# The *write*-boundary priority vocabulary (team-awareness/5). Deliberately NOT a
+# schema ``Literal`` — see ``select_tasks``/``_priority_rank`` below for why the
+# read side stays tolerant. ``create_task``/``update_task`` reject anything
+# outside this set (CLI exit 2, naming the allowed values), so every *new* write
+# is canonical while a legacy free-form value already on disk keeps reading fine.
+_PRIORITY_VALUES: tuple[str, ...] = ("high", "normal", "low")
+# Canonical rank for ``--sort priority``: ascending, so ``high`` sorts first.
+# ``None`` *and* any value outside the vocabulary (a legacy/free-form string)
+# share the same trailing rank — "unprioritized" is one bucket, not two, and
+# neither is ever dropped from the listing (tolerant read).
+_PRIORITY_RANK: dict[str, int] = {"high": 0, "normal": 1, "low": 2}
+_PRIORITY_UNRANKED = 3
 # Terminal statuses: a re-run of finish/cancel on one of these is a no-op — the
 # file already lives in ``tasks/done/`` and the outcome/cancel section is fixed.
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "cancelled"})
@@ -179,6 +191,34 @@ def _lock_path(config: Config, task_id: str) -> Path:
     return _tasks_root(config) / ".locks" / f"{task_id}.lock"
 
 
+def _validate_priority(priority: str | None) -> None:
+    """Reject a ``priority`` outside the write-boundary vocabulary (R5).
+
+    Mirrors :func:`shards.core.notes._validate_owner`: ``None`` (unset) is
+    exempt, an explicit out-of-vocabulary value raises ``ValueError`` (CLI exit
+    2) naming the allowed values. Called *before* any lock/write in both
+    :func:`create_task` and :func:`update_task`, so a rejected write leaves the
+    file untouched. This is the *only* place the vocabulary is enforced — the
+    schema stays ``str | None`` (tolerant read) precisely so a legacy file
+    already carrying a free-form value never fails validation on read.
+    """
+    if priority is not None and priority not in _PRIORITY_VALUES:
+        raise ValueError(f"invalid priority: {priority!r} (use {', '.join(_PRIORITY_VALUES)})")
+
+
+def _priority_rank(priority: str | None) -> int:
+    """Canonical sort rank for ``--sort priority`` — tolerant of anything.
+
+    Known values rank by :data:`_PRIORITY_RANK`; ``None`` and any unrecognised
+    free-form value both fall through to :data:`_PRIORITY_UNRANKED`, the same
+    trailing bucket — a legacy priority is never treated as an error here, only
+    ordered last (R5's "tolerant read" half).
+    """
+    if priority is None:
+        return _PRIORITY_UNRANKED
+    return _PRIORITY_RANK.get(priority, _PRIORITY_UNRANKED)
+
+
 def create_task(
     config: Config,
     title: str,
@@ -198,8 +238,12 @@ def create_task(
     ``created == updated`` to the same instant (birth). ``owner`` defaults to the
     resolved config agent when not given; an explicit ``owner`` outside a
     non-empty ``[tasks].collections`` raises ``ValueError`` (CLI exit 2 — checked
-    before any write, so nothing is created). ``project`` is an optional soft link
-    to a ``type: project`` note id (no validation — any string, a dangling id is
+    before any write, so nothing is created). An explicit ``priority`` outside
+    :data:`_PRIORITY_VALUES` (``high``/``normal``/``low``) likewise raises
+    ``ValueError`` (CLI exit 2, via :func:`_validate_priority`, checked before any
+    write) — the write boundary is canonical even though the schema stays
+    tolerant on read (R5). ``project`` is an optional soft link to a
+    ``type: project`` note id (no validation — any string, a dangling id is
     tolerated); like ``priority`` it is a declared optional, written as ``null``
     when unset. ``blocks``/``blocked_by`` are stored verbatim but carry no
     readiness logic in v1. ``related`` is derived from the body's wikilinks,
@@ -216,6 +260,7 @@ def create_task(
     plus one write.
     """
     _validate_owner(config, owner)
+    _validate_priority(priority)
 
     vault = config.core.tolaria_path
     with hold(allocator_lock_path(_tasks_root(config))):
@@ -291,8 +336,13 @@ def update_task(
     handing a task to someone and having them start work on it are different
     actions (the latter is claiming *as* that agent, via the global
     ``--owner``/``[core].agent`` identity :func:`claim_task` already resolves).
+
+    An explicit ``priority`` outside :data:`_PRIORITY_VALUES` likewise raises
+    ``ValueError`` (CLI exit 2 via :func:`_validate_priority`), checked before
+    this same lock — a rejected priority write touches nothing on disk (R5).
     """
     _validate_owner(config, owner)
+    _validate_priority(priority)
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         post = read_post(path)
@@ -685,6 +735,14 @@ class TaskFilter:
     conjunctive and independent of ``status``: passing both narrows to the band
     ``cutoff <= updated < stale_cutoff``, and neither implies any particular
     status filter.
+
+    ``available`` (team-awareness/5) is the single "takeable work" filter:
+    ``status == "open" and claimed_by is None``. It is conjunctive with every
+    other filter above, exactly like ``mine``/``status``/tags — passing
+    ``--available --tags urgent`` narrows to takeable work tagged urgent. There
+    is no separate "unowned" concept: ``owner`` stays accountability, and the
+    pool this flag selects is defined purely by ``claimed_by``, per the spec's
+    "no unowned state" ruling (``--owner ""`` stays rejected elsewhere).
     """
 
     status: tuple[str, ...] | None = None
@@ -696,6 +754,7 @@ class TaskFilter:
     project: str | None = None
     cutoff: datetime | None = None
     stale_cutoff: datetime | None = None
+    available: bool = False
     sort: str = "updated"
     limit: int | None = _DEFAULT_LIMIT
 
@@ -712,6 +771,7 @@ class TaskFilter:
         project: str | None = None,
         since: str | None = None,
         stale: str | None = None,
+        available: bool = False,
         sort: str = "updated",
         limit: int | None = _DEFAULT_LIMIT,
     ) -> TaskFilter:
@@ -735,6 +795,7 @@ class TaskFilter:
             project=project,
             cutoff=_parse_since(since) if since else None,
             stale_cutoff=_parse_since(stale) if stale else None,
+            available=available,
             sort=sort,
             limit=limit,
         )
@@ -753,6 +814,7 @@ class TaskFilter:
             "stale_cutoff": self.stale_cutoff.isoformat()
             if self.stale_cutoff is not None
             else None,
+            "available": self.available,
             "sort": self.sort,
             "limit": self.limit,
         }
@@ -765,7 +827,9 @@ class TaskFilter:
         ``status``/``sort``/durations on the caller's side — so a wrong-typed or
         unknown ``status`` entry here is dropped defensively via
         :func:`shards.core.notes._str_tuple` rather than raising, exactly like
-        every other field in this method.
+        every other field in this method. ``sort`` is whitelisted against
+        :data:`_SORT_FIELDS` here too — a ``priority`` sort request travels the
+        identical whitelist as every other field, warm or cold (team-awareness/5).
         """
         sort = params.get("sort")
         return cls(
@@ -778,6 +842,7 @@ class TaskFilter:
             project=_opt_str(params.get("project")),
             cutoff=_opt_datetime(params.get("cutoff")),
             stale_cutoff=_opt_datetime(params.get("stale_cutoff")),
+            available=bool(params.get("available", False)),
             sort=sort if sort in _SORT_FIELDS else "updated",
             limit=_opt_int(params.get("limit")),
         )
@@ -828,11 +893,16 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
     ``updated`` (``--since``: keep ``updated >= cutoff``), and the
     ``stale_cutoff`` recency *ceiling* (``--stale``: keep ``updated <
     stale_cutoff``) — the literal inverse of ``cutoff`` over the same field, so
-    the pair is a band-pass when both are given. ``sort`` is
-    ``updated``/``created`` (descending) or ``title`` (ascending), tie-broken by
-    path so the order is deterministic and identical on both paths; ``limit``
-    caps the result (``None`` for unbounded). Shares the ``--since``/tag/sort
-    semantics with :func:`shards.core.notes.select_notes`.
+    the pair is a band-pass when both are given; and ``available`` (R5), the
+    single takeable-work filter — ``status == "open" and claimed_by is None`` —
+    conjunctive with everything above. ``sort`` is ``updated``/``created``
+    (descending), ``title`` (ascending), or ``priority`` (rank ascending —
+    ``high`` → ``normal`` → ``low`` → unprioritized, ``created`` ascending
+    within a rank; see :func:`_priority_rank` — a garbage/legacy value shares the
+    trailing rank with ``None`` rather than being dropped, R5's tolerant-read
+    half), tie-broken by path so the order is deterministic and identical on
+    both paths; ``limit`` caps the result (``None`` for unbounded). Shares the
+    ``--since``/tag/sort semantics with :func:`shards.core.notes.select_notes`.
 
     The returned views carry ``body=""`` — see :data:`shards.core.notes.MetaRow`.
     """
@@ -861,11 +931,19 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
             continue
         if spec.stale_cutoff is not None and task.updated >= spec.stale_cutoff:
             continue
+        if spec.available and (task.status != "open" or task.claimed_by is not None):
+            continue
         views.append(TaskView(task=task, body="", path=path))
 
     views.sort(key=lambda v: str(v.path))  # deterministic tie order under a stable sort
     if spec.sort == "title":
         views.sort(key=lambda v: v.task.title.lower())
+    elif spec.sort == "priority":
+        # Stable sort composition: created-ascending first, then rank-ascending
+        # over it, so ties within a rank land FIFO by ``created`` (and, beneath
+        # that, by the path order already applied above).
+        views.sort(key=lambda v: v.task.created)
+        views.sort(key=lambda v: _priority_rank(v.task.priority))
     else:
         views.sort(key=lambda v: getattr(v.task, spec.sort), reverse=True)
 
@@ -885,6 +963,7 @@ def list_tasks(
     project: str | None = None,
     since: str | None = None,
     stale: str | None = None,
+    available: bool = False,
     sort: str = "updated",
     limit: int | None = _DEFAULT_LIMIT,
 ) -> list[TaskView]:
@@ -907,6 +986,7 @@ def list_tasks(
             project=project,
             since=since,
             stale=stale,
+            available=available,
             sort=sort,
             limit=limit,
         ),

@@ -152,6 +152,54 @@ def test_create_task_priority_and_tags_stored(cfg: Config, vault: Path) -> None:
     assert task.tags == ["ndc", "flights"]
 
 
+# --------------------------------------------------------------------------- #
+# create_task / update_task (core) — priority write-boundary validation (R5)   #
+# --------------------------------------------------------------------------- #
+
+
+def test_create_task_invalid_priority_raises_valueerror(cfg: Config, vault: Path) -> None:
+    """A value outside high/normal/low is a validation failure (CLI exit 2)."""
+    with pytest.raises(ValueError):
+        create_task(cfg, "Ghost", priority="urgent")
+    # No file leaked before the raise.
+    assert list((vault / "tasks").rglob("t-*.md")) == []
+
+
+@pytest.mark.parametrize("priority", ["high", "normal", "low"])
+def test_create_task_accepts_every_vocabulary_value(
+    cfg: Config, vault: Path, priority: str
+) -> None:
+    task = create_task(cfg, f"Task {priority}", priority=priority)
+    assert task.priority == priority
+
+
+def test_update_task_invalid_priority_raises_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, priority="low")
+    before = _reload(path).metadata
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", priority="urgent")
+    after = _reload(path).metadata
+    assert after == before  # nothing written
+
+
+def test_update_task_invalid_priority_validated_before_lock(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An invalid priority is rejected before the entity lock is even taken."""
+    _seed_task(vault, priority="low")
+    seen: list[Path] = []
+    real = locks_mod.acquire
+
+    def spy(lock_path: Path):  # type: ignore[no-untyped-def]
+        seen.append(lock_path)
+        return real(lock_path)
+
+    monkeypatch.setattr(locks_mod, "acquire", spy)
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", priority="urgent")
+    assert seen == []
+
+
 def test_create_task_blocks_blocked_by_recorded_inert(cfg: Config, vault: Path) -> None:
     task = create_task(cfg, "Depends", blocks=["t-9xyz"], blocked_by=["t-1abc"])
     path = task_folder("open", vault) / f"{task.id}.md"
@@ -495,6 +543,26 @@ def test_cli_task_new_unknown_owner_exits_2(cfg: Config, vault: Path) -> None:
     assert list((vault / "tasks").rglob("t-*.md")) == []
 
 
+def test_cli_task_new_owner_empty_string_still_rejected(cfg: Config, vault: Path) -> None:
+    """R5: --available's takeable pool is defined by ``claimed_by``, never
+    ``owner`` — no unowned state is introduced, and ``--owner ""`` stays
+    rejected exactly as before this unit."""
+    result = _invoke(["task", "new", "Ghost", "--owner", ""])
+    assert result.exit_code == 2, result.output
+    assert list((vault / "tasks").rglob("t-*.md")) == []
+
+
+def test_cli_task_new_invalid_priority_exits_2_names_allowed_values(
+    cfg: Config, vault: Path
+) -> None:
+    result = _invoke(["task", "new", "Ghost", "--priority", "urgent"])
+    assert result.exit_code == 2, result.output
+    assert "high" in result.output
+    assert "normal" in result.output
+    assert "low" in result.output
+    assert list((vault / "tasks").rglob("t-*.md")) == []
+
+
 def test_cli_task_new_blocks_blocked_by_stored(cfg: Config, vault: Path) -> None:
     result = _invoke(
         ["--quiet", "task", "new", "Depends", "--blocks", "t-9xyz", "--blocked-by", "t-1abc"]
@@ -540,6 +608,20 @@ def test_cli_task_update_owner_reassigns(cfg: Config, vault: Path) -> None:
     result = _invoke(["task", "update", "t-c7d1", "--owner", "other-agent"])
     assert result.exit_code == 0, result.output
     assert _reload(path).metadata["owner"] == "other-agent"
+
+
+def test_cli_task_update_invalid_priority_exits_2_and_writes_nothing(
+    cfg: Config, vault: Path
+) -> None:
+    path = _seed_task(vault, task_id="t-c7d1", priority="low")
+    before = _reload(path).metadata
+    result = _invoke(["task", "update", "t-c7d1", "--priority", "urgent"])
+    assert result.exit_code == 2, result.output
+    assert "high" in result.output
+    assert "normal" in result.output
+    assert "low" in result.output
+    after = _reload(path).metadata
+    assert after == before  # nothing written
 
 
 def test_cli_task_update_unknown_owner_exits_2_and_writes_nothing(cfg: Config, vault: Path) -> None:

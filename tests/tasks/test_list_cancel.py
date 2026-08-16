@@ -359,6 +359,144 @@ def test_list_invalid_sort_raises(cfg: Config, vault: Path) -> None:
         list_tasks(cfg, sort="bogus")
 
 
+# --------------------------------------------------------------------------- #
+# list_tasks (core) — --sort priority (team-awareness/5)                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_list_sort_priority_orders_high_normal_low_unprioritized(cfg: Config, vault: Path) -> None:
+    base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    _seed_task(vault, task_id="t-low", priority="low", created=base, updated=base)
+    _seed_task(
+        vault, task_id="t-high", priority="high", created=base + timedelta(minutes=1), updated=base
+    )
+    _seed_task(
+        vault,
+        task_id="t-normal",
+        priority="normal",
+        created=base + timedelta(minutes=2),
+        updated=base,
+    )
+    _seed_task(
+        vault, task_id="t-none", priority=None, created=base + timedelta(minutes=3), updated=base
+    )
+    ids = [v.task.id for v in list_tasks(cfg, sort="priority")]
+    assert ids == ["t-high", "t-normal", "t-low", "t-none"]
+
+
+def test_list_sort_priority_ties_broken_by_created_ascending(cfg: Config, vault: Path) -> None:
+    """FIFO within a rank: the older task (by ``created``) sorts first."""
+    base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    _seed_task(
+        vault,
+        task_id="t-high-newer",
+        priority="high",
+        created=base + timedelta(days=1),
+        updated=base,
+    )
+    _seed_task(vault, task_id="t-high-older", priority="high", created=base, updated=base)
+    ids = [v.task.id for v in list_tasks(cfg, sort="priority")]
+    assert ids == ["t-high-older", "t-high-newer"]
+
+
+def test_list_task_with_garbage_priority_still_appears_and_sorts_last(
+    cfg: Config, vault: Path
+) -> None:
+    """The load-bearing tolerant-read guarantee (R5).
+
+    A pre-existing task whose ``priority`` is a free-form string outside the
+    write-boundary vocabulary must never make ``list_tasks`` skip the row — that
+    is exactly the silent-vanish failure the spec's tolerant-read decision exists
+    to prevent. It shares the trailing "unprioritized" rank with an absent
+    priority (tie-broken by ``created`` ascending, so the older legacy task
+    sorts first within that shared bucket) and its on-disk value is never
+    rewritten by a read.
+    """
+    base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    legacy_path = _seed_task(
+        vault, task_id="t-legacy", priority="urgent-ish", created=base, updated=base
+    )
+    _seed_task(
+        vault, task_id="t-high", priority="high", created=base + timedelta(minutes=1), updated=base
+    )
+    _seed_task(
+        vault, task_id="t-none", priority=None, created=base + timedelta(minutes=2), updated=base
+    )
+
+    before = _reload(legacy_path).metadata
+    ids = [v.task.id for v in list_tasks(cfg, sort="priority")]
+    after = _reload(legacy_path).metadata
+
+    assert "t-legacy" in ids  # never silently dropped
+    assert ids == ["t-high", "t-legacy", "t-none"]
+    assert after == before  # a read never mutates the file
+    assert after["priority"] == "urgent-ish"  # round-trips untouched
+
+
+# --------------------------------------------------------------------------- #
+# list_tasks (core) — --available (team-awareness/5)                           #
+# --------------------------------------------------------------------------- #
+
+
+def test_available_excludes_claimed_and_stale_claimed_by(cfg: Config, vault: Path) -> None:
+    """``--available`` = ``status == open and claimed_by is None``.
+
+    Excludes a genuinely claimed task *and* a hand-edited ``open`` file that
+    still carries a stale ``claimed_by`` — the difference from ``--status open``
+    the spec calls out.
+    """
+    _seed_task(vault, task_id="t-free", status="open", claimed_by=None, updated=_now())
+    _seed_task(
+        vault,
+        task_id="t-claimed",
+        status="claimed",
+        claimed_by="agent-a",
+        updated=_now() - timedelta(minutes=1),
+    )
+    _seed_task(
+        vault,
+        task_id="t-stale-open",
+        status="open",
+        claimed_by="agent-b",
+        updated=_now() - timedelta(minutes=2),
+    )
+    _seed_task(vault, task_id="t-done", status="done", updated=_now() - timedelta(minutes=3))
+    ids = {v.task.id for v in list_tasks(cfg, available=True)}
+    assert ids == {"t-free"}
+
+
+def test_available_is_independent_of_owner(cfg: Config, vault: Path) -> None:
+    """The takeable pool is defined by ``claimed_by``, not ``owner`` — no
+    unowned state exists, and ``--available`` never filters on identity."""
+    _seed_task(vault, task_id="t-a", owner="alice", status="open", updated=_now())
+    _seed_task(
+        vault, task_id="t-b", owner="bob", status="open", updated=_now() - timedelta(minutes=1)
+    )
+    ids = {v.task.id for v in list_tasks(cfg, available=True)}
+    assert ids == {"t-a", "t-b"}
+
+
+def test_available_composes_with_other_filters(cfg: Config, vault: Path) -> None:
+    """``--available`` is conjunctive, exactly like every other filter."""
+    _seed_task(vault, task_id="t-tagged", status="open", tags=["urgent"], updated=_now())
+    _seed_task(vault, task_id="t-untagged", status="open", updated=_now() - timedelta(minutes=1))
+    _seed_task(
+        vault,
+        task_id="t-tagged-claimed",
+        status="claimed",
+        claimed_by="agent-a",
+        tags=["urgent"],
+        updated=_now() - timedelta(minutes=2),
+    )
+    ids = {v.task.id for v in list_tasks(cfg, available=True, tags=["urgent"])}
+    assert ids == {"t-tagged"}
+
+
+def test_available_default_when_no_takeable_work(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-claimed", status="claimed", claimed_by="agent-a")
+    assert list_tasks(cfg, available=True) == []
+
+
 def test_list_limit_caps_results(cfg: Config, vault: Path) -> None:
     for i in range(5):
         _seed_task(vault, task_id=f"t-{i:02d}", updated=_now() - timedelta(minutes=i))
@@ -622,6 +760,76 @@ def test_cli_list_invalid_stale_exits_2(cfg: Config, vault: Path) -> None:
     result = _invoke(["task", "list", "--stale", "bogus"])
     assert result.exit_code == 2, result.output
     assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------- #
+# CLI — shards task list --available (team-awareness/5)                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_list_available_excludes_claimed(cfg: Config, vault: Path) -> None:
+    _seed_task(vault, task_id="t-free", status="open", updated=_now())
+    _seed_task(
+        vault,
+        task_id="t-claimed",
+        status="claimed",
+        claimed_by="agent-a",
+        updated=_now() - timedelta(minutes=1),
+    )
+    result = _invoke(["--quiet", "task", "list", "--available"])
+    assert result.exit_code == 0, result.output
+    assert result.output.split() == ["t-free"]
+
+
+def test_cli_list_available_excludes_stale_claimed_by_on_open_status(
+    cfg: Config, vault: Path
+) -> None:
+    _seed_task(vault, task_id="t-free", status="open", updated=_now())
+    _seed_task(
+        vault,
+        task_id="t-stale",
+        status="open",
+        claimed_by="agent-b",
+        updated=_now() - timedelta(minutes=1),
+    )
+    result = _invoke(["--quiet", "task", "list", "--available"])
+    assert result.output.split() == ["t-free"]
+
+
+def test_cli_list_available_defaults_to_priority_sort(cfg: Config, vault: Path) -> None:
+    base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    _seed_task(vault, task_id="t-low", status="open", priority="low", created=base, updated=base)
+    _seed_task(
+        vault,
+        task_id="t-high",
+        status="open",
+        priority="high",
+        created=base + timedelta(minutes=1),
+        updated=base,
+    )
+    result = _invoke(["--quiet", "task", "list", "--available"])
+    assert result.exit_code == 0, result.output
+    assert result.output.split() == ["t-high", "t-low"]
+
+
+def test_cli_list_available_explicit_sort_overrides_the_priority_default(
+    cfg: Config, vault: Path
+) -> None:
+    _seed_task(
+        vault, task_id="t-old", status="open", priority="low", updated=_now() - timedelta(minutes=5)
+    )
+    _seed_task(vault, task_id="t-new", status="open", priority="high", updated=_now())
+    result = _invoke(["--quiet", "task", "list", "--available", "--sort", "updated"])
+    assert result.exit_code == 0, result.output
+    assert result.output.split() == ["t-new", "t-old"]
+
+
+def test_cli_list_available_composes_with_status_filter(cfg: Config, vault: Path) -> None:
+    """``--available`` and ``--status`` are conjunctive, like every other filter pair."""
+    _seed_task(vault, task_id="t-open", status="open", updated=_now())
+    _seed_task(vault, task_id="t-done", status="done", updated=_now() - timedelta(minutes=1))
+    result = _invoke(["--quiet", "task", "list", "--available", "--status", "open"])
+    assert result.output.split() == ["t-open"]
 
 
 # --------------------------------------------------------------------------- #

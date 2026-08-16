@@ -323,7 +323,16 @@ def list_command(
         "--stale",
         help="Recency ceiling: not updated within <dur> (2d) — the inverse of --since.",
     ),
-    sort: str = typer.Option("updated", "--sort", help="updated | created | title."),
+    available: bool = typer.Option(
+        False,
+        "--available",
+        help="Only takeable work: status open and unclaimed (defaults --sort to priority).",
+    ),
+    sort: str | None = typer.Option(
+        None,
+        "--sort",
+        help="updated | created | title | priority (default: updated, or priority with --available).",
+    ),
     limit: int = typer.Option(20, "--limit", help="Cap the number of results."),
 ) -> None:
     """List shards tasks (open and done) with filters, sort and limit."""
@@ -331,6 +340,9 @@ def list_command(
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     # Honour --mine whether it lands on this command or as a global flag.
     mine_flag = mine or getattr(ctx.obj, "mine", False)
+    # --available's default order is priority — but only when the caller did not
+    # ask for a specific --sort themselves.
+    sort_field = sort if sort is not None else ("priority" if available else "updated")
     with cli_errors():
         # Served from the daemon's warm index when it is up, from the identical
         # on-disk walk when it is down — one predicate, either way.
@@ -344,7 +356,8 @@ def list_command(
             project=project,
             since=since,
             stale=stale,
-            sort=sort,
+            available=available,
+            sort=sort_field,
             limit=limit,
         )
 

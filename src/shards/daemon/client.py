@@ -313,6 +313,7 @@ class DaemonClient:
         project: str | None = None,
         since: str | None = None,
         stale: str | None = None,
+        available: bool = False,
         sort: str = "updated",
         limit: int | None = None,
     ) -> list[TaskView]:
@@ -322,9 +323,11 @@ class DaemonClient:
         here and travels with the request, because the daemon's own configured
         identity is not the calling agent's. ``status`` accepts a comma-separated
         set (team-awareness/4); ``stale`` is the inverse of ``since`` over the
-        same ``updated`` field — see :class:`~shards.core.tasks.TaskFilter` for
-        the exact semantics, built once here so both the warm request and the
-        on-disk fallback validate identically before any socket call.
+        same ``updated`` field; ``available`` is the single takeable-work filter
+        and ``sort`` accepts ``"priority"`` (team-awareness/5) — see
+        :class:`~shards.core.tasks.TaskFilter` for the exact semantics, built once
+        here so both the warm request and the on-disk fallback validate
+        identically before any socket call.
         """
         spec = TaskFilter.build(
             config,
@@ -336,6 +339,7 @@ class DaemonClient:
             project=project,
             since=since,
             stale=stale,
+            available=available,
             sort=sort,
             limit=limit,
         )
@@ -351,6 +355,7 @@ class DaemonClient:
                 project=project,
                 since=since,
                 stale=stale,
+                available=available,
                 sort=sort,
                 limit=limit,
             )

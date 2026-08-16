@@ -94,6 +94,33 @@ def test_task_status_accepts_all_lifecycle_values(status: str) -> None:
     assert task.status == status
 
 
+def test_task_priority_accepts_free_form_value() -> None:
+    """R5 tolerant read: ``priority`` stays ``str | None`` — no strict ``Literal``.
+
+    ``list_tasks``/``select_tasks`` skip any row that fails ``Task.model_validate``,
+    so a legacy value outside the ``high``/``normal``/``low`` write-boundary
+    vocabulary must still validate here, or every listing containing that task
+    would silently drop it (the spec's rejected-design failure mode).
+    """
+    task = Task.model_validate(
+        {
+            "id": "t-c7d1",
+            "title": "x",
+            "created": _now(),
+            "updated": _now(),
+            "priority": "urgent-ish",
+        }
+    )
+    assert task.priority == "urgent-ish"
+
+
+def test_task_priority_accepts_none() -> None:
+    task = Task.model_validate(
+        {"id": "t-c7d1", "title": "x", "created": _now(), "updated": _now(), "priority": None}
+    )
+    assert task.priority is None
+
+
 def test_task_unknown_keys_round_trip_unchanged() -> None:
     payload = {
         "id": "t-c7d1",

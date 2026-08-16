@@ -114,6 +114,7 @@ def _task_meta(
     title: str,
     *,
     status: str = "open",
+    priority: str | None = None,
     tags: list[str] | None = None,
     owner: str = _AGENT,
     claimed_by: str | None = None,
@@ -123,7 +124,7 @@ def _task_meta(
     return {
         **_note_meta(task_id, title, note_type="task", tags=tags, owner=owner, age_days=age_days),
         "status": status,
-        "priority": None,
+        "priority": priority,
         "claimed_by": claimed_by,
         "project": project,
         "blocks": [],
@@ -137,6 +138,7 @@ def _task(
     task_id: str,
     title: str,
     status: str = "open",
+    priority: str | None = None,
     tags: list[str] | None = None,
     owner: str = _AGENT,
     claimed_by: str | None = None,
@@ -148,6 +150,7 @@ def _task(
         task_id,
         title,
         status=status,
+        priority=priority,
         tags=tags,
         owner=owner,
         claimed_by=claimed_by,
@@ -188,9 +191,15 @@ def seeded_vault(vault: Path) -> Path:
     )
     _note(vault, note_id="n-proj", title="Proj", note_type="project", sub="notes/projects")
 
-    _task(vault, task_id="t-open", title="Open One", tags=["a"], project="n-proj")
+    _task(vault, task_id="t-open", title="Open One", priority="high", tags=["a"], project="n-proj")
     _task(
-        vault, task_id="t-claim", title="Claimed", status="claimed", owner=_OTHER, claimed_by=_AGENT
+        vault,
+        task_id="t-claim",
+        title="Claimed",
+        status="claimed",
+        priority="low",
+        owner=_OTHER,
+        claimed_by=_AGENT,
     )
     _task(
         vault,
@@ -296,6 +305,10 @@ def _read_matrix(client: DaemonClient, cfg: Config) -> dict[str, Any]:
             client.task_list(cfg, since="60d", stale="7d", limit=None), "task"
         ),
         "task.list/title-limit": _rows(client.task_list(cfg, sort="title", limit=2), "task"),
+        "task.list/priority-sort": _rows(
+            client.task_list(cfg, sort="priority", limit=None), "task"
+        ),
+        "task.list/available": _rows(client.task_list(cfg, available=True, limit=None), "task"),
         "tag_pull/all": [_hit(h) for h in client.tag_pull(cfg, limit=-1)],
         "tag_pull/tag": [_hit(h) for h in client.tag_pull(cfg, tags=["shared"], limit=-1)],
         "tag_pull/type": [_hit(h) for h in client.tag_pull(cfg, type_filter="task", limit=-1)],
@@ -392,6 +405,20 @@ def test_task_list_status_csv_and_stale(reads: DaemonClient, cfg: Config) -> Non
     }
     # Combined: the band between 7 and 60 days ago also isolates ``t-done``.
     assert _ids(reads.task_list(cfg, since="60d", stale="7d", limit=None), "task") == ["t-done"]
+
+
+def test_task_list_priority_sort_and_available(reads: DaemonClient, cfg: Config) -> None:
+    """team-awareness/5: priority rank ascending; --available excludes claimed work.
+
+    ``t-open`` (``high``) ranks first, ``t-claim`` (``low``, but ``claimed``) next,
+    ``t-done`` (no priority) last — and only ``t-open`` is genuinely takeable.
+    """
+    assert _ids(reads.task_list(cfg, sort="priority", limit=None), "task") == [
+        "t-open",
+        "t-claim",
+        "t-done",
+    ]
+    assert _ids(reads.task_list(cfg, available=True, limit=None), "task") == ["t-open"]
 
 
 def test_task_list_default_limit_is_unbounded_only_when_asked(
@@ -765,6 +792,8 @@ _CLI_READS: tuple[tuple[str, ...], ...] = (
     ("--json", "task", "list", "--mine", "--sort", "title"),
     ("--json", "task", "list", "--status", "open,claimed"),
     ("--json", "task", "list", "--stale", "7d"),
+    ("--json", "task", "list", "--sort", "priority"),
+    ("--json", "task", "list", "--available"),
     ("task", "list"),  # human text rows (id/status/claimed_by/title)
     ("--json", "status"),
     ("search", "--tags", "shared"),
