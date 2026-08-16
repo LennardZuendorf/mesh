@@ -26,6 +26,8 @@ from typing import Any, get_args
 import pytest
 
 import shards.mcp.server as server
+from shards.core.context import _DIRECTIONS
+from shards.core.tasks import _PRIORITY_VALUES
 from shards.schemas.note import NoteType
 from shards.schemas.task import TaskStatus
 
@@ -118,6 +120,37 @@ def test_search_status_schema_enum_matches_task_status_domain() -> None:
     enum = _schema_enum(schema)
     assert enum is not None, "shards_search.status carries no enum"
     assert set(enum) == set(get_args(TaskStatus))
+
+
+def test_task_priority_schema_enum_matches_domain() -> None:
+    """``priority`` (review round 2, Finding 1): the *schema* field
+    (``schemas/task.py::Task.priority``) stays ``str | None`` deliberately —
+    tolerant of legacy free-form values already on disk (see
+    ``core/tasks.py``'s module docstring) — but the *write* boundary
+    (``create_task``/``update_task`` via ``_validate_priority``) already hard-
+    rejects anything outside ``_PRIORITY_VALUES``, exactly the closed
+    vocabulary a ``Literal`` enforces. There is no public schema-owned type for
+    this (unlike ``NoteType``/``TaskStatus``), so the tool's hand-typed
+    ``Literal`` is pinned directly against the private write-boundary tuple
+    that already enforces the same values, rather than re-derived
+    independently — the same anti-drift shape ``get_args(...)`` gives the
+    schema-owned enums above."""
+    for tool_name in ("shards_task_new", "shards_task_update"):
+        schema = _registered()[tool_name].parameters["properties"]["priority"]
+        enum = _schema_enum(schema)
+        assert enum is not None, f"{tool_name}.priority carries no enum"
+        assert set(enum) == set(_PRIORITY_VALUES)
+
+
+def test_graph_direction_schema_enum_matches_domain() -> None:
+    """``direction`` (review round 2, optional fix taken): a genuinely
+    unambiguous 3-value private tuple (``core/context.py::_DIRECTIONS``) used
+    only by ``graph_query`` — unlike ``sort``, which differs in arity between
+    notes (3 values) and tasks (4 values) and stays untyped for that reason."""
+    schema = _registered()["shards_graph"].parameters["properties"]["direction"]
+    enum = _schema_enum(schema)
+    assert enum is not None, "shards_graph.direction carries no enum"
+    assert set(enum) == set(_DIRECTIONS)
 
 
 def test_task_list_status_stays_a_csv_string_not_a_single_literal() -> None:

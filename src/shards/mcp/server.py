@@ -51,7 +51,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import wraps
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -512,12 +512,12 @@ def shards_graph(
         ),
     ] = 1,
     direction: Annotated[
-        str,
+        Literal["out", "in", "both"],
         Field(
             description=(
-                "'out' (forward related links, the default), 'in' (who links to this "
-                "node — backlinks/notify), or 'both'. 'in'/'both' additionally scan the "
-                "whole vault once to build the backlink index."
+                "'out' (forward related links) — 'in' (who links to this node — "
+                "backlinks/notify) and 'both' additionally scan the whole vault once "
+                "to build the backlink index."
             )
         ),
     ] = "out",
@@ -722,8 +722,8 @@ def shards_task_new(
         ),
     ],
     priority: Annotated[
-        str | None,
-        Field(description="One of high/normal/low; any other value is rejected."),
+        Literal["high", "normal", "low"] | None,
+        Field(description="Sort weight; unset ranks last under sort='priority'."),
     ] = None,
     tags: Annotated[list[str] | None, Field(description="Initial tag list.")] = None,
     owner: Annotated[
@@ -925,8 +925,8 @@ def shards_task_finish(
 def shards_task_update(
     task_id: Annotated[str, Field(description="Task id (t-...) to update.")],
     priority: Annotated[
-        str | None,
-        Field(description="One of high/normal/low; any other value is rejected."),
+        Literal["high", "normal", "low"] | None,
+        Field(description="Sort weight; unset ranks last under sort='priority'."),
     ] = None,
     tags: Annotated[
         str | None,
@@ -1040,12 +1040,17 @@ def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
     Same exception families, same catch order, same one-line messages as the CLI
     mapper (``shards.cli._errors.cli_errors``): ``ShardsError`` (``LockError``
     included) first, then a bare ``ValueError`` (also covers msgspec's
-    ``ValidationError``, a ``ValueError`` subclass — e.g. an unknown owner, an
-    invalid task ``priority``, an unknown token in a ``status`` CSV filter, or
-    an invalid ``sort`` field; ``note_type``/task ``status`` themselves are now
-    schema-enum-typed — agent-usability/2 — so an out-of-vocabulary value there
-    never reaches this wrapper, rejected instead by FastMCP's own argument
-    validation before the tool body runs), then any other ``OSError``. MCP has no
+    ``ValidationError``, a ``ValueError`` subclass — e.g. an unknown owner or an
+    unknown token in a ``status`` CSV filter; ``note_type``, task ``status``,
+    task ``priority``, and ``shards_graph``'s ``direction`` are all now
+    schema-enum-typed (agent-usability/2 — ``priority``/``direction`` joined
+    ``note_type``/``status`` in round 2, closing the same gap for the same
+    reason), so an out-of-vocabulary value for any of those never reaches this
+    wrapper, rejected instead by FastMCP's own argument validation before the
+    tool body runs; ``sort`` stays an un-typed ``str`` — see the ``sort``
+    parameter descriptions for why — so an invalid ``sort`` field is still the
+    one filter-vocabulary ``ValueError`` that does land here), then any other
+    ``OSError``. MCP has no
     process exit code to map to, so each branch raises a clean
     ``fastmcp.exceptions.ToolError`` instead of letting FastMCP's own generic
     catch-all re-wrap an arbitrary traceback string. The full structured-error
