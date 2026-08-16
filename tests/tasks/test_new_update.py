@@ -385,6 +385,16 @@ def test_update_task_tags_roundtrips_unknown_keys(cfg: Config, vault: Path) -> N
     assert meta["tags"] == ["infra", "urgent", "q3"]
 
 
+def test_update_task_tags_mixed_spec_raises_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    """End to end through update_task: a mixed spec is rejected before the
+    write, not written as a garbage literal tag."""
+    path = _seed_task(vault, tags=["ndc", "stale"])
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="ambiguous tag spec"):
+        update_task(cfg, "t-seed", tags="+x,y")
+    assert path.read_text(encoding="utf-8") == before  # untouched
+
+
 def test_update_task_not_found_raises(cfg: Config, vault: Path) -> None:
     _seed_task(vault)
     with pytest.raises(TaskNotFoundError):

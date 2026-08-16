@@ -364,15 +364,26 @@ def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
     1. A leading ``=`` replaces the whole list: ``=x,y`` sets the tags to
        exactly ``[x, y]``; a bare ``=`` clears them. This is the **only** path
        that replaces — the explicit opt-in agent-usability/3 requires.
-    2. ``+x,-y`` (every token prefixed ``+``/``-``) is a delta: add ``x``,
-       remove ``y``. Adding a tag already present, or removing one that is
-       absent, is a no-op.
-    3. Anything else — a bare comma list with no prefixes — is **additive**:
-       each named tag is appended if missing, existing tags are left alone.
-       (Before agent-usability/3 this form replaced the whole list; that was
-       the silent-wipe bug this contract exists to kill.)
+    2. ``+x,-y`` (every token's *first character* is ``+``/``-``) is a delta:
+       add ``x``, remove ``y``. Adding a tag already present, or removing one
+       that is absent, is a no-op. Only the leading character counts as a
+       prefix — a tag whose name merely contains ``+``/``-`` (``c++``,
+       ``sci-fi``) is untouched by this rule as long as it doesn't *start*
+       with one.
+    3. A bare comma list — no token's first character is ``+``/``-`` — is
+       **additive**: each named tag is appended if missing, existing tags are
+       left alone. (Before agent-usability/3 this form replaced the whole
+       list; that was the silent-wipe bug this contract exists to kill.)
 
-    All three forms dedupe while preserving order.
+    A spec that *mixes* prefixed and unprefixed tokens (some tokens start with
+    ``+``/``-``, others don't, and there's no leading ``=``) is rejected with
+    ``ValueError`` rather than guessed at — silently falling through to the
+    additive branch used to write the literal token (e.g. ``"+x"``) into the
+    vault as permanent garbage. Round-tripping that ambiguity to the caller as
+    an error (CLI exit 2 via :func:`shards.cli._errors.cli_errors`, an MCP
+    tool error via ``_guarded``) is cheaper than corrupting a tag list.
+
+    All non-error forms dedupe while preserving order.
     """
     stripped = spec.strip()
     if stripped.startswith("="):
@@ -384,7 +395,14 @@ def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
         return result
 
     tokens = [t.strip() for t in spec.split(",") if t.strip()]
-    is_delta = bool(tokens) and all(t[0] in "+-" for t in tokens)
+    prefixed = [t[0] in "+-" for t in tokens]
+    is_delta = bool(tokens) and all(prefixed)
+    if tokens and any(prefixed) and not is_delta:
+        raise ValueError(
+            f"ambiguous tag spec {spec!r}: mixes prefixed (+/-) and unprefixed "
+            "tokens with no leading '='. Use '+x,-y' (delta), a bare 'x,y' "
+            "(additive), or '=x,y' (explicit replace) — not a mix of them."
+        )
     if is_delta:
         result = list(existing)
         for token in tokens:

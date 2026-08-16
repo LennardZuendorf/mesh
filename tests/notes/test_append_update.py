@@ -131,6 +131,64 @@ def test_apply_tag_spec_only_explicit_replace_path_replaces() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# apply_tag_spec — mixed-prefix boundary (fix round 1)                         #
+# --------------------------------------------------------------------------- #
+#
+# A partially-prefixed spec (some tokens start with +/-, some don't, no
+# leading "=") used to fall through to the additive branch and write a
+# literal "+x" tag into the vault as permanent garbage. It now raises
+# ValueError instead of guessing. Four boundary cases must NOT raise (all-
+# delta, all-additive, explicit-replace, and a tag merely containing +/- mid-
+# string), and two mixed forms must raise.
+
+
+def test_apply_tag_spec_all_prefixed_is_still_delta_not_rejected() -> None:
+    assert apply_tag_spec(["a", "y"], "+x,-y") == ["a", "x"]
+
+
+def test_apply_tag_spec_all_unprefixed_is_still_additive_not_rejected() -> None:
+    assert apply_tag_spec(["a"], "x,y") == ["a", "x", "y"]
+
+
+def test_apply_tag_spec_leading_equals_is_still_explicit_replace_not_rejected() -> None:
+    assert apply_tag_spec(["a", "b"], "=x,y") == ["x", "y"]
+
+
+def test_apply_tag_spec_mid_string_plus_minus_is_not_a_prefix_not_rejected() -> None:
+    """Only a token's *first* character counts as a prefix — a legitimate tag
+    name containing '+'/'-' anywhere else is never mistaken for one."""
+    assert apply_tag_spec(["a"], "c++") == ["a", "c++"]
+    assert apply_tag_spec(["a"], "sci-fi") == ["a", "sci-fi"]
+    # Alongside an unprefixed token, both stay additive — no mix detected,
+    # because neither token's first character is +/-.
+    assert apply_tag_spec(["a"], "c++,sci-fi") == ["a", "c++", "sci-fi"]
+
+
+def test_apply_tag_spec_mixed_leading_plus_then_bare_raises() -> None:
+    with pytest.raises(ValueError, match="ambiguous tag spec"):
+        apply_tag_spec(["a", "b"], "+x,y")
+
+
+def test_apply_tag_spec_mixed_bare_then_leading_minus_raises() -> None:
+    with pytest.raises(ValueError, match="ambiguous tag spec"):
+        apply_tag_spec(["a", "b"], "x,-y")
+
+
+def test_apply_tag_spec_mixed_error_names_offending_spec() -> None:
+    with pytest.raises(ValueError, match=r"\+x,y"):
+        apply_tag_spec(["a", "b"], "+x,y")
+
+
+def test_apply_tag_spec_mixed_spec_does_not_mutate_existing() -> None:
+    """The rejection happens before any list is built — a caller retrying with
+    a valid spec sees the original, untouched list."""
+    existing = ["a", "b"]
+    with pytest.raises(ValueError):
+        apply_tag_spec(existing, "+x,y")
+    assert existing == ["a", "b"]
+
+
+# --------------------------------------------------------------------------- #
 # append_note (core)                                                            #
 # --------------------------------------------------------------------------- #
 
@@ -438,6 +496,16 @@ def test_update_tags_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
     assert meta["tolaria_pinned"] is True
     assert meta["custom_ref"] == "PROJ-1"
     assert meta["tags"] == ["infra", "urgent", "q3"]
+
+
+def test_update_tags_mixed_spec_raises_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    """End to end through update_note: a mixed spec is rejected before the
+    write, not written as a garbage literal tag."""
+    path = _seed_note(vault, tags=["ndc", "stale"])
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="ambiguous tag spec"):
+        update_note(cfg, "n-seed", tags="+x,y")
+    assert path.read_text(encoding="utf-8") == before  # untouched
 
 
 def test_update_type_moves_file(cfg: Config, vault: Path) -> None:

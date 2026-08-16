@@ -179,3 +179,60 @@ def test_mcp_note_update_explicit_replace_only_path_that_replaces(cfg: Config, v
         server.app.call_tool("shards_note_update", {"target": note_id, "tags": "=y,z"})
     )
     assert dispatched.structured_content["tags"] == ["y", "z"]
+
+
+# --------------------------------------------------------------------------- #
+# Mixed-prefix spec — rejected, not silently written as a garbage tag         #
+# (fix round 1: "+x,y" used to fall through to additive and write a literal   #
+# "+x" tag into the vault permanently)                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_mcp_note_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, vault: Path) -> None:
+    from fastmcp.exceptions import ToolError
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_note_new", {"title": "Mixed Spec Note", "tags": ["ndc"]})
+    )
+    note_id = dispatched.structured_content["id"]
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(server.app.call_tool("shards_note_update", {"target": note_id, "tags": "+x,y"}))
+    assert "ambiguous tag spec" in str(exc_info.value)
+    assert "Traceback" not in str(exc_info.value)
+
+    # Rejected before any write — the tag list is untouched.
+    dispatched = asyncio.run(server.app.call_tool("shards_note_get", {"id": note_id}))
+    assert dispatched.structured_content["tags"] == ["ndc"]
+
+
+def test_mcp_task_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, vault: Path) -> None:
+    from fastmcp.exceptions import ToolError
+
+    dispatched = asyncio.run(
+        server.app.call_tool("shards_task_new", {"title": "Mixed Spec Task", "tags": ["ndc"]})
+    )
+    task_id = dispatched.structured_content["id"]
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(
+            server.app.call_tool("shards_task_update", {"task_id": task_id, "tags": "+x,y"})
+        )
+    assert "ambiguous tag spec" in str(exc_info.value)
+
+
+def test_cli_note_update_mixed_spec_exits_2_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    from typer.testing import CliRunner
+
+    from shards.cli.__main__ import app as cli_app
+    from shards.core.notes import create_note
+
+    note = create_note(cfg, "Mixed Spec CLI Note", tags=["ndc"], body="x")
+    result = CliRunner().invoke(cli_app, ["note", "update", note.id, "--tags", "+x,y"])
+
+    assert result.exit_code == 2
+    assert "ambiguous tag spec" in result.output
+
+    from shards.core.notes import get_note
+
+    assert get_note(cfg, note.id).note.tags == ["ndc"]
