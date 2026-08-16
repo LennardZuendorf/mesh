@@ -32,16 +32,16 @@ the whole-feature level, not by unit edges:
 
 | ID | Requirement | Unit | Status |
 |---|---|---|---|
-| R1 | [Inbound awareness](product.md#requirement-inbound-awareness) | team-awareness/1 | NOT STARTED |
-| R2 | [A task body MUST be appendable](product.md#requirement-a-task-body-must-be-appendable) | team-awareness/2 | NOT STARTED |
-| R3 | [A claim MUST be releasable](product.md#requirement-a-claim-must-be-releasable) | team-awareness/3 | NOT STARTED |
-| R4 | [Abandoned and live work MUST be findable](product.md#requirement-abandoned-and-live-work-must-be-findable) | team-awareness/4 | NOT STARTED |
-| R5 | [Available work MUST be orderable](product.md#requirement-available-work-must-be-orderable) | team-awareness/5 | NOT STARTED |
-| R6 | [Activity rows MUST carry identity](product.md#requirement-activity-rows-must-carry-identity) | team-awareness/6 | NOT STARTED |
-| R7 | [`session-start` MUST be able to see the team](product.md#requirement-session-start-must-be-able-to-see-the-team) | team-awareness/7 | NOT STARTED |
-| R8 | [Edits MUST be attributable](product.md#requirement-edits-must-be-attributable) | team-awareness/8 | NOT STARTED |
-| R9 | [Duplicate titles MUST warn at creation](product.md#requirement-duplicate-titles-must-warn-at-creation) | team-awareness/9 | NOT STARTED |
-| R10 | [MCP parity](product.md#requirement-mcp-parity) | team-awareness/10 | NOT STARTED |
+| R1 | [Inbound awareness](product.md#requirement-inbound-awareness) | team-awareness/1 | DONE |
+| R2 | [A task body MUST be appendable](product.md#requirement-a-task-body-must-be-appendable) | team-awareness/2 | DONE |
+| R3 | [A claim MUST be releasable](product.md#requirement-a-claim-must-be-releasable) | team-awareness/3 | DONE |
+| R4 | [Abandoned and live work MUST be findable](product.md#requirement-abandoned-and-live-work-must-be-findable) | team-awareness/4 | DONE |
+| R5 | [Available work MUST be orderable](product.md#requirement-available-work-must-be-orderable) | team-awareness/5 | DONE |
+| R6 | [Activity rows MUST carry identity](product.md#requirement-activity-rows-must-carry-identity) | team-awareness/6 | DONE |
+| R7 | [`session-start` MUST be able to see the team](product.md#requirement-session-start-must-be-able-to-see-the-team) | team-awareness/7 | DONE |
+| R8 | [Edits MUST be attributable](product.md#requirement-edits-must-be-attributable) | team-awareness/8 | DONE |
+| R9 | [Duplicate titles MUST warn at creation](product.md#requirement-duplicate-titles-must-warn-at-creation) | team-awareness/9 | DONE |
+| R10 | [MCP parity](product.md#requirement-mcp-parity) | team-awareness/10 | DONE |
 
 ---
 

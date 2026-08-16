@@ -493,9 +493,15 @@ user approval.
 
 1. **Is `build-context` removable?** Product call, not technical — it is a shipped lens in root
    product.md. Recommendation: remove; `graph`'s JSON strictly contains it. Blocked on the
-   gated root edit.
+   gated root edit. **Still open** — see § Root follow-ups.
 2. **Does core-hardening/8 land before or after the sibling tracks?** It touches
    `cli/__main__.py` and `cli/session.py`, which agent-usability and team-awareness also edit.
    Recommendation: last, to avoid a three-way merge on files two other branches are rewriting.
+   **Moot as of this unit** — per § Progress, both sibling tracks (team-awareness,
+   agent-usability) are fully DONE, so unit 8 lands after them by construction; no merge risk
+   remains to sequence around.
 3. **Coverage floor value.** Set at the post-unit-6 measurement, not at today's 93%.
    Recommendation: floor at the measured number minus 1 point, ratcheted upward only.
+   **Settled in core-hardening/7** (`1efaee0`) — `pyproject.toml`'s
+   `[tool.coverage.report] fail_under = 97`, ~1.2 points below the measured 98.17–98.20%,
+   exactly per this recommendation.
