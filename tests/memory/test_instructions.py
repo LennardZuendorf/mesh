@@ -115,9 +115,12 @@ def test_recall_section_does_not_promise_hybrid_when_disabled() -> None:
     hybrid_on = build_instructions(_config(hybrid=True))
     recall_on = hybrid_on.split("## Recall", 1)[1].split("##", 1)[0]
     # Even when hybrid *is* configured, the block must not promise it actually
-    # ran — indexed/the daemon can still be down at call time and nothing in a
-    # result says which path answered.
+    # ran — indexed/the daemon can still be down at call time. As of
+    # agent-usability/4 a caller *can* check (shards_health, or a hit's mode
+    # field) — the block must point there rather than re-claim the old "no way
+    # to tell" gap.
     assert "degrades" in recall_on.lower() or "silently" in recall_on.lower()
+    assert "shards_health" in recall_on
 
 
 # --------------------------------------------------------------------------- #
