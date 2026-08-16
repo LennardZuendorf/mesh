@@ -3,7 +3,7 @@ type: feature-tech
 feature: agent-usability
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 # Feature: Agent Usability — Architecture
@@ -170,7 +170,7 @@ contract; do not spec their refactor.
 | Flag | Contract |
 |---|---|
 | `--json` / `--quiet` | Accepted **before or after** any command name, on every non-admin command, with identical effect. Today the lens commands coalesce both sides (`cli/session.py:72-81`) while the note/task leaves read `ctx.obj` only (`cli/task.py:264-278`) — so `shards task list --json` exits 2 ("No such option") while `shards recent-activity --json` works. |
-| `--owner` | One meaning: the identity this invocation acts as. Either honoured wherever an owner is written or filtered, or not accepted at all. `shards --owner agent-b note new` writing `owner: agent-a` is the bug. (Not an auth boundary — `AGENTS.md` § 6.) |
+| `--owner` | One meaning: the identity this invocation acts as. **Decision (settled in unit 6):** honoured per role, not a single global-vs-narrowed binary — **write-on-creation** (`note new`/`task new`: defaults the written `owner` when no local `--owner` is given) and **filter** (`note list`/`task list`/`search`) both coalesce the global flag; **identity resolution** (`task claim`/`task release`/`session-start`) already read it and are unchanged. **Not** coalesced into `task update`'s opt-in reassignment `--owner` — an update only changes what is explicitly asked, and folding the ambient global identity into an unrelated `--priority`/`--tags` update would silently reassign accountability nobody asked to change (the same non-destructive-default precedent as the tag-mutation decision above); an explicit *local* `--owner` on `task update` still reassigns. A local `--owner` always wins over the global one wherever both exist. `shards --owner agent-b note new` writing `owner: agent-a` was the bug this closes. (Not an auth boundary — `AGENTS.md` § 6.) |
 | `--mine` | Unchanged: owner-or-`claimed_by` equals the resolved identity. |
 
 The contract is a *test* obligation, not just prose: a parametrised test walks the command table

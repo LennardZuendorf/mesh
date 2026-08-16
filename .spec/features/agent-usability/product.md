@@ -3,7 +3,7 @@ type: feature-product
 feature: agent-usability
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 
 # Feature: Agent Usability — Product
@@ -269,7 +269,11 @@ A new operator or agent SHALL reach a working shards install without reading sou
    [tech.md](tech.md) § Tag mutation; the product requirement only fixes "no silent wipe".
 2. **Is `--owner` honoured or narrowed?** Honouring it globally makes identity spoofable per
    command (already true locally, per `AGENTS.md` § 6); narrowing it to the two commands that use
-   it is smaller but loses a legitimate multi-agent-on-one-shell workflow.
+   it is smaller but loses a legitimate multi-agent-on-one-shell workflow. Decision recorded in
+   [tech.md](tech.md) § Flag contract: honoured per role rather than either extreme — write-on-
+   creation and filter commands coalesce it, identity-resolution commands already did, and it is
+   deliberately *not* coalesced into `task update`'s opt-in reassignment `--owner` (same
+   non-destructive-default reasoning as Open Question 1).
 3. **Does the plugin bundle a `SessionStart` hook?** `hooks/session_start.json` exists un-wired;
    wiring it into the plugin gives every session a warm start but assumes the daemon and config
    are already up on a cold machine.
