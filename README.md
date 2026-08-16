@@ -174,6 +174,29 @@ or, once installed outside a `uv` project, simply `"command": "shards-mcp"`.
 
 On connect, the server sends an `instructions` block built from your live config — your
 resolved identity, valid-owner roster, vault path, and current search mode — so a client gets
-oriented before making any tool call, with no separate skill required. A bundled Claude Code
-plugin (packaging this server plus a playbook skill as one install) ships separately; until
-then, the snippet above plus `shards init` is the whole first-run path.
+oriented before making any tool call, with no separate skill required.
+
+### Install the plugin
+
+This repo doubles as its own Claude Code plugin marketplace (`.claude-plugin/marketplace.json`
+at the repo root), so the MCP server and the `shards` skill install together in one step —
+from Claude Code:
+
+```
+/plugin marketplace add <path-or-url-to-this-repo>
+/plugin install shards@shards
+```
+
+That installs `plugins/shards/`: the bundled `.mcp.json` (wiring `shards-mcp` in, so the skill
+can never be installed without the tools it describes), the `shards` skill
+(`skills/shards/SKILL.md` — the vault-coherence and coordination playbook, one skill, not
+split by verb), and an optional `SessionStart` hook that runs
+`shards session-start --meta-only --json` to warm-start a fresh session's queue and mentions.
+`shards init` still has to be run once per machine — the plugin ships the tools and the
+playbook, not a config.
+
+`SKILL.md`'s frontmatter stays inside the six-field spec Claude accepts for a claude.ai skill
+upload (`name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`), so the
+same file works as this plugin's local skill and as an account-enabled skill for Cowork
+sessions, which never read a local `.claude/skills/` directory — see the `instructions` block
+note above for why Cowork gets its orientation from MCP either way.
