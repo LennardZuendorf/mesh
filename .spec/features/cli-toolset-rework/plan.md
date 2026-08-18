@@ -3,7 +3,7 @@ type: feature-plan
 feature: cli-toolset-rework
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-07-18
+updated: 2026-08-16
 ---
 
 # Feature: CLI Toolset Rework — Implementation Plan
@@ -185,9 +185,14 @@ src/shards/core/*.py          # project-scoped read-lens
 
 - A project note + tasks carrying its id in `project:` filter correctly via `task list --project <id>`.
 - Tasks without `project:` are unaffected; frontmatter round-trips unknown/legacy project values.
-- No new CLI verb is introduced.
+- No new CLI **verb** is introduced (`note`/`task`/`search` stay the only mutating primitives).
 
-**Verification:** New tests under `tests/tasks/`; `uv run pytest -q` green; `shards --help` shows no new verb, only a new flag/lens.
+**Verification:** New tests under `tests/tasks/`; `uv run pytest -q` green; `shards --help` shows
+no new **verb**. **As shipped (correction from the core-hardening spec-reconciliation unit):** the read-lens landed as a new
+top-level **command**, `shards project <id>`, alongside `graph`/`build-context` — `shards --help`
+does list it. "No new verb" is true under the three-verb thesis; "no new command in `--help`" was
+never actually the bar and this line's original wording conflated the two. See
+[product.md](product.md) § Non-Goals for the corrected framing.
 
 ---
 

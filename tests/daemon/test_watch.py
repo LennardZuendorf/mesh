@@ -28,13 +28,8 @@ because ``AF_UNIX`` paths are length-capped.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
-import shutil
-import tempfile
-import threading
 import time
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -54,6 +49,7 @@ from shards.index.warm import DEFAULT_RECENT_LIMIT, VaultIndex, scan_recent
 from shards.index.watcher import ChangeHooks, Watcher
 from shards.schemas.config import Config, load_config
 from shards.storage.sandbox import safe_resolve
+from tests.daemon.conftest import running_daemon
 
 # --------------------------------------------------------------------------- #
 # Fixtures & helpers                                                          #
@@ -63,26 +59,6 @@ from shards.storage.sandbox import safe_resolve
 @pytest.fixture
 def cfg(shards_config: Path) -> Config:
     return load_config()
-
-
-@pytest.fixture
-def sock_dir() -> Iterator[Path]:
-    """A short-lived ``/tmp`` dir for unix sockets (AF_UNIX path-length limit)."""
-    path = Path(tempfile.mkdtemp(prefix="brn-", dir="/tmp"))
-    try:
-        yield path
-    finally:
-        shutil.rmtree(path, ignore_errors=True)
-
-
-@pytest.fixture
-def socket_path(sock_dir: Path) -> Path:
-    return sock_dir / "d.sock"
-
-
-@pytest.fixture
-def missing_socket(sock_dir: Path) -> Path:
-    return sock_dir / "absent.sock"
 
 
 def _write_note(
@@ -114,7 +90,9 @@ def _write_note(
     dest_dir = vault / sub
     dest_dir.mkdir(parents=True, exist_ok=True)
     path = dest_dir / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
@@ -167,49 +145,12 @@ def _write_task(
     dest_dir = vault / sub
     dest_dir.mkdir(parents=True, exist_ok=True)
     path = dest_dir / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
-
-
-@contextlib.contextmanager
-def running_daemon(path: Path, config: Config | None = None) -> Iterator[DaemonServer]:
-    """Run a :class:`DaemonServer` on its own event loop in a daemon thread."""
-    loop = asyncio.new_event_loop()
-    server = DaemonServer(path, config=config)
-    stop_future: asyncio.Future[None] = loop.create_future()
-    ready = threading.Event()
-    start_error: list[BaseException] = []
-
-    async def main() -> None:
-        try:
-            await server.start()
-        except BaseException as exc:  # noqa: BLE001 - surfaced to the test thread
-            start_error.append(exc)
-            return
-        finally:
-            ready.set()
-        await stop_future
-        await server.stop()
-
-    def run() -> None:
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
-        loop.close()
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    if not ready.wait(timeout=5):
-        raise RuntimeError("daemon did not become ready")
-    if start_error:
-        thread.join(timeout=5)
-        raise start_error[0]
-    try:
-        yield server
-    finally:
-        loop.call_soon_threadsafe(stop_future.set_result, None)
-        thread.join(timeout=5)
 
 
 # --------------------------------------------------------------------------- #
@@ -518,13 +459,20 @@ def test_activity_recent_falls_back_when_daemon_down(
     assert [r["id"] for r in result["entries"]] == ["t-fb", "n-fb"]
 
 
-def test_activity_recent_is_503_stub_without_config(cfg: Config, socket_path: Path) -> None:
-    """A daemon started without a vault config keeps activity.recent as a stub."""
+def test_activity_recent_is_unknown_without_config(cfg: Config, socket_path: Path) -> None:
+    """A daemon started without a vault config registers no activity.recent handler.
+
+    core-hardening/5 culled the ``503`` stub table: a handler is either wired (at
+    config-ful startup, over the warm index) or the method is simply unknown. The
+    ``activity.recent`` verb deliberately passes an *empty* fallback-code set, so
+    that ``404`` propagates as a server-state signal — the ``recent-activity``
+    lens catches it and scans the folder itself.
+    """
     with running_daemon(socket_path, config=None):
         client = DaemonClient(socket_path=socket_path)
         with pytest.raises(DaemonError) as excinfo:
             client.activity_recent(cfg, limit=5)
-    assert excinfo.value.code == 503
+    assert excinfo.value.code == 404
 
 
 def test_default_recent_limit_is_sane() -> None:

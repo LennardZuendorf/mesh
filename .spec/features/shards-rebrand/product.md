@@ -3,7 +3,7 @@ type: feature-product
 feature: shards-rebrand
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-07-05
+updated: 2026-08-16
 ---
 
 # Feature: Shards Rebrand — Product
@@ -71,8 +71,9 @@ contracts MUST NOT change in behaviour.
 #### Scenario: Test suite stays green
 
 - **Given** the full rename is applied
-- **When** `uv run pytest -q`, `uv run ruff check .`, and `uv run mypy src/` run
+- **When** `uv run pytest -q`, `uv run ruff check .`, and `uv run ty check src/` run
 - **Then** all pass with no behavioural test edits beyond renamed identifiers/paths/env vars
+  (as-built correction, core-hardening/9: the type checker is `ty`, not `mypy`)
 
 ### Requirement: Repo identity
 

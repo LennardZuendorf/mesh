@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -32,6 +33,7 @@ from shards.cli.__main__ import app
 from shards.core.tasks import (
     TaskNotFoundError,
     create_task,
+    find_duplicate_title,
     update_task,
 )
 from shards.schemas.config import Config, load_config
@@ -94,7 +96,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -149,6 +153,54 @@ def test_create_task_priority_and_tags_stored(cfg: Config, vault: Path) -> None:
     task = create_task(cfg, "Prioritised", priority="high", tags=["ndc", "flights"])
     assert task.priority == "high"
     assert task.tags == ["ndc", "flights"]
+
+
+# --------------------------------------------------------------------------- #
+# create_task / update_task (core) — priority write-boundary validation (R5)   #
+# --------------------------------------------------------------------------- #
+
+
+def test_create_task_invalid_priority_raises_valueerror(cfg: Config, vault: Path) -> None:
+    """A value outside high/normal/low is a validation failure (CLI exit 2)."""
+    with pytest.raises(ValueError):
+        create_task(cfg, "Ghost", priority="urgent")
+    # No file leaked before the raise.
+    assert list((vault / "tasks").rglob("t-*.md")) == []
+
+
+@pytest.mark.parametrize("priority", ["high", "normal", "low"])
+def test_create_task_accepts_every_vocabulary_value(
+    cfg: Config, vault: Path, priority: str
+) -> None:
+    task = create_task(cfg, f"Task {priority}", priority=priority)
+    assert task.priority == priority
+
+
+def test_update_task_invalid_priority_raises_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, priority="low")
+    before = _reload(path).metadata
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", priority="urgent")
+    after = _reload(path).metadata
+    assert after == before  # nothing written
+
+
+def test_update_task_invalid_priority_validated_before_lock(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An invalid priority is rejected before the entity lock is even taken."""
+    _seed_task(vault, priority="low")
+    seen: list[Path] = []
+    real = locks_mod.acquire
+
+    def spy(lock_path: Path):  # type: ignore[no-untyped-def]
+        seen.append(lock_path)
+        return real(lock_path)
+
+    monkeypatch.setattr(locks_mod, "acquire", spy)
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", priority="urgent")
+    assert seen == []
 
 
 def test_create_task_blocks_blocked_by_recorded_inert(cfg: Config, vault: Path) -> None:
@@ -248,7 +300,7 @@ def test_update_task_priority_bumps_updated(cfg: Config, vault: Path) -> None:
     meta = _reload(path).metadata
     assert meta["priority"] == "high"
     assert task.priority == "high"
-    assert meta["updated"] > _OLD
+    assert cast(datetime, meta["updated"]) > _OLD
     assert meta["created"] == _OLD
 
 
@@ -262,6 +314,27 @@ def test_update_task_tags_delta(cfg: Config, vault: Path) -> None:
     path = _seed_task(vault, tags=["ndc", "stale"])
     update_task(cfg, "t-seed", tags="+flights,-stale")
     assert _reload(path).metadata["tags"] == ["ndc", "flights"]
+
+
+def test_update_task_tags_delta_remove_absent_is_noop(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, tags=["ndc", "stale"])
+    update_task(cfg, "t-seed", tags="-nope")
+    assert _reload(path).metadata["tags"] == ["ndc", "stale"]
+
+
+def test_update_task_tags_bare_list_is_additive(cfg: Config, vault: Path) -> None:
+    """agent-usability/3 — the silent-wipe regression, locked for tasks too: a
+    task tagged ["infra", "urgent", "q3"] updated with tags="urgent" keeps all
+    three; the mechanic is shared with notes via apply_tag_spec."""
+    path = _seed_task(vault, tags=["infra", "urgent", "q3"])
+    update_task(cfg, "t-seed", tags="urgent")
+    assert _reload(path).metadata["tags"] == ["infra", "urgent", "q3"]
+
+
+def test_update_task_tags_explicit_replace(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, tags=["ndc", "stale"])
+    update_task(cfg, "t-seed", tags="=x,y")
+    assert _reload(path).metadata["tags"] == ["x", "y"]
 
 
 def test_update_task_blocks_blocked_by_stored_inert(cfg: Config, vault: Path) -> None:
@@ -300,10 +373,113 @@ def test_update_task_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
     assert meta["custom_ref"] == "PROJ-1"
 
 
+def test_update_task_tags_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
+    """Root tech.md Invariant 3 — a tag mutation on the update path must not
+    disturb foreign frontmatter keys the msgspec ``_Frontmatter`` stash keeps."""
+    path = _seed_task(
+        vault,
+        tags=["infra", "urgent", "q3"],
+        extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"},
+    )
+    update_task(cfg, "t-seed", tags="urgent")
+    meta = _reload(path).metadata
+    assert meta["tolaria_pinned"] is True
+    assert meta["custom_ref"] == "PROJ-1"
+    assert meta["tags"] == ["infra", "urgent", "q3"]
+
+
+def test_update_task_tags_mixed_spec_raises_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    """End to end through update_task: a mixed spec is rejected before the
+    write, not written as a garbage literal tag."""
+    path = _seed_task(vault, tags=["ndc", "stale"])
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="ambiguous tag spec"):
+        update_task(cfg, "t-seed", tags="+x,y")
+    assert path.read_text(encoding="utf-8") == before  # untouched
+
+
 def test_update_task_not_found_raises(cfg: Config, vault: Path) -> None:
     _seed_task(vault)
     with pytest.raises(TaskNotFoundError):
         update_task(cfg, "t-missing", priority="high")
+
+
+# --------------------------------------------------------------------------- #
+# update_task (core) — owner reassignment (team-awareness/3, R3)               #
+# --------------------------------------------------------------------------- #
+
+
+def test_update_task_owner_reassigns(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, owner="operator")
+    task = update_task(cfg, "t-seed", owner="other-agent")
+    assert task.owner == "other-agent"
+    meta = _reload(path).metadata
+    assert meta["owner"] == "other-agent"
+    assert cast(datetime, meta["updated"]) > _OLD
+
+
+def test_update_task_owner_does_not_disturb_claimed_by(cfg: Config, vault: Path) -> None:
+    """Reassignment (owner) and release/claim (claimed_by) are distinct fields
+    on distinct code paths — updating owner must never touch a live claim."""
+    path = _seed_task(vault, owner="operator", status="claimed", claimed_by="test-agent")
+    update_task(cfg, "t-seed", owner="other-agent")
+    meta = _reload(path).metadata
+    assert meta["owner"] == "other-agent"
+    assert meta["claimed_by"] == "test-agent"
+    assert meta["status"] == "claimed"
+
+
+def test_update_task_unknown_owner_raises_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, owner="operator")
+    before = _reload(path).metadata
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", owner="ghost-agent")
+    after = _reload(path).metadata
+    assert after == before  # nothing written
+
+
+def test_update_task_owner_validated_before_lock(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown owner is rejected before the entity lock is even taken."""
+    _seed_task(vault, owner="operator")
+    seen: list[Path] = []
+    real = locks_mod.acquire
+
+    def spy(lock_path: Path):  # type: ignore[no-untyped-def]
+        seen.append(lock_path)
+        return real(lock_path)
+
+    monkeypatch.setattr(locks_mod, "acquire", spy)
+    with pytest.raises(ValueError):
+        update_task(cfg, "t-seed", owner="ghost-agent")
+    assert seen == []
+
+
+def _seed_malformed(vault: Path, task_id: str = "t-bad") -> Path:
+    """Write a ``t-`` id file whose frontmatter is unparseable YAML (open/).
+
+    Mirrors ``tests/tasks/test_list_cancel.py::_seed_malformed`` — the id-only
+    resolver still matches this stem (it never reads content), so the failure
+    surfaces at the *content* read this unit routes through ``read_post``.
+    """
+    folder = task_folder("open", vault)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    path.write_text("---\ntitle: [unclosed\nstatus: open\n---\nbody\n", encoding="utf-8")
+    return path
+
+
+def test_update_task_malformed_yaml_raises_not_found(cfg: Config, vault: Path) -> None:
+    """A resolved-but-unreadable task's content read maps to TaskNotFoundError.
+
+    ``_resolve_task_path`` matches on filename stem only, so a malformed target
+    still resolves; the content read (routed through ``read_post``) is what
+    fails here, and it maps to the same not-found contract as ``get_task``.
+    """
+    _seed_malformed(vault, "t-bad")
+    with pytest.raises(TaskNotFoundError):
+        update_task(cfg, "t-bad", priority="high")
 
 
 def test_update_task_uses_atomic_write(
@@ -416,6 +592,26 @@ def test_cli_task_new_unknown_owner_exits_2(cfg: Config, vault: Path) -> None:
     assert list((vault / "tasks").rglob("t-*.md")) == []
 
 
+def test_cli_task_new_owner_empty_string_still_rejected(cfg: Config, vault: Path) -> None:
+    """R5: --available's takeable pool is defined by ``claimed_by``, never
+    ``owner`` — no unowned state is introduced, and ``--owner ""`` stays
+    rejected exactly as before this unit."""
+    result = _invoke(["task", "new", "Ghost", "--owner", ""])
+    assert result.exit_code == 2, result.output
+    assert list((vault / "tasks").rglob("t-*.md")) == []
+
+
+def test_cli_task_new_invalid_priority_exits_2_names_allowed_values(
+    cfg: Config, vault: Path
+) -> None:
+    result = _invoke(["task", "new", "Ghost", "--priority", "urgent"])
+    assert result.exit_code == 2, result.output
+    assert "high" in result.output
+    assert "normal" in result.output
+    assert "low" in result.output
+    assert list((vault / "tasks").rglob("t-*.md")) == []
+
+
 def test_cli_task_new_blocks_blocked_by_stored(cfg: Config, vault: Path) -> None:
     result = _invoke(
         ["--quiet", "task", "new", "Depends", "--blocks", "t-9xyz", "--blocked-by", "t-1abc"]
@@ -456,6 +652,70 @@ def test_cli_task_update_json_object(cfg: Config, vault: Path) -> None:
     assert "updated" in obj
 
 
+def test_cli_task_update_owner_reassigns(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    result = _invoke(["task", "update", "t-c7d1", "--owner", "other-agent"])
+    assert result.exit_code == 0, result.output
+    assert _reload(path).metadata["owner"] == "other-agent"
+
+
+def test_cli_task_update_owner_carve_out_survives_global_owner_flag(
+    cfg: Config, vault: Path
+) -> None:
+    """FIX1 (final review): the global ``--owner`` (acting identity) must not
+    fold into ``task update``'s opt-in reassignment ``--owner`` — a local
+    ``--owner`` still means "reassign to this value", never "act as bob"."""
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    result = _invoke(
+        [
+            "--owner",
+            "bob",
+            "task",
+            "update",
+            "t-c7d1",
+            "--priority",
+            "high",
+            "--owner",
+            "other-agent",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert _reload(path).metadata["owner"] == "other-agent"
+
+
+def test_cli_task_update_owner_carve_out_leaves_owner_untouched_without_local_flag(
+    cfg: Config, vault: Path
+) -> None:
+    """No local ``--owner`` on ``task update`` must never reassign to the global
+    acting identity, even when one is given."""
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    result = _invoke(["--owner", "bob", "task", "update", "t-c7d1", "--priority", "high"])
+    assert result.exit_code == 0, result.output
+    assert _reload(path).metadata["owner"] == "operator"
+
+
+def test_cli_task_update_invalid_priority_exits_2_and_writes_nothing(
+    cfg: Config, vault: Path
+) -> None:
+    path = _seed_task(vault, task_id="t-c7d1", priority="low")
+    before = _reload(path).metadata
+    result = _invoke(["task", "update", "t-c7d1", "--priority", "urgent"])
+    assert result.exit_code == 2, result.output
+    assert "high" in result.output
+    assert "normal" in result.output
+    assert "low" in result.output
+    after = _reload(path).metadata
+    assert after == before  # nothing written
+
+
+def test_cli_task_update_unknown_owner_exits_2_and_writes_nothing(cfg: Config, vault: Path) -> None:
+    path = _seed_task(vault, task_id="t-c7d1", owner="operator")
+    before = _reload(path).metadata
+    result = _invoke(["task", "update", "t-c7d1", "--owner", "ghost-agent"])
+    assert result.exit_code == 2, result.output
+    assert _reload(path).metadata == before
+
+
 # --------------------------------------------------------------------------- #
 # Wiring — __main__ imports task_app rather than defining an inline stub        #
 # --------------------------------------------------------------------------- #
@@ -474,3 +734,133 @@ def test_created_task_validates_as_task(cfg: Config, vault: Path) -> None:
     task = create_task(cfg, "Model Check")
     path = task_folder("open", vault) / f"{task.id}.md"
     Task.model_validate(_reload(path).metadata)
+
+
+# --------------------------------------------------------------------------- #
+# find_duplicate_title / duplicate-title warning at create (R9)                #
+# --------------------------------------------------------------------------- #
+
+
+def test_find_duplicate_title_exact_match(cfg: Config, vault: Path) -> None:
+    first = create_task(cfg, "Ship the Q3 report")
+    assert find_duplicate_title(cfg, "Ship the Q3 report") == first.id
+
+
+def test_find_duplicate_title_no_match_returns_none(cfg: Config, vault: Path) -> None:
+    create_task(cfg, "Existing Task Title")
+    assert find_duplicate_title(cfg, "Unrelated Task Title") is None
+
+
+def test_find_duplicate_title_case_and_whitespace_collide(cfg: Config, vault: Path) -> None:
+    """Mirrors the slug-normalized rule (``_slugify``) — same rule the note side
+    asserts, shared via the one ``_title_collision`` engine (asserted, not
+    incidental)."""
+    first = create_task(cfg, "Ship The Report")
+    assert find_duplicate_title(cfg, "ship the report") == first.id
+    assert find_duplicate_title(cfg, "SHIP THE REPORT") == first.id
+    assert find_duplicate_title(cfg, " Ship The Report ") == first.id
+    assert find_duplicate_title(cfg, "Ship  The  Report") == first.id  # internal whitespace run
+
+
+def test_find_duplicate_title_ignores_notes(cfg: Config, vault: Path) -> None:
+    """Same-kind only: a note with the same title is invisible to the task check."""
+    from shards.core.notes import create_note
+
+    create_note(cfg, "Shared Title", body="x")
+    assert find_duplicate_title(cfg, "Shared Title") is None
+
+
+def test_find_duplicate_title_scans_done_too(cfg: Config, vault: Path) -> None:
+    """A duplicate is detected against ``tasks/done/`` as well as ``tasks/open/``."""
+    _seed_task(vault, task_id="t-finished", title="Finished Title", status="done")
+    assert find_duplicate_title(cfg, "Finished Title") == "t-finished"
+
+
+def test_create_task_duplicate_title_still_succeeds(cfg: Config, vault: Path) -> None:
+    """Non-blocking: creating a second task with an existing title still creates
+    it (no exception, id returned, file on disk) rather than refusing."""
+    first = create_task(cfg, "Ship the Q3 report")
+    second = create_task(cfg, "Ship the Q3 report")
+    assert second.id != first.id
+    assert (task_folder("open", vault) / f"{second.id}.md").exists()
+    assert (task_folder("open", vault) / f"{first.id}.md").exists()
+
+
+# --------------------------------------------------------------------------- #
+# CLI — duplicate-title warning (R9)                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_task_new_duplicate_title_warns_and_still_creates(cfg: Config, vault: Path) -> None:
+    """Load-bearing: the create SUCCEEDS (exit 0, id on stdout, file on disk)
+    *and* a warning naming the prior id lands on stderr."""
+    first = _invoke(["--quiet", "task", "new", "Ship the Q3 report"])
+    assert first.exit_code == 0, first.output
+    first_id = first.output.strip()
+
+    second = _invoke(["task", "new", "Ship the Q3 report"])
+    assert second.exit_code == 0, second.output
+    assert first_id in second.stderr
+    assert "duplicate title" in second.stderr
+    second_id = second.output.strip().split()[-1]
+    assert (task_folder("open", vault) / f"{second_id}.md").exists()
+
+
+def test_cli_task_new_unique_title_emits_no_warning(cfg: Config, vault: Path) -> None:
+    result = _invoke(["task", "new", "A Wholly Unique Task Title"])
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+
+
+def test_cli_task_new_duplicate_title_quiet_suppresses_warning(cfg: Config, vault: Path) -> None:
+    _invoke(["--quiet", "task", "new", "Repeat Task Title"])
+    second = _invoke(["--quiet", "task", "new", "Repeat Task Title"])
+    assert second.exit_code == 0, second.output
+    assert second.stderr == ""
+
+
+def test_cli_task_new_duplicate_title_json_never_carries_warning(cfg: Config, vault: Path) -> None:
+    """``--json`` payload never carries the advisory text; the warning still
+    reaches stderr (only ``--quiet`` suppresses it)."""
+    _invoke(["--quiet", "task", "new", "JSON Dup Task"])
+    second = _invoke(["--json", "task", "new", "JSON Dup Task"])
+    assert second.exit_code == 0, second.output
+    obj = json.loads(second.stdout)
+    assert "warning" not in json.dumps(obj)
+    assert "duplicate title" in second.stderr
+
+
+def test_cli_task_new_note_task_same_title_no_warning(cfg: Config, vault: Path) -> None:
+    """A note and a task sharing a title do not warn (same-kind only, R9)."""
+    note_result = _invoke(["note", "new", "Cross-Kind Task Title", "--body", "x"])
+    assert note_result.exit_code == 0, note_result.output
+
+    task_result = _invoke(["task", "new", "Cross-Kind Task Title"])
+    assert task_result.exit_code == 0, task_result.output
+    assert task_result.stderr == ""
+
+
+def test_cli_task_new_case_whitespace_duplicate_warns_and_names_the_real_prior_id(
+    cfg: Config, vault: Path
+) -> None:
+    """The motivating case, task side: two titles differing only in
+    case/whitespace. Task resolution is id-only (no slug matcher —
+    ``_resolve_task_path`` never resolves by title, per its own module
+    docstring), so the harm here isn't an ``AmbiguousSlugError`` the way it is
+    for notes; it's the *other* harm R9's product requirement names — two
+    agents silently create separate ids for what is really one piece of work.
+    The warning is what lets an agent notice and claim/finish the existing
+    ``t-`` id instead of starting a shadow copy, so this asserts the create
+    succeeds and the warning names the correct, pre-existing id."""
+    first = _invoke(["--quiet", "task", "new", "Ship The Report"])
+    assert first.exit_code == 0, first.output
+    first_id = first.output.strip()
+
+    second = _invoke(["task", "new", " ship  the report "])
+    assert second.exit_code == 0, second.output
+    assert first_id in second.stderr
+    assert "duplicate title" in second.stderr
+    second_id = second.output.strip().split()[-1]
+    assert second_id != first_id
+    assert (task_folder("open", vault) / f"{second_id}.md").exists()
+    assert (task_folder("open", vault) / f"{first_id}.md").exists()

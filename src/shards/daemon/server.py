@@ -14,20 +14,41 @@ success and raise :class:`RpcError` to produce an error envelope, so the envelop
 machinery lives in one place — later units claim a dispatch slot by registering a
 handler, never by touching :meth:`DaemonServer._dispatch`.
 
-The base table serves ``ping`` and reserves the methods that depend on subsystems
-not yet present (``note.*`` / ``task.*`` reads, ``search.*``, ``activity.recent``,
-``vault.status``, ``index.reindex``) as ``503`` stubs; unknown methods answer
-``404``. A ``503`` (reserved-but-unwired) lets the client degrade to its file-op
-fallback, whereas a ``404`` (truly unknown) propagates. When the
-server is constructed **with a vault ``config``**, daemon/2 warms a
-:class:`~shards.index.warm.VaultIndex` (via a :class:`~shards.index.watcher.Watcher`)
-*before* the socket accepts connections and swaps the ``activity.recent`` stub for
-a real handler served from that warm index. That same config-ful startup also
-registers the search feature's :func:`~shards.index.indexed_client.incremental_update`
-on the server-owned :class:`~shards.index.watcher.ChangeHooks` registry, so every
-vault edit re-indexes that file in ``indexed``. A config-less server (used by the
-transport tests) keeps the ``503`` stub and registers no hook, so the watcher is
-never a hard dependency.
+**What the daemon serves.** The base table holds ``ping`` alone; unknown methods
+answer ``404``. When the server is constructed **with a vault ``config``** it warms
+a :class:`~shards.index.warm.VaultIndex` (via a
+:class:`~shards.index.watcher.Watcher`) *before* the socket accepts a single
+connection, then registers the reads that index can actually accelerate:
+
+* ``activity.recent`` — the mtime-ordered lens (daemon/2);
+* ``task.list`` / ``note.list`` — the O(vault) walk + YAML parse per invocation
+  that the index makes disappear;
+* ``vault.status`` — the index-derivable half only: note count, task statuses and
+  the freshness row. Dangling links need note/task *bodies* and stale locks are a
+  lock-directory listing, so neither is an index projection; the **client**
+  computes those and finishes the report, because ``_dispatch`` runs handlers
+  synchronously on the event loop and a whole-vault body parse there would block
+  every other agent's warm read;
+* ``search.tag_pull`` — a pure frontmatter filter over the corpus the index holds
+  in full, foreign files included.
+
+Point reads (``note.get`` / ``task.get``), ``search.query`` and ``index.reindex``
+are deliberately **absent**: the id already names the file for a point read, the
+index holds no bodies, and ranking/rebuilding live in the ``indexed`` subprocess —
+so none of the three gets faster for crossing a socket. Nothing in the table
+answers ``503``: a handler is either wired or the method is unknown.
+
+Every wired read has a working file-op fallback on the client side, so a
+config-less server (used by the transport tests), an older daemon that predates a
+method, or no daemon at all all degrade to the identical on-disk answer — the
+client treats every server-state code (``404``/``500``/``503``) on those verbs as
+fallback-eligible. The daemon accelerates; it never gates.
+
+The config-ful startup also registers the search feature's
+:func:`~shards.index.indexed_client.incremental_update` on the server-owned
+:class:`~shards.index.watcher.ChangeHooks` registry, so every vault edit
+re-indexes that file in ``indexed``. A config-less server registers no hook, so
+the watcher is never a hard dependency.
 """
 
 from __future__ import annotations
@@ -37,12 +58,19 @@ import contextlib
 import json
 import os
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from shards.daemon.client import default_socket_path
+import msgspec
+
+from shards.core.lenses import status_inputs
+from shards.core.notes import MetaRow, NoteFilter, in_note_scope, select_notes
+from shards.core.tasks import TaskFilter, in_task_scope, select_tasks
+from shards.daemon.client import default_socket_path, entity_row
 from shards.index.indexed_client import incremental_update
-from shards.index.warm import DEFAULT_RECENT_LIMIT, VaultIndex
+from shards.index.tagpull import TagPullFilter, select_tagpull
+from shards.index.warm import DEFAULT_RECENT_LIMIT, IndexEntry, VaultIndex
 from shards.index.watcher import ChangeHooks, Watcher
 from shards.schemas.config import Config, load_config
 
@@ -50,21 +78,17 @@ Handler = Callable[[dict[str, Any]], dict[str, Any]]
 
 _SOCKET_MODE = 0o600
 _RUN_DIR_MODE = 0o700
-_STUB_METHODS: tuple[str, ...] = (
-    "note.get",
-    "note.list",
-    "task.get",
-    "task.list",
-    "search.query",
-    "search.tag_pull",
-    "activity.recent",
-    "vault.status",
-    "index.reindex",
-)
 
 
 class RpcError(Exception):
-    """A handler-signalled error, rendered into an ``ok: false`` envelope."""
+    """A handler-signalled error, rendered into an ``ok: false`` envelope.
+
+    The declared way for a handler to answer with a code rather than a result.
+    No handler raises one today — the warm reads either answer or let
+    :meth:`DaemonServer._dispatch` wrap an unexpected failure as ``500`` — but it
+    is the envelope's extension point, not a leftover stub: the ``503`` stub
+    *table* is what core-hardening/5 culled.
+    """
 
     def __init__(self, code: int, message: str) -> None:
         super().__init__(message)
@@ -76,17 +100,27 @@ def _ping(_params: dict[str, Any]) -> dict[str, Any]:
     return {"pong": True}
 
 
-def _not_yet_available(_params: dict[str, Any]) -> dict[str, Any]:
-    """Reserved dispatch slot: a later unit replaces this with a real handler."""
-    raise RpcError(503, "not yet available")
-
-
 def default_dispatch() -> dict[str, Handler]:
-    """The unit's dispatch table: ``ping`` plus reserved ``503`` stubs."""
-    table: dict[str, Handler] = {"ping": _ping}
-    for method in _STUB_METHODS:
-        table[method] = _not_yet_available
-    return table
+    """The transport-only dispatch table: ``ping``.
+
+    Everything else is registered at config-ful startup, bound to the warm index
+    (see :meth:`DaemonServer.start`). A method that is not in the table answers
+    ``404``, which the client treats as fallback-eligible for the wired read
+    verbs — so a config-less server degrades instead of failing.
+    """
+    return {"ping": _ping}
+
+
+def _meta_rows(entries: list[IndexEntry], in_scope: Callable[[Path], bool]) -> list[MetaRow]:
+    """Project the index down to the rows the on-disk walk in ``in_scope`` would yield.
+
+    The index is deliberately vault-wide (it also serves the tag pull's wider
+    corpus), while ``note list`` / ``task list`` each walk one narrower folder
+    scope. Filtering here is what keeps the warm answer equal to the cold one
+    rather than a superset of it — a task nested under ``tasks/open/sub/`` is in
+    the index but is not a task any on-disk verb can reach.
+    """
+    return [(entry.path, entry.meta) for entry in entries if in_scope(entry.path)]
 
 
 def _error_envelope(code: int, message: str) -> dict[str, Any]:
@@ -117,7 +151,7 @@ class DaemonServer:
 
         When a vault ``config`` was supplied, warm the index and start the watcher
         *first*, so the index is hot before the socket accepts a single connection,
-        and register the real ``activity.recent`` handler over it.
+        and register the warm read handlers over it.
         """
         # Parent dir 0700 first: even if the socket is briefly group/other-readable
         # between bind and chmod, the enclosing dir already blocks other users.
@@ -135,7 +169,7 @@ class DaemonServer:
             # ``indexed``. ``incremental_update`` swallows its own failures, so a dead
             # ``indexed`` never crashes the observer thread this hook runs on.
             self._hooks.register(lambda p: incremental_update(config, p))
-            self._handlers = {**self._handlers, "activity.recent": self._activity_handler()}
+            self._handlers = {**self._handlers, **self._warm_handlers()}
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()  # clear a stale socket from a prior run
         # Bind under a restrictive umask so the socket node is created 0600 *at
@@ -150,12 +184,24 @@ class DaemonServer:
             os.umask(old_umask)
         os.chmod(self.socket_path, _SOCKET_MODE)
 
-    def _activity_handler(self) -> Handler:
-        """A ``activity.recent`` handler bound to this server's warm index."""
-        index = self._index
-        assert index is not None
+    def _warm_handlers(self) -> dict[str, Handler]:
+        """Every read handler this server can serve from its warm index.
 
-        def handler(params: dict[str, Any]) -> dict[str, Any]:
+        Each one is the *same* selector the client's file-op fallback runs, fed
+        index rows instead of disk rows — the filtering, sorting and limiting is
+        never reimplemented against the index, which is exactly the copy-drift the
+        warm path exists to remove. Called once at config-ful startup, after the
+        index is warm and before the socket binds.
+        """
+        index = self._index
+        config = self._config
+        assert index is not None
+        assert config is not None
+        vault = config.core.tolaria_path
+        note_scope = partial(in_note_scope, vault)
+        task_scope = partial(in_task_scope, vault)
+
+        def activity_recent(params: dict[str, Any]) -> dict[str, Any]:
             limit = params.get("limit")
             # ``bool`` is an ``int`` subclass — exclude it so a stray ``true`` never
             # silently limits to 1.
@@ -165,7 +211,45 @@ class DaemonServer:
                 n = DEFAULT_RECENT_LIMIT
             return {"entries": index.recent(n)}
 
-        return handler
+        def note_list(params: dict[str, Any]) -> dict[str, Any]:
+            rows = _meta_rows(index.entries(), note_scope)
+            views = select_notes(rows, NoteFilter.from_params(params))
+            return {"entries": [entity_row(v.note, v.path) for v in views]}
+
+        def task_list(params: dict[str, Any]) -> dict[str, Any]:
+            rows = _meta_rows(index.entries(), task_scope)
+            views = select_tasks(rows, TaskFilter.from_params(params))
+            return {"entries": [entity_row(v.task, v.path) for v in views]}
+
+        def vault_status(_params: dict[str, Any]) -> dict[str, Any]:
+            # Only the *index-derivable* half. Assembling the full report here
+            # would run ``find_dangling`` — an unbounded whole-vault body parse —
+            # on the event loop that every other agent's warm read is waiting on.
+            # The client owns the disk half; both sides finish through the same
+            # ``status_report``. See :func:`shards.core.lenses.status_inputs`.
+            entries = index.entries()
+            return {
+                **status_inputs(
+                    select_notes(_meta_rows(entries, note_scope), NoteFilter(limit=None)),
+                    select_tasks(_meta_rows(entries, task_scope), TaskFilter(limit=None)),
+                ),
+                "newest": index.recent(1),
+            }
+
+        def tag_pull(params: dict[str, Any]) -> dict[str, Any]:
+            # The wider corpus: tag pull covers coexisting foreign Markdown too,
+            # which surfaces with ``id: None`` exactly as the disk scan returns it.
+            rows = [(entry.path, entry.meta) for entry in index.corpus()]
+            hits = select_tagpull(rows, TagPullFilter.from_params(params))
+            return {"results": [msgspec.to_builtins(hit) for hit in hits]}
+
+        return {
+            "activity.recent": activity_recent,
+            "note.list": note_list,
+            "task.list": task_list,
+            "vault.status": vault_status,
+            "search.tag_pull": tag_pull,
+        }
 
     async def serve_forever(self) -> None:
         """Bind (if needed) and serve until cancelled; always unlinks on exit."""

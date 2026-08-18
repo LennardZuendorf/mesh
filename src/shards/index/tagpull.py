@@ -15,12 +15,14 @@ and the small metadata coercers live here too because the substring
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from shards.core.notes import _opt_int, _opt_str, _str_tuple
+from shards.index.warm import iter_vault_md
 from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
 from shards.storage.files import read_post
@@ -46,15 +48,11 @@ class CorpusRow:
 def iter_corpus(config: Config) -> Iterator[Path]:
     """Yield every ``*.md`` under ``notes/`` and ``tasks/`` (full recursive walk).
 
-    Recursive so typed note subfolders (``notes/decisions/`` …) and both task
-    folders (``tasks/open/``, ``tasks/done/``) are covered. ``.locks/`` holds no
-    ``.md`` and is naturally excluded.
+    Delegates to :func:`shards.index.warm.iter_vault_md`, which the warm index
+    warms from — one walk implementation, so a file the daemon holds and a file
+    the disk scan finds are by construction the same set.
     """
-    vault = config.core.tolaria_path
-    for sub in ("notes", "tasks"):
-        root = vault / sub
-        if root.is_dir():
-            yield from root.rglob("*.md")
+    yield from iter_vault_md(config.core.tolaria_path)
 
 
 def read_row(path: Path) -> CorpusRow | None:
@@ -170,6 +168,111 @@ def updated_key(result: SearchResult) -> float:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class TagPullFilter:
+    """A normalized, socket-transportable tag-pull filter spec.
+
+    The tag-pull twin of :class:`shards.core.notes.NoteFilter`: built once at the
+    caller's boundary, then either applied locally by :func:`select_tagpull` or
+    shipped to the daemon's ``search.tag_pull`` handler, which rebuilds it with
+    :meth:`from_params` and applies the *same* selector to warm index rows.
+    """
+
+    tags: tuple[str, ...] | None = None
+    type_filter: str | None = None
+    owner: str | None = None
+    status: str | None = None
+    limit: int = _DEFAULT_LIMIT
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        tags: list[str] | None = None,
+        type_filter: str | None = None,
+        owner: str | None = None,
+        status: str | None = None,
+        limit: int = _DEFAULT_LIMIT,
+    ) -> TagPullFilter:
+        """Normalize the caller-level arguments into a spec (nothing to validate)."""
+        return cls(
+            tags=tuple(tags) if tags else None,
+            type_filter=type_filter,
+            owner=owner,
+            status=status,
+            limit=limit,
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        """Render the spec as JSON-safe RPC params."""
+        return {
+            "tags": list(self.tags) if self.tags else None,
+            "type_filter": self.type_filter,
+            "owner": self.owner,
+            "status": self.status,
+            "limit": self.limit,
+        }
+
+    @classmethod
+    def from_params(cls, params: Mapping[str, Any]) -> TagPullFilter:
+        """Rebuild a spec from untrusted RPC params (see :meth:`NoteFilter.from_params`)."""
+        limit = _opt_int(params.get("limit"))
+        return cls(
+            tags=_str_tuple(params.get("tags")),
+            type_filter=_opt_str(params.get("type_filter")),
+            owner=_opt_str(params.get("owner")),
+            status=_opt_str(params.get("status")),
+            limit=limit if limit is not None else _DEFAULT_LIMIT,
+        )
+
+
+def corpus_rows(config: Config) -> Iterator[tuple[Path, dict[str, Any]]]:
+    """Yield ``(path, frontmatter)`` for every readable corpus file — the on-disk rows.
+
+    Bodies are deliberately dropped: a tag pull is frontmatter-only, so this is
+    exactly the projection the warm index holds.
+    """
+    for path in iter_corpus(config):
+        row = read_row(path)
+        if row is None:
+            continue
+        yield path, row.meta
+
+
+def select_tagpull(
+    rows: Iterable[tuple[Path, dict[str, Any]]], spec: TagPullFilter
+) -> list[SearchResult]:
+    """Apply ``spec`` to ``rows`` — the *one* tag-pull filter/sort/limit implementation.
+
+    Called with on-disk rows by :func:`tagpull` and with warm-index corpus rows by
+    the daemon's ``search.tag_pull`` handler, so the two can never drift. Every
+    row whose frontmatter satisfies the (conjunctive) ``tags`` **AND** ``type`` /
+    ``owner`` / ``status`` filters is returned with ``score=1.0`` and no
+    ``snippet`` (zero body cost); foreign rows surface with ``id=None``. Results
+    are ``updated``-descending, tie-broken by path so the order is deterministic
+    and identical on both paths, capped at ``limit`` (``limit < 0`` → unbounded).
+    """
+    results: list[SearchResult] = []
+    for path, meta in rows:
+        file_tags = meta_tags(meta)
+        if not matches_filters(
+            meta,
+            file_tags,
+            tags=list(spec.tags) if spec.tags else None,
+            type_filter=spec.type_filter,
+            owner=spec.owner,
+            status=spec.status,
+        ):
+            continue
+        results.append(to_result(path, meta, score=1.0, snippet=None))
+
+    results.sort(key=lambda r: r.path)  # deterministic tie order under a stable sort
+    results.sort(key=updated_key, reverse=True)
+    if spec.limit >= 0:
+        return results[: spec.limit]
+    return results
+
+
 def tagpull(
     config: Config,
     tags: list[str] | None = None,
@@ -178,32 +281,20 @@ def tagpull(
     limit: int = _DEFAULT_LIMIT,
     status: str | None = None,
 ) -> list[SearchResult]:
-    """Frontmatter-only tag pull over the whole corpus (product R2).
+    """Frontmatter-only tag pull over the whole corpus — the on-disk path (product R2).
 
-    Every ``*.md`` under ``notes/`` + ``tasks/`` whose frontmatter satisfies the
-    (conjunctive) ``tags`` **AND** ``type`` / ``owner`` / ``status`` filters is
-    returned with ``score=1.0`` and no ``snippet`` (zero body cost). Foreign
-    files surface with ``id=None``. Results are ``updated``-descending, capped at
-    ``limit`` (``limit < 0`` → unbounded).
+    A thin composition of :func:`corpus_rows` (the walk) and
+    :func:`select_tagpull` (the predicate); see the latter for the filter/sort/
+    limit semantics. This is also the daemon-down fallback behind
+    :meth:`DaemonClient.tag_pull <shards.daemon.client.DaemonClient.tag_pull>`.
     """
-    results: list[SearchResult] = []
-    for path in iter_corpus(config):
-        row = read_row(path)
-        if row is None:
-            continue
-        file_tags = meta_tags(row.meta)
-        if not matches_filters(
-            row.meta,
-            file_tags,
+    return select_tagpull(
+        corpus_rows(config),
+        TagPullFilter.build(
             tags=tags,
             type_filter=type_filter,
             owner=owner,
             status=status,
-        ):
-            continue
-        results.append(to_result(path, row.meta, score=1.0, snippet=None))
-
-    results.sort(key=updated_key, reverse=True)
-    if limit >= 0:
-        return results[:limit]
-    return results
+            limit=limit,
+        ),
+    )

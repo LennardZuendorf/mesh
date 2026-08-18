@@ -24,6 +24,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import frontmatter
 import pytest
@@ -87,7 +88,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -115,7 +118,7 @@ def test_finish_open_appends_outcome_and_moves(cfg: Config, vault: Path) -> None
 
     post = _reload(_done_path(vault))
     assert post.metadata["status"] == "done"
-    assert post.metadata["updated"] > _OLD  # bumped on the finishing write
+    assert cast(datetime, post.metadata["updated"]) > _OLD  # bumped on the finishing write
     assert post.metadata["created"] == _OLD  # birth instant untouched
     # Original body survives; the outcome section is appended after it.
     assert "Original body." in post.content
@@ -142,6 +145,86 @@ def test_finish_timestamp_line_precedes_outcome(cfg: Config, vault: Path) -> Non
     match = _ISO_UTC.search(content)
     assert match is not None
     assert match.start() < content.index("with clock")
+
+
+# --------------------------------------------------------------------------- #
+# team-awareness/8 — ## Outcome names the acting agent                          #
+# --------------------------------------------------------------------------- #
+
+
+def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
+    """Write a standalone ``config.toml`` identifying as ``agent`` (or with no
+    ``[core].agent`` at all when ``agent`` is ``None``), pointed at ``vault``, so
+    a test can hold two distinct-identity ``Config`` objects over one vault."""
+    lines = ["[core]", f'tolaria_path = "{vault}"']
+    if agent is not None:
+        lines.append(f'agent = "{agent}"')
+    path = tmp_path / f"{agent or 'noagent'}.toml"
+    path.write_text("\n".join([*lines, ""]), encoding="utf-8")
+    return path
+
+
+def test_finish_outcome_names_the_acting_agent(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8: a task owned by flights-agent, finished by tolaria-agent — the
+    ``## Outcome`` stamp names the finisher, never the task's ``owner``."""
+    _seed_task(vault, status="open", owner="flights-agent")
+    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    finisher_cfg = load_config()
+
+    finish_task(finisher_cfg, "t-seed", "Shipped it.")
+    content = _reload(_done_path(vault)).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert match.start() == 0
+    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert "flights-agent" not in stamp_line
+
+
+def test_finish_unset_identity_outcome_stamp_is_bare_iso(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``[core].agent``/``$SHARDS_AGENT`` degrades to a bare ISO line — no
+    stray trailing separator, no crash."""
+    _seed_task(vault, status="open")
+    cfg_file = _write_agent_config(tmp_path, vault, None)
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    noagent_cfg = load_config()
+    assert noagent_cfg.agent is None
+
+    finish_task(noagent_cfg, "t-seed", "Shipped it.")
+    content = _reload(_done_path(vault)).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    match = _ISO_UTC.search(stamp_line)
+    assert match is not None
+    assert stamp_line == match.group(0)
+
+
+def test_finish_idempotent_rerun_by_a_different_agent_adds_nothing(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-finishing an already-done task is a no-op regardless of who calls it —
+    the first finisher's attribution is never overwritten by a second agent."""
+    body = "Task body.\n\n## Outcome\n\n2026-01-01T09:00:00Z — first-agent\nFirst outcome."
+    _seed_task(vault, status="done", body=body, updated=_OLD)
+    cfg_file = _write_agent_config(tmp_path, vault, "second-agent")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    second_cfg = load_config()
+
+    task = finish_task(second_cfg, "t-seed", "Second outcome.")
+    assert task.status == "done"
+    post = _reload(_done_path(vault))
+    assert post.content.count("## Outcome") == 1
+    assert "first-agent" in post.content
+    assert "second-agent" not in post.content
+    assert "Second outcome." not in post.content
+    assert post.metadata["updated"] == _OLD  # no rewrite
 
 
 # --------------------------------------------------------------------------- #
@@ -228,10 +311,9 @@ def test_finish_reconciles_crash_stranded_file(cfg: Config, vault: Path) -> None
         "blocked_by": [],
     }
     stranded = task_folder("open", vault) / "t-crash.md"
-    stranded.write_text(
-        frontmatter.dumps(frontmatter.Post("Body.\n\n## Outcome\n\nx", **meta)),
-        encoding="utf-8",
-    )
+    stranded_post = frontmatter.Post("Body.\n\n## Outcome\n\nx")
+    stranded_post.metadata = meta
+    stranded.write_text(frontmatter.dumps(stranded_post), encoding="utf-8")
     task = finish_task(cfg, "t-crash", "ignored")
     assert task.status == "done"
     assert _done_path(vault, "t-crash").exists()
@@ -248,6 +330,36 @@ def test_finish_not_found_raises(cfg: Config, vault: Path) -> None:
     _seed_task(vault, task_id="t-here", status="open")
     with pytest.raises(TaskNotFoundError):
         finish_task(cfg, "t-nope", "Done.")
+
+
+def _seed_malformed(vault: Path, task_id: str = "t-bad") -> Path:
+    """Write a ``t-`` id file whose frontmatter is unparseable YAML (open/)."""
+    folder = task_folder("open", vault)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    path.write_text("---\ntitle: [unclosed\nstatus: open\n---\nbody\n", encoding="utf-8")
+    return path
+
+
+def test_finish_malformed_target_raises_not_found(cfg: Config, vault: Path) -> None:
+    """Finishing a resolved-but-unreadable task maps to TaskNotFoundError (exit 3)."""
+    _seed_malformed(vault, "t-bad")
+    with pytest.raises(TaskNotFoundError):
+        finish_task(cfg, "t-bad", "Done.")
+
+
+def test_finish_different_task_unaffected_by_malformed_sibling(cfg: Config, vault: Path) -> None:
+    """A malformed sibling task never blocks finishing a different, valid task.
+
+    core-hardening/1 scenario: resolution is filename-stem-only and never reads
+    a non-matching file's content, so a corrupt ``t-bad`` alongside the target
+    is skipped — not fatal — while the real finish proceeds.
+    """
+    _seed_malformed(vault, "t-bad")
+    _seed_task(vault, task_id="t-good", status="open")
+    task = finish_task(cfg, "t-good", "Done.")
+    assert task.status == "done"
+    assert _done_path(vault, "t-good").exists()
 
 
 def test_finish_id_reresolves_from_done(cfg: Config, vault: Path) -> None:
@@ -326,6 +438,19 @@ def test_cli_finish_json_object(cfg: Config, vault: Path) -> None:
     assert obj["id"] == "t-xxx"
     assert obj["status"] == "done"
     assert "updated" in obj
+
+
+def test_cli_finish_owner_flag_stamps_the_acting_agent(cfg: Config, vault: Path) -> None:
+    """FIX1 (final review): ``--owner`` names the ``## Outcome`` stamp, not the
+    config agent. ``cfg`` sets ``[core].agent = "test-agent"``; ``--owner bob``
+    must still be the identity the stamp records."""
+    _seed_task(vault, task_id="t-xxx", status="open")
+    result = _invoke(["--owner", "bob", "task", "finish", "t-xxx", "--outcome", "Shipped."])
+    assert result.exit_code == 0, result.output
+    content = _reload(_done_path(vault, "t-xxx")).content
+    stamp_line = next(line for line in content.splitlines() if _ISO_UTC.search(line))
+    assert stamp_line.endswith("— bob")
+    assert "test-agent" not in stamp_line
 
 
 def test_cli_finish_not_found_exits_3(cfg: Config, vault: Path) -> None:

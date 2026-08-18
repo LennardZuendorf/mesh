@@ -195,6 +195,11 @@ def test_note_foreign_temporal_keys_json_dump_is_json_dumpable() -> None:
     reloaded = json.loads(text)
     assert reloaded["tolaria_review_date"] == "2026-08-01"
     assert reloaded["tolaria_synced_at"] == "2026-07-10T09:30:00Z"
+    # The model's own created/updated fields use the same Z convention.
+    assert reloaded["created"].endswith("Z")
+    assert reloaded["updated"].endswith("Z")
+    assert "+00:00" not in reloaded["created"]
+    assert "+00:00" not in reloaded["updated"]
 
 
 def test_note_bare_date_on_known_field_promotes_and_roundtrips() -> None:
