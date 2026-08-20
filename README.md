@@ -1,12 +1,12 @@
 # shards
 
-A mesh for multi-agent collaboration over a single Tolaria Markdown folder. Three verbs — `note`, `task`, `search` — give a fleet of agents and their human operator a shared substrate through low-level tools: a CLI and an MCP server.
+A mesh for multi-agent collaboration over a single Markdown folder. Three verbs — `note`, `task`, `search` — give a fleet of agents and their human operator a shared substrate through low-level tools: a CLI and an MCP server.
 
 - Notes + search = shared memory.
 - Tasks = coordination + handoff (`claim` / `release` / `finish` / `cancel`; dependency graph deferred).
 - Markdown is the source of truth; shards owns the interface (and writes), not the data.
 
-Search delegates to the first-party [`indexed`](https://github.com/LennardZuendorf/indexed) engine; shards coexists with the Tolaria vault MCP on one folder — no database to run.
+Search delegates to the first-party [`indexed`](https://github.com/LennardZuendorf/indexed) engine; shards coexists with whatever else writes to the folder — Obsidian, git, another MCP server — and needs no database to run.
 
 The spec is the source of truth: see [`.spec/`](.spec/). Working in here? Read [`AGENTS.md`](AGENTS.md) first.
 
@@ -36,7 +36,7 @@ uv run shards init --help
 ```
 
 ```
---path             TEXT     Vault folder ([core].tolaria_path). Defaults to ~/.shards/vault.
+--path             TEXT     Vault folder ([core].vault_path). Defaults to ~/.shards/vault.
 --agent            TEXT     This agent's identity ([core].agent). Defaults to $SHARDS_AGENT, else 'agent'.
 --collections      TEXT     Comma-separated roster of valid --owner identities ([tasks].collections).
                              Default: empty — an open roster, any owner string accepted.
@@ -68,7 +68,7 @@ gitignored, since it names a real vault path and identity.
 
 ```toml
 [core]
-tolaria_path = "~/shards-vault"   # required — the Tolaria vault folder; ~ is expanded at load
+vault_path = "~/shards-vault"     # required — the vault folder; ~ is expanded at load
 agent = "my-agent"                # optional — default owner/claimer; $SHARDS_AGENT overrides
 
 [search]
@@ -80,8 +80,8 @@ threshold = 0.65                  # default 0.65 — min score to count a hit as
 collections = ["my-agent", "another-agent"]  # optional roster; empty = any --owner accepted
 ```
 
-`[core].path` is also accepted as an alias for `tolaria_path` (the root spec spells it that
-way); `$SHARDS_AGENT` always wins over `[core].agent` when both are set.
+`path` and `tolaria_path` are also accepted as legacy spellings of `vault_path`;
+`$SHARDS_AGENT` always wins over `[core].agent` when both are set.
 
 ## CLI surface
 
