@@ -1,7 +1,7 @@
 """Note frontmatter schema.
 
 A note is Markdown with YAML frontmatter. Shards owns a fixed set of keys; any
-other keys present in the frontmatter (Tolaria's, a user's, another tool's) must
+other keys present in the frontmatter (a user's, another tool's) must
 survive a load/dump cycle unchanged (root ``tech.md`` Invariant 3). msgspec
 ``Struct``s drop unknown fields on decode, so :class:`_Frontmatter` restores the
 invariant explicitly: it validates the *known* field subset with msgspec and

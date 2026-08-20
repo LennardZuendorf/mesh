@@ -12,8 +12,8 @@ Two link shapes:
 * **Title form** — ``[[Some Title]]`` is resolved by an on-disk scan of
   ``notes/`` for a shards note whose ``title`` matches exactly (after stripping
   surrounding whitespace). Only shards-owned notes (id ``n-…``) are indexed,
-  mirroring ``list_notes`` — a coexisting Tolaria/foreign file never shadows a
-  link nor leaks a foreign id into ``related``.
+  mirroring ``list_notes`` — a coexisting foreign file (any writer sharing the
+  folder) never shadows a link nor leaks a foreign id into ``related``.
 
 The match is an **exact** title comparison, deliberately unlike the
 slug-normalized matching that ``core.notes`` uses for CLI ``<id|slug>`` args:
@@ -72,8 +72,9 @@ def _link_targets(body: str) -> list[str]:
 def _title_index(vault_path: Path) -> dict[str, str]:
     """Map exact ``title`` → shards ``id`` for every shards note under ``notes/``.
 
-    Only files whose ``id`` starts with ``n-`` are indexed (foreign/Tolaria files
-    are skipped, exactly as ``list_notes`` surfaces only shards notes). On a
+    Only files whose ``id`` starts with ``n-`` are indexed (foreign files — any
+    writer sharing the folder — are skipped, exactly as ``list_notes`` surfaces
+    only shards notes). On a
     duplicate title the first file in sorted order wins, keeping resolution
     deterministic.
     """

@@ -89,8 +89,9 @@ class SearchConfig(msgspec.Struct, kw_only=True):
     raw TOML mapping. msgspec ``Struct``s expose no ``fields_set`` /
     ``__pydantic_fields_set__`` equivalent, so :func:`load_config` populates
     this by inspecting the parsed mapping directly (the same place the
-    ``[core].path`` alias is already resolved) rather than the decoded
-    ``Config``. It exists solely to answer :meth:`threshold_explicit` — the
+    ``[core]`` vault-key aliases — ``vault_path``, ``path``, ``tolaria_path`` —
+    are already resolved) rather than the decoded ``Config``. It exists solely
+    to answer :meth:`threshold_explicit` — the
     substring fallback (root tech.md § B5) must apply ``threshold`` only when
     a caller set it explicitly, never on the decoded default. Not a general
     field-provenance mechanism: nothing else reads it.

@@ -21,8 +21,8 @@ it stays cheap on the CLI path:
 **Shards rows vs. the corpus.** ``note list`` / ``task list`` only ever surface
 files carrying a shards id (``n-``/``t-``), but ``search`` (tag-pull and the
 substring fallback) deliberately covers *every* ``*.md`` under ``notes/`` and
-``tasks/`` — coexisting Tolaria/foreign files included, surfaced with ``id:
-None``. The index therefore holds both, split into two buckets: id-bearing
+``tasks/`` — coexisting foreign files (any writer sharing the folder) included,
+surfaced with ``id: None``. The index therefore holds both, split into two buckets: id-bearing
 entities keyed by shards id (:meth:`~VaultIndex.entries`, and everything
 ``recent`` / ``get`` / ``len`` speak for) and id-less corpus files keyed by real
 path. Without the second bucket a warm ``search.tag_pull`` would silently drop

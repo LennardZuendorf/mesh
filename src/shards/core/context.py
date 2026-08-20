@@ -115,8 +115,8 @@ def _inbound_index(config: Config) -> dict[str, list[str]]:
     and :func:`shards.core.tasks.task_rows` (``tasks/{open,done}/``) — the same
     two row-walks ``note list``/``task list`` already use, each already routed
     through :func:`shards.storage.files.read_post`, so a malformed ``.md`` skips
-    silently and never aborts the scan. A row with no shards id (a foreign/
-    Tolaria file coexisting in the same folder) is skipped: it cannot be a
+    silently and never aborts the scan. A row with no shards id (a foreign file
+    from any writer coexisting in the same folder) is skipped: it cannot be a
     valid source. A row whose ``related`` is missing or not a list contributes
     nothing. Because ``related`` already holds *resolved* ids — title-form
     ``[[Title]]`` links are resolved to their id at write time

@@ -132,7 +132,7 @@ def _resolve_path(config: Config, id_or_slug: str) -> Path:
     """Resolve ``<id|slug>`` to a *shards* note path, sandbox-checked.
 
     Only files whose stem carries a shards id (``n-`` prefix) are candidates, so a
-    coexisting Tolaria/foreign ``.md`` is never resolved (and thus never read,
+    coexisting foreign file (any writer sharing the folder) is never resolved (and thus never read,
     amended, or deleted) — mirroring the id gate ``list_notes`` applies. Id match
     (filename stem) wins; otherwise a normalized-title slug match. A slug hitting
     multiple notes raises :class:`AmbiguousSlugError`; no match raises
@@ -770,7 +770,7 @@ def select_notes(rows: Iterable[MetaRow], spec: NoteFilter) -> list[NoteView]:
     Called with on-disk rows by :func:`list_notes` and with warm-index rows by the
     daemon's ``note.list`` handler, so the two paths can never drift. Only rows
     whose frontmatter carries a valid shards id (``n-`` prefix) and validates
-    against :class:`Note` are surfaced; Tolaria/foreign rows are skipped silently.
+    against :class:`Note` are surfaced; foreign rows (any writer sharing the folder) are skipped silently.
     Filters (all conjunctive): ``tags`` (AND, or OR with ``any_tag``), exact
     ``owner``, exact ``note_type``, and the ``cutoff`` recency bound on
     ``updated``. ``sort`` is ``updated``/``created`` (descending) or ``title``

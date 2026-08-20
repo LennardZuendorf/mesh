@@ -924,8 +924,8 @@ def select_tasks(rows: Iterable[MetaRow], spec: TaskFilter) -> list[TaskView]:
     Called with on-disk rows by :func:`list_tasks` and with warm-index rows by the
     daemon's ``task.list`` handler, so the two paths can never drift. Only rows
     whose frontmatter carries a valid shards id (``t-`` prefix), declare
-    ``type: task``, and validate against :class:`Task` are surfaced; Tolaria /
-    foreign / malformed rows are skipped silently. Filters (all conjunctive):
+    ``type: task``, and validate against :class:`Task` are surfaced; foreign
+    (any writer sharing the folder) / malformed rows are skipped silently. Filters (all conjunctive):
     ``status`` membership (a CSV set — ``open,claimed`` matches either; a single
     value matches exactly as before), exact ``owner`` (on the ``owner`` field),
     ``mine`` (``owner`` *or* ``claimed_by`` equals ``spec.me``; an unset ``spec.me``
