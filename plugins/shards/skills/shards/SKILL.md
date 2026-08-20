@@ -2,7 +2,7 @@
 name: shards
 description: Vault-coherence and coordination playbook for the shards mesh — search before you write, keep tags and links consistent, and claim/finish/cancel tasks correctly. Use whenever creating, updating, or coordinating notes and tasks in a shared shards vault.
 license: MIT
-compatibility: Requires the shards MCP server (shards-mcp) or the shards CLI, connected to a configured Tolaria vault; this plugin bundles the MCP server via its own .mcp.json.
+compatibility: Requires the shards MCP server (shards-mcp) or the shards CLI, connected to a configured Markdown vault folder; this plugin bundles the MCP server via its own .mcp.json.
 metadata:
   plugin: shards
   unit: agent-usability/8
@@ -31,7 +31,7 @@ allowed-tools:
 
 # shards: vault coherence and coordination
 
-shards gives a fleet of agents one shared Tolaria Markdown vault through three verbs — `note`,
+shards gives a fleet of agents one shared Markdown vault through three verbs — `note`,
 `task`, `search` — over MCP (`shards_*` tools) or the `shards` CLI. Each tool's own parameter
 descriptions cover what a single call does; this skill covers what a parameter description
 cannot: the sequence and judgment that keeps the vault coherent when several agents are writing

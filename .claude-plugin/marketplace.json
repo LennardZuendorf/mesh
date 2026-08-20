@@ -4,13 +4,13 @@
     "name": "Lennard Zundorf"
   },
   "metadata": {
-    "description": "The shards mesh: MCP tools + vault-coherence skill for coordinating agents over one Tolaria Markdown vault."
+    "description": "The shards mesh: MCP tools + vault-coherence skill for coordinating agents over one shared Markdown vault."
   },
   "plugins": [
     {
       "name": "shards",
       "source": "./plugins/shards",
-      "description": "Coordinate notes and tasks with a fleet of agents over one shared Tolaria Markdown vault: shards_* MCP tools plus the shards vault-coherence skill."
+      "description": "Coordinate notes and tasks with a fleet of agents over one shared Markdown vault: shards_* MCP tools plus the shards vault-coherence skill."
     }
   ]
 }

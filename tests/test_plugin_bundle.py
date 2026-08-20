@@ -417,3 +417,15 @@ def test_skill_mentions_shards_session_start_and_it_is_a_real_tool() -> None:
     body = _skill_body()
     assert "shards_session_start" in body
     assert "shards_session_start" in _mcp_tool_names()
+
+
+def test_bundle_states_no_notes_application_prerequisite() -> None:
+    """Install-time metadata must not read as 'you need a particular notes app'."""
+    bundle = [
+        REPO_ROOT / ".claude-plugin" / "marketplace.json",
+        PLUGIN_ROOT / ".claude-plugin" / "plugin.json",
+        _SKILL_PATH,
+    ]
+
+    for path in bundle:
+        assert "tolaria" not in path.read_text(encoding="utf-8").lower(), path
