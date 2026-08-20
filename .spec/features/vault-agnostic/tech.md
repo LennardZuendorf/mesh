@@ -90,10 +90,10 @@ payload the one place the old name survives.
 
 ## Implementation Detail
 
-### Why no ignore rules are needed
+### Why no ignore rules are needed (for shards' own walks)
 
-Every vault walk is already scoped to the two shards-owned subtrees, so an Obsidian vault's
-`.obsidian/` and root `.trash/` are outside the traversal without any filter:
+Every shards-owned vault walk is already scoped to the two shards-owned subtrees, so an Obsidian
+vault's `.obsidian/` and root `.trash/` are outside the traversal without any filter:
 
 | Call site | Root walked |
 |---|---|
@@ -101,10 +101,20 @@ Every vault walk is already scoped to the two shards-owned subtrees, so an Obsid
 | `core/wikilinks.py:59,64` | `_notes_root`, `_tasks_root` |
 | `core/notes.py:114` | `_notes_root` |
 | `core/tasks.py:163` | `tasks/{open,done}` non-recursive |
+| `index/indexed_client.py:309` (`full_rebuild`) | `config.core.vault_path` — the **configured root**, not `notes/`/`tasks/` |
 
-`index/watcher.py:154-157` schedules observers on the same two folders. Pointing `vault_path` at an
-existing Obsidian vault root is therefore safe: shards creates and watches `notes/` and `tasks/`
-and never reads Obsidian's own directories. Adding a hidden-directory filter would be dead code.
+`index/watcher.py:154-157` schedules observers on the same two shards-owned folders. Pointing
+`vault_path` at an existing Obsidian vault root is therefore safe for every shards-internal read
+and write: shards creates and watches only `notes/` and `tasks/` and never reads Obsidian's own
+directories. Adding a hidden-directory filter to those walks would be dead code.
+
+The one exception is the external `indexed` full rebuild (`shards reindex`, called from
+`full_rebuild()`): when `[search].collection` is set, it passes the whole configured `vault_path`
+to `indexed index create`, so `indexed` — not shards — walks and ingests everything under that
+root, `.obsidian/` and root `.trash/` included. Narrowing that call to `notes/`/`tasks/` would be
+a behaviour change (it alters what `indexed` passes to the external binary) and is deliberately
+not made in this feature; see `config.example.toml` and `AGENTS.md` for the user-facing statement
+of this scope.
 
 ### Foreign-file tolerance is already generic
 

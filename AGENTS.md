@@ -57,7 +57,7 @@ memory subsystem, or an external task tracker.
 
 | System | Role | Boundary |
 |---|---|---|
-| **The vault folder** | The one Markdown folder (`notes/`, `tasks/`) — source of truth | Shards **owns writes** and cheap direct reads inside `notes/` and `tasks/`; it **coexists** with any other tool on the same folder (Obsidian and its plugins, another MCP server, git). Versioning, sync and backup are the vault owner's job, never shards's |
+| **The vault folder** | The one Markdown folder (`notes/`, `tasks/`) — source of truth | Shards **owns writes** and cheap direct reads inside `notes/` and `tasks/`; it **coexists** with any other tool on the same folder (Obsidian and its plugins, another MCP server, git). If `[search].collection` is set, `shards reindex` hands the whole configured vault root to `indexed`, which ingests everything under it — not just `notes/`/`tasks/`. Versioning, sync and backup are the vault owner's job, never shards's |
 | **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Shards's `search` is a thin wrapper; the shards↔indexed contract is co-designed; falls back to a built-in substring scan if absent |
 | **Cowork agents** | Consumers (flights-agent, notes-agent, …) | Call shards via CLI (`--json`) and the `memory` MCP tools |
 | **`$SHARDS_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine` |
@@ -94,7 +94,7 @@ uv run shards --help               # CLI help
 uv run shards daemon start         # Start the local daemon
 ```
 
-> Phase 1–2 is **delivered** — all five features implemented and tested (678 tests, ty clean,
+> Phase 1–2 is **delivered** — all five features implemented and tested (1331 tests, ty clean,
 > ruff clean). Phase 3 (tasks-graph) is deferred; the commands above are live.
 
 ### Git commit standards

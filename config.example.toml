@@ -13,9 +13,16 @@
 
 [core]
 # Path to your Markdown vault folder — any directory shards can write
-# `notes/` and `tasks/` into. An Obsidian vault root works as-is; shards only
-# ever touches its own two subfolders. `~` is expanded at load.
-# `path` and `tolaria_path` are still accepted as legacy spellings.
+# `notes/` and `tasks/` into. `~` is expanded at load. `path` and
+# `tolaria_path` are still accepted as legacy spellings.
+#
+# Shards' own reads and writes stay inside `notes/` and `tasks/` — an
+# Obsidian vault root works as-is, and `.obsidian/`/`.trash/` are never
+# touched. But if `[search].collection` is set below, `shards reindex` hands
+# this whole path to `indexed index create`, which ingests everything under
+# it — including `.obsidian/` and any root `.trash/`. Point this at a
+# dedicated folder (or a subfolder of an Obsidian vault) if you don't want
+# unrelated files indexed.
 vault_path = "~/shards-vault"
 
 # This agent's default identity. Used as the default `owner` on note/task

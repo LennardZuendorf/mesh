@@ -428,4 +428,6 @@ def test_bundle_states_no_notes_application_prerequisite() -> None:
     ]
 
     for path in bundle:
-        assert "tolaria" not in path.read_text(encoding="utf-8").lower(), path
+        text = path.read_text(encoding="utf-8").lower()
+        assert "tolaria" not in text, path
+        assert "obsidian" not in text, path

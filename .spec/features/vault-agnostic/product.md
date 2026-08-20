@@ -27,7 +27,7 @@ creates its own vault. This feature closes the gap in the *stated* contract: sha
 | | |
 |---|---|
 | **Owns** | The vault-path config key and its aliases; every user- and agent-facing string that names Tolaria (CLI help, error messages, MCP instructions block, package description, plugin/marketplace metadata, shipped `SKILL.md`); the delete-policy and foreign-file rationales in `AGENTS.md` and root `.spec/`; example agent identities and foreign-frontmatter fixture keys. |
-| **Does not own** | The folder layout (`notes/`, `tasks/{open,done}/`) — unchanged. The `indexed` search dependency — unrelated and stays. The three-verb surface — no verbs added or removed. Repo (`mesh`) and package (`shards`) names — out of scope. Delete *behaviour* — the policy is re-justified, not changed. Frozen historical records (`.spec/lessons.md` dated entries, `.spec/features/shards-rebrand/`) — superseded in place by new statements, never rewritten. |
+| **Does not own** | The folder layout (`notes/`, `tasks/{open,done}/`) — unchanged. The `indexed` search dependency — unrelated and stays. The three-verb surface — no verbs added or removed. Repo (`mesh`) and package (`shards`) names — out of scope. Delete *behaviour* — the policy is re-justified, not changed. Frozen historical records (`.spec/lessons.md` dated entries, `.spec/features/shards-rebrand/product.md`) — superseded in place by new statements, never rewritten. Other branch-scoped feature specs (e.g. `agent-usability/`, `team-awareness/`) are not frozen and may be corrected for factual accuracy. |
 
 ---
 
@@ -116,13 +116,15 @@ path. No Obsidian-specific behaviour SHALL be added.
 
 - **Given** the vault path points at an Obsidian vault root containing `.obsidian/` and a root `.trash/`
 - **When** shards walks the vault
-- **Then** only `notes/` and `tasks/` are traversed, and no Obsidian-specific configuration was required
+- **Then** shards' own reads and writes traverse only `notes/` and `tasks/`, no Obsidian-specific configuration was required, and if `[search].collection` is set the operator understands that `shards reindex` passes the whole configured root — including `.obsidian/` and `.trash/` — to `indexed`
 
 ### Requirement: Root specs corrected, history preserved
 
 Root `.spec/product.md`, `.spec/tech.md`, and `AGENTS.md` MUST NOT contain statements that are
-false without Tolaria. Dated lesson entries and completed feature specs MUST be left byte-intact;
-where they are superseded, the superseding statement lives in the current layer.
+false without Tolaria. The frozen set — `.spec/lessons.md` dated entries and
+`.spec/features/shards-rebrand/product.md` — MUST be left byte-intact; where they are superseded,
+the superseding statement lives in the current layer. Other branch-scoped feature specs (e.g.
+`agent-usability/`, `team-awareness/`) are not frozen and MAY be corrected for factual accuracy.
 
 #### Scenario: No false ownership claim remains
 
