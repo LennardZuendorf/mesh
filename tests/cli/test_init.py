@@ -66,7 +66,7 @@ def test_init_writes_config_load_config_accepts(tmp_path: Path, cfg_path: Path) 
     assert cfg_path.is_file()
 
     cfg = load_config(cfg_path)  # must not raise
-    assert cfg.core.tolaria_path == vault
+    assert cfg.core.vault_path == vault
     assert cfg.core.agent == "test-agent"
     assert cfg.search.hybrid is True
     assert cfg.search.threshold == pytest.approx(0.65)
@@ -98,7 +98,7 @@ def test_init_no_flags_still_populates_every_field(
     assert result.exit_code == 0, result.output
 
     cfg = load_config(cfg_path)
-    assert cfg.core.tolaria_path == tmp_path / "default-vault"
+    assert cfg.core.vault_path == tmp_path / "default-vault"
     assert cfg.core.agent  # populated, not None/empty
     assert cfg.search.hybrid is True
     assert cfg.search.threshold == pytest.approx(0.65)
@@ -142,8 +142,8 @@ def test_init_expands_tilde_in_path(
     result = _invoke(["init", "--path", "~/myvault"])
     assert result.exit_code == 0, result.output
     cfg = load_config(cfg_path)
-    assert cfg.core.tolaria_path == tmp_path / "myvault"
-    assert cfg.core.tolaria_path.is_dir()
+    assert cfg.core.vault_path == tmp_path / "myvault"
+    assert cfg.core.vault_path.is_dir()
     assert not (Path.cwd() / "~").exists()
 
 
@@ -233,7 +233,7 @@ def test_missing_config_message_names_path_and_requirement(
     assert result.exit_code == 2
     assert str(missing) in result.output
     assert "shards init" in result.output
-    assert "tolaria_path" in result.output
+    assert "vault_path" in result.output
 
 
 # --------------------------------------------------------------------------- #
@@ -246,7 +246,7 @@ def test_example_config_loads_and_documents_every_key() -> None:
     assert example.is_file()
 
     cfg = load_config(example)
-    assert cfg.core.tolaria_path
+    assert cfg.core.vault_path
     assert cfg.core.agent
     assert cfg.search.collection
     assert cfg.search.hybrid is True

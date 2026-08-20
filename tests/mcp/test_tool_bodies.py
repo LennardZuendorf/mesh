@@ -53,7 +53,7 @@ def no_agent_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vault: Path
     """A config with no ``[core].agent`` and no ``$SHARDS_AGENT`` override."""
     cfg_file = tmp_path / "no_agent.toml"
     cfg_file.write_text(
-        "\n".join(("[core]", f'tolaria_path = "{vault}"', "", "[tasks]", "collections = []", "")),
+        "\n".join(("[core]", f'vault_path = "{vault}"', "", "[tasks]", "collections = []", "")),
         encoding="utf-8",
     )
     monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))

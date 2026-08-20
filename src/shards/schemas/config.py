@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import msgspec
 
@@ -66,13 +66,20 @@ def _dec_hook(target: type, value: Any) -> Any:
 class CoreConfig(msgspec.Struct, kw_only=True):
     """``[core]`` — vault location and default agent identity."""
 
-    tolaria_path: Path
+    vault_path: Path
     agent: str | None = None
 
     def __post_init__(self) -> None:
         """Expand a leading ``~`` — ``realpath`` does not, so ``~/vault`` would
         otherwise become a literal ``./~/vault`` under the process CWD."""
-        self.tolaria_path = self.tolaria_path.expanduser()
+        self.vault_path = self.vault_path.expanduser()
+
+
+#: Legacy ``[core]`` spellings of the vault key, accepted on input forever.
+#: ``path`` was the root-spec spelling; ``tolaria_path`` predates the rename to
+#: a tool-neutral name. Order is precedence: the first present wins, and an
+#: explicit ``vault_path`` beats both.
+_VAULT_KEY_ALIASES: Final = ("path", "tolaria_path")
 
 
 class SearchConfig(msgspec.Struct, kw_only=True):
@@ -134,7 +141,7 @@ def _missing_config_message(cfg_path: Path) -> str:
         f"shards: no config found at {cfg_path}\n"
         "run `shards init` to create one (honours $SHARDS_CONFIG_PATH), "
         "or point $SHARDS_CONFIG_PATH at an existing config.\n"
-        "required: [core].tolaria_path (path to your Tolaria vault folder); "
+        "required: [core].vault_path (path to your Markdown vault folder); "
         "[core].agent, [search], and [tasks] are optional and default."
     )
 
@@ -152,9 +159,8 @@ def load_config(path: Path | None = None) -> Config:
 
     ``path`` defaults to :func:`resolve_config_path`. A missing file raises
     :class:`ConfigMissingError` (code 2). ``$SHARDS_AGENT`` overrides
-    ``[core].agent`` when set. The root tech contract spells the vault key
-    ``[core].path``; the field name is ``tolaria_path``, so both are accepted
-    on input.
+    ``[core].agent`` when set. The canonical spelling is ``[core].vault_path``;
+    ``[core].path`` and ``[core].tolaria_path`` are accepted as legacy aliases.
     """
     cfg_path = path if path is not None else resolve_config_path()
     if not cfg_path.is_file():
@@ -173,9 +179,12 @@ def load_config(path: Path | None = None) -> Config:
     core = data.get("core")
     if isinstance(core, dict):
         core = dict(core)
-        # Accept the ``[core].path`` spelling as an alias for ``tolaria_path``.
-        if "path" in core and "tolaria_path" not in core:
-            core["tolaria_path"] = core.pop("path")
+        # Accept every legacy spelling of the vault key; canonical always wins.
+        for alias in _VAULT_KEY_ALIASES:
+            if alias in core and "vault_path" not in core:
+                core["vault_path"] = core.pop(alias)
+        core.pop("path", None)
+        core.pop("tolaria_path", None)
         agent_override = os.environ.get(_ENV_AGENT)
         if agent_override:
             core["agent"] = agent_override

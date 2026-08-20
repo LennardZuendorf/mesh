@@ -288,7 +288,7 @@ def scan_stale_locks(config: Config) -> list[Path]:
     vault Markdown, so the warm index does not track them; this stays a directory
     listing on both the warm and the on-disk path (a listing, not a parse).
     """
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     stale: list[Path] = []
     for kind in ("notes", "tasks"):
         locks = vault / kind / ".locks"
@@ -352,7 +352,7 @@ def status_report(
         "tasks": task_counts,
         "tasks_total": len(task_statuses),
         "freshness": {"mtime": mtime, "age_seconds": age},
-        "dangling_links": find_dangling(config.core.tolaria_path),
+        "dangling_links": find_dangling(config.core.vault_path),
         "stale_locks": [str(p) for p in scan_stale_locks(config)],
     }
 

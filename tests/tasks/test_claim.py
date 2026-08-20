@@ -743,7 +743,7 @@ def test_cli_release_agentless_config_exits_2(
         "\n".join(
             (
                 "[core]",
-                f'tolaria_path = "{vault}"',
+                f'vault_path = "{vault}"',
                 "",
                 "[tasks]",
                 "collections = []",
@@ -831,7 +831,7 @@ def test_cli_claim_agentless_config_exits_2(
         "\n".join(
             (
                 "[core]",
-                f'tolaria_path = "{vault}"',
+                f'vault_path = "{vault}"',
                 "",
                 "[tasks]",
                 "collections = []",

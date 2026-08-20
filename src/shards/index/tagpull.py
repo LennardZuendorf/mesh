@@ -52,7 +52,7 @@ def iter_corpus(config: Config) -> Iterator[Path]:
     warms from — one walk implementation, so a file the daemon holds and a file
     the disk scan finds are by construction the same set.
     """
-    yield from iter_vault_md(config.core.tolaria_path)
+    yield from iter_vault_md(config.core.vault_path)
 
 
 def read_row(path: Path) -> CorpusRow | None:

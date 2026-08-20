@@ -576,7 +576,7 @@ def test_session_start_with_no_identity_delivers_no_mentions_of_others_work(
         related=["t-nullowner"],
     )
     cfg_file = tmp_path / "noagent.toml"
-    cfg_file.write_text("\n".join(("[core]", f'tolaria_path = "{vault}"', "")), encoding="utf-8")
+    cfg_file.write_text("\n".join(("[core]", f'vault_path = "{vault}"', "")), encoding="utf-8")
     monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
     monkeypatch.delenv("SHARDS_AGENT", raising=False)
 
@@ -697,7 +697,7 @@ def test_no_identity_configured_never_floods_mentions_with_the_whole_vault(
         "\n".join(
             (
                 "[core]",
-                f'tolaria_path = "{vault}"',
+                f'vault_path = "{vault}"',
                 "",
                 "[tasks]",
                 'collections = ["research-agent", "ops-agent"]',

@@ -197,7 +197,7 @@ class DaemonServer:
         config = self._config
         assert index is not None
         assert config is not None
-        vault = config.core.tolaria_path
+        vault = config.core.vault_path
         note_scope = partial(in_note_scope, vault)
         task_scope = partial(in_task_scope, vault)
 

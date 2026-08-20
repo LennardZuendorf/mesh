@@ -122,16 +122,16 @@ def iter_md(root: Path, *, recursive: bool = True) -> Iterator[Path]:
     yield from (root.rglob("*.md") if recursive else root.glob("*.md"))
 
 
-def note_folder(note_type: str, tolaria_path: Path) -> Path:
+def note_folder(note_type: str, vault_path: Path) -> Path:
     """Return the vault folder for ``note_type`` (raises ``ValueError`` if unknown)."""
     try:
         parts = _NOTE_SUBDIRS[note_type]
     except KeyError:
         raise ValueError(f"unknown note type: {note_type!r}") from None
-    return tolaria_path.joinpath(*parts)
+    return vault_path.joinpath(*parts)
 
 
-def task_folder(status: str, tolaria_path: Path) -> Path:
+def task_folder(status: str, vault_path: Path) -> Path:
     """Return the vault folder for a task ``status`` (raises ``ValueError`` if unknown).
 
     ``open``/``claimed`` route to ``tasks/open/``; ``done``/``cancelled`` route to
@@ -141,4 +141,4 @@ def task_folder(status: str, tolaria_path: Path) -> Path:
         parts = _TASK_SUBDIRS[status]
     except KeyError:
         raise ValueError(f"unknown task status: {status!r}") from None
-    return tolaria_path.joinpath(*parts)
+    return vault_path.joinpath(*parts)

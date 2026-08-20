@@ -99,7 +99,7 @@ def _slugify(text: str) -> str:
 
 
 def _notes_root(config: Config) -> Path:
-    return config.core.tolaria_path / "notes"
+    return config.core.vault_path / "notes"
 
 
 def _iter_note_files(config: Config) -> Iterator[Path]:
@@ -138,7 +138,7 @@ def _resolve_path(config: Config, id_or_slug: str) -> Path:
     multiple notes raises :class:`AmbiguousSlugError`; no match raises
     :class:`NoteNotFoundError`.
     """
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     shards_files = [p for p in _iter_note_files(config) if p.stem.startswith(_ID_PREFIX)]
     by_id = [p for p in shards_files if p.stem == id_or_slug]
     if by_id:
@@ -271,7 +271,7 @@ def create_note(
         raise ValueError(f"invalid note type: {note_type!r}")
     _validate_owner(config, owner)
 
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     with hold(allocator_lock_path(_notes_root(config))):
         now = _now()
         note_id = generate_note_id(
@@ -340,7 +340,7 @@ def append_note(
             if section is not None
             else _append_to_end(post.content, block)
         )
-        _, related = resolve_wikilinks(post.content, config.core.tolaria_path)
+        _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         note = Note.model_validate(post.metadata)
@@ -449,7 +449,7 @@ def update_note(
     if new_type is not None and new_type not in _NOTE_TYPES:
         raise ValueError(f"invalid note type: {new_type!r}")
 
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
     with hold(_lock_path(config, note_id)):
@@ -462,7 +462,7 @@ def update_note(
             post.metadata["tags"] = apply_tag_spec(existing, tags)
         if new_type is not None:
             post.metadata["type"] = new_type
-        _, related = resolve_wikilinks(post.content, config.core.tolaria_path)
+        _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         note = Note.model_validate(post.metadata)

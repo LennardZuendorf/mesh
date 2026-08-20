@@ -113,7 +113,7 @@ def _roster_section(config: Config | None) -> str:
 def _vault_section(config: Config | None) -> str:
     if config is None:
         return "## Vault\nNot known — see identity above."
-    return f"## Vault\n{config.core.tolaria_path}"
+    return f"## Vault\n{config.core.vault_path}"
 
 
 def _recall_section(config: Config | None) -> str:

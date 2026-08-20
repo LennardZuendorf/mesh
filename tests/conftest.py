@@ -60,7 +60,7 @@ def shards_config(
         "\n".join(
             (
                 "[core]",
-                f'tolaria_path = "{vault}"',
+                f'vault_path = "{vault}"',
                 'agent = "test-agent"',
                 "",
                 "[search]",

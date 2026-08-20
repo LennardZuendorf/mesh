@@ -555,7 +555,7 @@ def test_scope_predicates_match_the_on_disk_walks(cfg: Config, seeded_vault: Pat
     of the cold one and the two paths silently stop agreeing — which is precisely
     what the misfiled entities in ``seeded_vault`` are here to catch.
     """
-    vault = cfg.core.tolaria_path
+    vault = cfg.core.vault_path
     corpus = set(iter_vault_md(vault))
 
     assert {p for p in corpus if in_note_scope(vault, p)} == set(_iter_note_files(cfg))

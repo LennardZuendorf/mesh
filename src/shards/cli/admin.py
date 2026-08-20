@@ -203,7 +203,7 @@ def _toml_string(value: str) -> str:
 
 def render_config_toml(
     *,
-    tolaria_path: Path,
+    vault_path: Path,
     agent: str,
     collections: list[str],
     search_collection: str | None,
@@ -219,7 +219,7 @@ def render_config_toml(
     """
     lines = [
         "[core]",
-        f"tolaria_path = {_toml_string(str(tolaria_path))}",
+        f"vault_path = {_toml_string(str(vault_path))}",
         f"agent = {_toml_string(agent)}",
         "",
         "[search]",
@@ -238,7 +238,7 @@ def init_command(
     path: str | None = typer.Option(
         None,
         "--path",
-        help="Vault folder ([core].tolaria_path). Defaults to ~/.shards/vault.",
+        help="Vault folder ([core].vault_path). Defaults to ~/.shards/vault.",
     ),
     agent: str | None = typer.Option(
         None,
@@ -296,7 +296,7 @@ def init_command(
 
         resolved_vault.mkdir(parents=True, exist_ok=True)
         content = render_config_toml(
-            tolaria_path=resolved_vault,
+            vault_path=resolved_vault,
             agent=resolved_agent,
             collections=roster,
             search_collection=search_collection,
@@ -309,7 +309,7 @@ def init_command(
         ctx,
         {
             "path": str(cfg_path),
-            "tolaria_path": str(resolved_vault),
+            "vault_path": str(resolved_vault),
             "agent": resolved_agent,
         },
         f"wrote config to {cfg_path}",

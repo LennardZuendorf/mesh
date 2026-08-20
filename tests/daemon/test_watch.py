@@ -279,7 +279,7 @@ def test_reconcile_returns_unmoved_when_source_races_away(
     result = reconcile_path(cfg, path)  # must not raise
     # Left in place (move failed); the resolved original path is returned so a
     # later event can reconcile it.
-    assert result == safe_resolve(cfg.core.tolaria_path, path)
+    assert result == safe_resolve(cfg.core.vault_path, path)
     assert path.exists()
 
 

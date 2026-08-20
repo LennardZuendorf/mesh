@@ -669,7 +669,7 @@ def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
     """Write a standalone ``config.toml`` identifying as ``agent`` (or with no
     ``[core].agent`` at all when ``agent`` is ``None``), pointed at ``vault``, so
     a test can hold two distinct-identity ``Config`` objects over one vault."""
-    lines = ["[core]", f'tolaria_path = "{vault}"']
+    lines = ["[core]", f'vault_path = "{vault}"']
     if agent is not None:
         lines.append(f'agent = "{agent}"')
     path = tmp_path / f"{agent or 'noagent'}.toml"

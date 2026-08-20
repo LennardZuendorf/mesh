@@ -52,12 +52,12 @@ def _config(
     *,
     agent: str | None = "flights-agent",
     collections: list[str] | None = None,
-    tolaria_path: str = "/home/agent/vault",
+    vault_path: str = "/home/agent/vault",
     hybrid: bool = True,
     collection: str | None = "shards-vault",
 ) -> Config:
     return Config(
-        core=CoreConfig(tolaria_path=Path(tolaria_path), agent=agent),
+        core=CoreConfig(vault_path=Path(vault_path), agent=agent),
         search=SearchConfig(collection=collection, hybrid=hybrid),
         tasks=TasksConfig(
             collections=collections if collections is not None else ["flights-agent"]
@@ -74,7 +74,7 @@ def test_block_names_resolved_identity_and_roster() -> None:
     config = _config(
         agent="flights-agent",
         collections=["flights-agent", "tolaria-agent"],
-        tolaria_path="/home/agent/vault",
+        vault_path="/home/agent/vault",
     )
     block = build_instructions(config)
     assert "flights-agent" in block
@@ -86,13 +86,13 @@ def test_block_varies_with_config_not_a_constant_string() -> None:
     """Two distinct configs must render distinct identity/roster/vault text —
     proves the block is actually built from ``config``, not hard-coded prose."""
     first = build_instructions(
-        _config(agent="flights-agent", collections=["flights-agent"], tolaria_path="/vault/a")
+        _config(agent="flights-agent", collections=["flights-agent"], vault_path="/vault/a")
     )
     second = build_instructions(
         _config(
             agent="tolaria-agent",
             collections=["tolaria-agent", "cowork-agent"],
-            tolaria_path="/vault/b",
+            vault_path="/vault/b",
         )
     )
     assert first != second

@@ -248,7 +248,7 @@ def search(
         )
 
     raw = _run_indexed_search(collection, query, limit)
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
 
     results: list[SearchResult] = []
     for hit in _parse_ndjson(raw):
@@ -306,7 +306,7 @@ def full_rebuild(config: Config) -> None:
     collection = config.search.collection
     if collection is None:
         return
-    _run_indexed_create(config.core.tolaria_path, collection)
+    _run_indexed_create(config.core.vault_path, collection)
 
 
 def reindex(config: Config) -> None:

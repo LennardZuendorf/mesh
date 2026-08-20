@@ -328,7 +328,7 @@ def test_cli_task_claim_no_agent_identity_exits_2(
     _seed_task(vault, task_id="t-noagent", status="open", claimed_by=None)
     cfg_file = tmp_path / "noagent.toml"
     cfg_file.write_text(
-        "\n".join(("[core]", f'tolaria_path = "{vault}"', "", "[tasks]", "collections = []", "")),
+        "\n".join(("[core]", f'vault_path = "{vault}"', "", "[tasks]", "collections = []", "")),
         encoding="utf-8",
     )
     monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))

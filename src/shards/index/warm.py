@@ -242,7 +242,7 @@ def scan_recent(config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> list[dict[
     :meth:`VaultIndex.recent`, computed by a fresh on-disk scan.
     """
     rows: list[tuple[float, str, dict[str, Any], Path]] = []
-    for path in iter_vault_md(config.core.tolaria_path):
+    for path in iter_vault_md(config.core.vault_path):
         post = read_post(path)
         if post is None:
             continue

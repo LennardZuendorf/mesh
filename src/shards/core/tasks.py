@@ -143,7 +143,7 @@ def _iso_utc(moment: datetime) -> str:
 
 
 def _tasks_root(config: Config) -> Path:
-    return config.core.tolaria_path / "tasks"
+    return config.core.vault_path / "tasks"
 
 
 def _iter_task_files(config: Config) -> Iterator[Path]:
@@ -190,7 +190,7 @@ def _resolve_task_path(config: Config, task_id: str) -> Path:
     subsequent domain verb (update, claim, finish, cancel, delete) resolves
     through here.
     """
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     for path in _iter_task_files(config):
         if path.stem == task_id:
             return safe_resolve(vault, path)
@@ -272,7 +272,7 @@ def create_task(
     _validate_owner(config, owner)
     _validate_priority(priority)
 
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     with hold(allocator_lock_path(_tasks_root(config))):
         now = _now()
         task_id = generate_task_id(
@@ -436,7 +436,7 @@ def append_task(
             if section is not None
             else _append_to_end(post.content, block)
         )
-        _, related = resolve_wikilinks(post.content, config.core.tolaria_path)
+        _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         task = Task.model_validate(post.metadata)
@@ -607,7 +607,7 @@ def _terminate_task(
     resolved file turns unreadable/malformed before this read (via
     :func:`shards.storage.files.read_post`) — matching :func:`get_task`.
     """
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     done_path = safe_resolve(vault, task_folder("done", vault) / f"{task_id}.md")
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
