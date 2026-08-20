@@ -366,10 +366,10 @@ def test_update_task_only_touches_supplied_fields(cfg: Config, vault: Path) -> N
 
 
 def test_update_task_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
-    path = _seed_task(vault, extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"})
+    path = _seed_task(vault, extra={"othertool_pinned": True, "custom_ref": "PROJ-1"})
     update_task(cfg, "t-seed", priority="high")
     meta = _reload(path).metadata
-    assert meta["tolaria_pinned"] is True
+    assert meta["othertool_pinned"] is True
     assert meta["custom_ref"] == "PROJ-1"
 
 
@@ -379,11 +379,11 @@ def test_update_task_tags_roundtrips_unknown_keys(cfg: Config, vault: Path) -> N
     path = _seed_task(
         vault,
         tags=["infra", "urgent", "q3"],
-        extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"},
+        extra={"othertool_pinned": True, "custom_ref": "PROJ-1"},
     )
     update_task(cfg, "t-seed", tags="urgent")
     meta = _reload(path).metadata
-    assert meta["tolaria_pinned"] is True
+    assert meta["othertool_pinned"] is True
     assert meta["custom_ref"] == "PROJ-1"
     assert meta["tags"] == ["infra", "urgent", "q3"]
 

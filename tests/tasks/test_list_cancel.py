@@ -680,10 +680,10 @@ def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
 def test_cancel_reason_names_the_acting_agent(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R8: a task owned by flights-agent, cancelled by tolaria-agent — the
+    """R8: a task owned by flights-agent, cancelled by notes-agent — the
     ``## Cancelled`` stamp names the canceller, never the task's ``owner``."""
     _seed_task(vault, status="open", owner="flights-agent")
-    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    cfg_file = _write_agent_config(tmp_path, vault, "notes-agent")
     monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
     monkeypatch.delenv("SHARDS_AGENT", raising=False)
     canceller_cfg = load_config()
@@ -694,7 +694,7 @@ def test_cancel_reason_names_the_acting_agent(
     match = _ISO_UTC.search(stamp_line)
     assert match is not None
     assert match.start() == 0
-    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert stamp_line == f"{match.group(0)} — notes-agent"
     assert "flights-agent" not in stamp_line
 
 

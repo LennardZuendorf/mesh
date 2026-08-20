@@ -85,7 +85,7 @@ src/shards/mcp/server.py         # :61 — pass instructions=, guarded config lo
 
 **Test scenarios:**
 
-- A config with agent `flights-agent` and roster `["flights-agent","tolaria-agent"]` renders a
+- A config with agent `flights-agent` and roster `["flights-agent","notes-agent"]` renders a
   block naming the identity, both owners, and the vault path.
 - No config / no agent / empty roster → block still renders, carries the degraded statements,
   and the server object still constructs.

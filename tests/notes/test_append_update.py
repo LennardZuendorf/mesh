@@ -288,11 +288,11 @@ def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
 def test_append_timestamp_names_the_editor_not_the_owner(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The observed team-sim bug (R8): tolaria-agent appends to a note owned by
-    flights-agent; the stamp must name the editor (tolaria-agent), never the
+    """The observed team-sim bug (R8): notes-agent appends to a note owned by
+    flights-agent; the stamp must name the editor (notes-agent), never the
     note's ``owner``, and the ISO token stays the first field on the line."""
     path = _seed_note(vault, extra={"owner": "flights-agent"})
-    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    cfg_file = _write_agent_config(tmp_path, vault, "notes-agent")
     monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
     monkeypatch.delenv("SHARDS_AGENT", raising=False)
     editor_cfg = load_config()
@@ -303,7 +303,7 @@ def test_append_timestamp_names_the_editor_not_the_owner(
     match = _ISO_UTC.search(stamp_line)
     assert match is not None
     assert match.start() == 0  # the ISO token is the first field on the line
-    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert stamp_line == f"{match.group(0)} — notes-agent"
     assert "flights-agent" not in stamp_line  # names the editor, not the owner
 
 
@@ -342,10 +342,10 @@ def test_append_timestamp_adds_no_frontmatter_key(cfg: Config, vault: Path) -> N
 
 
 def test_append_roundtrips_unknown_frontmatter_keys(cfg: Config, vault: Path) -> None:
-    path = _seed_note(vault, extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"})
+    path = _seed_note(vault, extra={"othertool_pinned": True, "custom_ref": "PROJ-1"})
     append_note(cfg, "n-seed", "x")
     meta = _reload(path).metadata
-    assert meta["tolaria_pinned"] is True
+    assert meta["othertool_pinned"] is True
     assert meta["custom_ref"] == "PROJ-1"
 
 
@@ -493,11 +493,11 @@ def test_update_tags_roundtrips_unknown_keys(cfg: Config, vault: Path) -> None:
     path = _seed_note(
         vault,
         tags=["infra", "urgent", "q3"],
-        extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"},
+        extra={"othertool_pinned": True, "custom_ref": "PROJ-1"},
     )
     update_note(cfg, "n-seed", tags="urgent")
     meta = _reload(path).metadata
-    assert meta["tolaria_pinned"] is True
+    assert meta["othertool_pinned"] is True
     assert meta["custom_ref"] == "PROJ-1"
     assert meta["tags"] == ["infra", "urgent", "q3"]
 
@@ -590,7 +590,7 @@ def test_ambiguous_slug_raises(cfg: Config, vault: Path) -> None:
 
 
 def _seed_foreign(vault: Path, name: str, title: str) -> Path:
-    """Write a coexisting Tolaria file with no shards ``n-`` id (non-``n-`` stem)."""
+    """Write a coexisting foreign file with no shards ``n-`` id (non-``n-`` stem)."""
     path = vault / "notes" / f"{name}.md"
     post = frontmatter.Post("Foreign body.", title=title, tags=["x"])
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
@@ -598,20 +598,20 @@ def _seed_foreign(vault: Path, name: str, title: str) -> Path:
 
 
 def test_append_refuses_foreign_file(cfg: Config, vault: Path) -> None:
-    foreign = _seed_foreign(vault, "tolaria-foo", "Tolaria Foo")
+    foreign = _seed_foreign(vault, "othertool-foo", "Othertool Foo")
     before = foreign.read_text(encoding="utf-8")
     with pytest.raises(NoteNotFoundError):
-        append_note(cfg, "tolaria-foo", "x")  # by stem
+        append_note(cfg, "othertool-foo", "x")  # by stem
     with pytest.raises(NoteNotFoundError):
-        append_note(cfg, "tolaria-foo", "x")  # by slug of title
+        append_note(cfg, "othertool-foo", "x")  # by slug of title
     assert foreign.read_text(encoding="utf-8") == before  # untouched
 
 
 def test_update_refuses_foreign_file(cfg: Config, vault: Path) -> None:
-    foreign = _seed_foreign(vault, "tolaria-bar", "Tolaria Bar")
+    foreign = _seed_foreign(vault, "othertool-bar", "Othertool Bar")
     before = foreign.read_text(encoding="utf-8")
     with pytest.raises(NoteNotFoundError):
-        update_note(cfg, "tolaria-bar", tags="+x")
+        update_note(cfg, "othertool-bar", tags="+x")
     assert foreign.read_text(encoding="utf-8") == before  # untouched
 
 

@@ -261,10 +261,10 @@ def test_append_timestamp_prepends_iso_line(cfg: Config, vault: Path) -> None:
 
 
 def test_append_roundtrips_unknown_frontmatter_keys(cfg: Config, vault: Path) -> None:
-    path = _seed_task(vault, extra={"tolaria_pinned": True, "custom_ref": "PROJ-1"})
+    path = _seed_task(vault, extra={"othertool_pinned": True, "custom_ref": "PROJ-1"})
     append_task(cfg, "t-seed", "x")
     meta = _reload(path).metadata
-    assert meta["tolaria_pinned"] is True
+    assert meta["othertool_pinned"] is True
     assert meta["custom_ref"] == "PROJ-1"
 
 
@@ -288,11 +288,11 @@ def _write_agent_config(tmp_path: Path, vault: Path, agent: str | None) -> Path:
 def test_append_timestamp_names_the_editor_not_the_owner(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R8: tolaria-agent appends to a task owned by flights-agent; the stamp
-    names the editor (tolaria-agent), never the task's ``owner``, and the ISO
+    """R8: notes-agent appends to a task owned by flights-agent; the stamp
+    names the editor (notes-agent), never the task's ``owner``, and the ISO
     token stays the first field on the line."""
     path = _seed_task(vault, owner="flights-agent")
-    cfg_file = _write_agent_config(tmp_path, vault, "tolaria-agent")
+    cfg_file = _write_agent_config(tmp_path, vault, "notes-agent")
     monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
     monkeypatch.delenv("SHARDS_AGENT", raising=False)
     editor_cfg = load_config()
@@ -303,7 +303,7 @@ def test_append_timestamp_names_the_editor_not_the_owner(
     match = _ISO_UTC.search(stamp_line)
     assert match is not None
     assert match.start() == 0
-    assert stamp_line == f"{match.group(0)} — tolaria-agent"
+    assert stamp_line == f"{match.group(0)} — notes-agent"
     assert "flights-agent" not in stamp_line
 
 

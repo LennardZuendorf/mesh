@@ -286,9 +286,11 @@ def test_note_list_falls_back_to_recursive_id_scan(
 ) -> None:
     _seed_note(vault, note_id="n-a", title="A")
     _seed_note(vault, note_id="n-b", title="B", note_type="decision")
-    # A foreign Tolaria file (no shards id) must be excluded from the scan.
-    foreign = vault / "notes" / "tolaria.md"
-    foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
+    # A foreign file (no shards id) must be excluded from the scan.
+    foreign = vault / "notes" / "othertool.md"
+    foreign.write_text(
+        frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
+    )
     client = DaemonClient(socket_path=missing_socket)
     results = client.note_list(cfg)
     assert {v.note.id for v in results} == {"n-a", "n-b"}

@@ -170,8 +170,10 @@ def test_reparse_indexes_note_by_id(vault: Path) -> None:
 
 
 def test_reparse_skips_file_without_shards_id(vault: Path) -> None:
-    foreign = vault / "notes" / "tolaria.md"
-    foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
+    foreign = vault / "notes" / "othertool.md"
+    foreign.write_text(
+        frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
+    )
     index = VaultIndex()
     index.reparse(foreign)
     assert len(index) == 0
@@ -251,7 +253,7 @@ def test_reconcile_leaves_correctly_placed_file(cfg: Config, vault: Path) -> Non
 
 
 def test_reconcile_ignores_foreign_file(cfg: Config, vault: Path) -> None:
-    foreign = vault / "tasks" / "open" / "tolaria.md"
+    foreign = vault / "tasks" / "open" / "othertool.md"
     foreign.parent.mkdir(parents=True, exist_ok=True)
     foreign.write_text(
         frontmatter.dumps(frontmatter.Post("x", title="Foreign", status="done")),
@@ -418,9 +420,11 @@ def test_index_recent_sorted_by_mtime_desc_and_limited(vault: Path) -> None:
 def test_scan_recent_fallback_mtime_sorted_and_shards_ids_only(cfg: Config, vault: Path) -> None:
     _write_note(vault, note_id="n-old", title="Old", mtime=1000.0)
     _write_task(vault, task_id="t-new", status="open", mtime=5000.0)
-    # A foreign Tolaria file (no shards id) must be excluded.
-    foreign = vault / "notes" / "tolaria.md"
-    foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
+    # A foreign file (no shards id) must be excluded.
+    foreign = vault / "notes" / "othertool.md"
+    foreign.write_text(
+        frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
+    )
     rows = scan_recent(cfg, limit=10)
     ids = [r["id"] for r in rows]
     assert ids == ["t-new", "n-old"]  # mtime desc; foreign excluded

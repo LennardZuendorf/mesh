@@ -79,7 +79,7 @@ change.
 
 #### Scenario: Dangling and foreign nodes never break the walk
 
-- **Given** a vault containing a malformed `.md`, a Tolaria-owned file with no shards id, and a note whose `related` names a deleted id
+- **Given** a vault containing a malformed `.md`, a file owned by another tool with no shards id, and a note whose `related` names a deleted id
 - **When** an inbound query runs
 - **Then** those files are skipped silently and the query still returns every valid inbound node
 
@@ -115,13 +115,13 @@ without destroying the task as live work.
 
 #### Scenario: Holder releases
 
-- **Given** `t-7B4Q` is `claimed` by tolaria-agent
-- **When** tolaria-agent releases it
+- **Given** `t-7B4Q` is `claimed` by notes-agent
+- **When** notes-agent releases it
 - **Then** `claimed_by` is null, `status` is `open`, the file stays in `tasks/open/`, and a re-run is a no-op
 
 #### Scenario: Breaking someone else's claim is explicit
 
-- **Given** `t-7B4Q` is claimed by tolaria-agent and idle for four days
+- **Given** `t-7B4Q` is claimed by notes-agent and idle for four days
 - **When** the operator releases it without forcing
 - **Then** the command exits 4 naming the holder; **and when** the operator forces, the claim clears
 
@@ -204,9 +204,9 @@ creator.
 
 #### Scenario: Who appended
 
-- **Given** tolaria-agent appends a timestamped line to a note flights-agent created
+- **Given** notes-agent appends a timestamped line to a note flights-agent created
 - **When** the note is read
-- **Then** the stamp names tolaria-agent alongside the ISO instant
+- **Then** the stamp names notes-agent alongside the ISO instant
 
 #### Scenario: Who finished
 
@@ -245,17 +245,17 @@ annotation, and the missing `shards_session_start` MUST ship.
 ```
 $ shards graph t-184G --direction in
 n-9QQ2  note  Overlap with the flights rewrite
-n-FEWP  note  Tolaria sync notes
+n-FEWP  note  Sync notes
 
 $ shards task list --status open,claimed --stale 2d
-t-7B4Q  claimed  tolaria-agent  Migrate the vault watcher
+t-7B4Q  claimed  notes-agent    Migrate the vault watcher
 t-2M8C  open     -              Draft the retry policy
 
 $ shards task append t-10NT "waiting on [[n-FEWP]] before I continue" --timestamp
 appended t-10NT
 
 $ shards task release t-7B4Q
-task t-7B4Q is claimed by tolaria-agent          # exit 4
+task t-7B4Q is claimed by notes-agent          # exit 4
 $ shards task release t-7B4Q --force
 released t-7B4Q
 

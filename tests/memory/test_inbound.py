@@ -234,7 +234,7 @@ def test_inbound_skips_malformed_frontmatter(cfg: Config, vault: Path) -> None:
 
 
 def test_inbound_skips_a_foreign_file_with_no_shards_id(cfg: Config, vault: Path) -> None:
-    """A coexisting Tolaria/foreign ``.md`` — even one that happens to carry a
+    """A coexisting foreign ``.md`` — even one that happens to carry a
     ``related``-shaped key — is not a valid source (no shards id)."""
     _seed_note(vault, note_id="n-target", title="Target")
 

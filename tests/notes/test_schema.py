@@ -214,12 +214,12 @@ def test_note_unknown_keys_round_trip_unchanged() -> None:
         "updated": _now(),
         "related": [],
         # Keys shards does not own must survive a load/dump cycle untouched.
-        "tolaria_pinned": True,
+        "othertool_pinned": True,
         "custom_ref": "PROJ-123",
     }
     note = Note.model_validate(payload)
     dumped = note.model_dump()
-    assert dumped["tolaria_pinned"] is True
+    assert dumped["othertool_pinned"] is True
     assert dumped["custom_ref"] == "PROJ-123"
 
 

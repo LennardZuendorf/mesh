@@ -65,7 +65,7 @@ roster, the vault path, the tag-mutation trap, and the coordination protocol.
 #### Scenario: An agent knows who it is before its first call
 
 - **Given** a config with `[core].agent` (or `$SHARDS_AGENT`) resolving to `flights-agent` and
-  `[tasks].collections = ["flights-agent", "tolaria-agent"]`
+  `[tasks].collections = ["flights-agent", "notes-agent"]`
 - **When** an MCP client connects and reads the server instructions
 - **Then** the block names `flights-agent` as this session's identity, lists both valid owners,
   and gives the vault path — so the agent can interpret every `owner` / `claimed_by` value it
@@ -157,7 +157,7 @@ next action — never a bare exception string, never a `BaseException` escaping 
 
 #### Scenario: Claim conflict
 
-- **Given** `t-abc` is claimed by `tolaria-agent`
+- **Given** `t-abc` is claimed by `notes-agent`
 - **When** `flights-agent` calls the claim tool
 - **Then** the error payload carries the conflict kind, the task id, the existing owner (already
   on `ClaimConflictError`), and the recommended next action — pick another task, do not steal

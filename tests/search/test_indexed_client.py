@@ -148,7 +148,7 @@ def test_search_maps_hits_to_search_results(
 def test_search_foreign_file_id_none(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    foreign = _seed_foreign(vault, "notes", "tolaria", title="Foreign Doc")
+    foreign = _seed_foreign(vault, "notes", "othertool", title="Foreign Doc")
     _patch_search(monkeypatch, _ndjson({"path": str(foreign), "score": 0.8, "snippet": "s"}))
     results = indexed_client.search(cfg, "foreign")
     assert len(results) == 1

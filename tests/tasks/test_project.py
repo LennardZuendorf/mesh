@@ -151,11 +151,11 @@ def test_update_task_without_project_injects_no_key(cfg: Config, vault: Path) ->
 
 
 def test_update_task_without_project_roundtrips_foreign_keys(cfg: Config, vault: Path) -> None:
-    path = _seed_task(vault, task_id="t-f", extra={"tolaria_pinned": True, "legacy_project": "X"})
+    path = _seed_task(vault, task_id="t-f", extra={"othertool_pinned": True, "legacy_project": "X"})
     update_task(cfg, "t-f", priority="high")
     meta = _reload(path).metadata
     assert "project" not in meta
-    assert meta["tolaria_pinned"] is True
+    assert meta["othertool_pinned"] is True
     # A foreign/legacy ``project``-shaped value under a different key round-trips.
     assert meta["legacy_project"] == "X"
 

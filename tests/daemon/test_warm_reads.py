@@ -167,7 +167,7 @@ def _task(
 def seeded_vault(vault: Path) -> Path:
     """One canonical corpus every read in this module is asserted against.
 
-    Deliberately includes the awkward cases: a foreign (id-less) Tolaria file that
+    Deliberately includes the awkward cases: a foreign (id-less) othertool file that
     the tag pull must still surface with ``id: None``, a file whose frontmatter is
     malformed YAML that every reader must skip, a note carrying a wikilink that
     dangles, both task folders, and — the case that matters most for parity —
@@ -225,9 +225,11 @@ def seeded_vault(vault: Path) -> Path:
         "body",
     )
 
-    # Coexisting Tolaria markdown: no shards id, so it is invisible to note/task
+    # Coexisting othertool markdown: no shards id, so it is invisible to note/task
     # list but part of the search corpus.
-    _write(vault / "notes" / "tolaria.md", {"title": "Foreign", "tags": ["shared"]}, "foreign body")
+    _write(
+        vault / "notes" / "othertool.md", {"title": "Foreign", "tags": ["shared"]}, "foreign body"
+    )
     # Malformed frontmatter: skipped silently by every reader, warm or cold.
     (vault / "notes" / "broken.md").write_text("---\nid: [n-x\n---\nbroken\n", encoding="utf-8")
     return vault
@@ -437,7 +439,7 @@ def test_list_rows_carry_no_body_on_either_path(reads: DaemonClient, cfg: Config
 
 
 def test_tag_pull_includes_foreign_files(reads: DaemonClient, cfg: Config) -> None:
-    """A tag pull covers the *whole* corpus — coexisting Tolaria files included.
+    """A tag pull covers the *whole* corpus — coexisting othertool files included.
 
     This is the property that forced the warm index to hold id-less rows too: a
     warm tag pull that saw only shards entities would silently drop foreign hits
@@ -868,7 +870,7 @@ def test_writes_still_work_with_the_daemon_up(
 def test_index_holds_foreign_rows_in_the_corpus_only(seeded_vault: Path) -> None:
     """Foreign files join ``corpus()`` but never ``entries()`` / ``recent()`` / ``len()``."""
     index = VaultIndex()
-    foreign = seeded_vault / "notes" / "tolaria.md"
+    foreign = seeded_vault / "notes" / "othertool.md"
     index.reparse(foreign)
     index.reparse(seeded_vault / "notes" / "n-alpha.md")
 

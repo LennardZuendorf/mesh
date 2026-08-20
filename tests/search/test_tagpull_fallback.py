@@ -191,7 +191,7 @@ def test_tagpull_recursive_corpus_notes_and_tasks(cfg: Config, vault: Path) -> N
 
 def test_tagpull_foreign_file_id_none(cfg: Config, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-real", tags=["shared"])
-    _seed_foreign(vault, "notes", "tolaria-note", title="Foreign", tags=["shared"])
+    _seed_foreign(vault, "notes", "othertool-note", title="Foreign", tags=["shared"])
     results = tagpull(cfg, tags=["shared"])
     by_id = {r.id for r in results}
     assert "n-real" in by_id

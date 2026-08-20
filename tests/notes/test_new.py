@@ -134,12 +134,12 @@ def test_create_note_roundtrips_unknown_frontmatter_key(cfg: Config, vault: Path
     note = create_note(cfg, "Round Trip", body="x")
     path = note_folder("note", vault) / f"{note.id}.md"
     post = frontmatter.loads(path.read_text(encoding="utf-8"))
-    post.metadata["tolaria_pinned"] = True
+    post.metadata["othertool_pinned"] = True
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
 
     view = get_note(cfg, note.id)
     dumped = view.note.model_dump()
-    assert dumped.get("tolaria_pinned") is True
+    assert dumped.get("othertool_pinned") is True
 
 
 def test_create_note_resolves_wikilinks_into_related(cfg: Config, vault: Path) -> None:

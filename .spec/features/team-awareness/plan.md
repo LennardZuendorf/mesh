@@ -280,7 +280,7 @@ agent.
 
 **Test scenarios:**
 
-- A timestamped note append by tolaria-agent on a flights-agent note names tolaria-agent; the ISO
+- A timestamped note append by notes-agent on a flights-agent note names notes-agent; the ISO
   token remains the first field on the line.
 - Finish and cancel sections name the acting agent; idempotent re-runs add nothing.
 - No frontmatter key is added; a file's frontmatter is byte-identical to the pre-change output apart

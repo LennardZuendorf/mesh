@@ -11,7 +11,7 @@ on every body write and persist the derived ``related`` list — ``related`` is 
 pure function of the body.
 
 Only shards-owned notes (id ``n-…``) participate in title resolution, mirroring
-``list_notes``: a coexisting Tolaria/foreign file (title present, non-shards id)
+``list_notes``: a coexisting foreign file (title present, non-shards id)
 must never shadow a link nor leak a foreign id into ``related``.
 """
 
@@ -60,10 +60,10 @@ def _seed_note(
     return path
 
 
-def _seed_tolaria(vault: Path, name: str, meta: dict[str, object]) -> Path:
+def _seed_foreign(vault: Path, name: str, meta: dict[str, object]) -> Path:
     """Write a non-shards Markdown file (id is not a shards ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
-    post = frontmatter.Post("Tolaria content.")
+    post = frontmatter.Post("Foreign content.")
     post.metadata = meta
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
@@ -203,13 +203,13 @@ def test_find_dangling_dedupes_across_notes_and_tasks(vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Shards-notes-only: coexisting Tolaria files must not resolve or leak ids       #
+# Shards-notes-only: coexisting foreign files must not resolve or leak ids      #
 # --------------------------------------------------------------------------- #
 
 
-def test_foreign_tolaria_title_does_not_resolve(vault: Path) -> None:
+def test_foreign_title_does_not_resolve(vault: Path) -> None:
     # A non-shards file with a title but a foreign id must not shadow the link.
-    _seed_tolaria(vault, "daily-2026-06-01", {"id": "tol-123", "title": "Daily Log"})
+    _seed_foreign(vault, "daily-2026-06-01", {"id": "ext-123", "title": "Daily Log"})
     _seed_note(vault, note_id="n-src", title="Src", body="See [[Daily Log]].")
     out_body, related = resolve_wikilinks("See [[Daily Log]].", vault)
     assert related == []  # foreign id never leaks into related
@@ -219,7 +219,7 @@ def test_foreign_tolaria_title_does_not_resolve(vault: Path) -> None:
 
 
 def test_shards_note_wins_over_foreign_same_title(vault: Path) -> None:
-    _seed_tolaria(vault, "foreign", {"id": "tol-9", "title": "Shared Title"})
+    _seed_foreign(vault, "foreign", {"id": "ext-9", "title": "Shared Title"})
     _seed_note(vault, note_id="n-shards", title="Shared Title")
     _, related = resolve_wikilinks("[[Shared Title]]", vault)
     assert related == ["n-shards"]

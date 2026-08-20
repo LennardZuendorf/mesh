@@ -73,12 +73,12 @@ def _config(
 def test_block_names_resolved_identity_and_roster() -> None:
     config = _config(
         agent="flights-agent",
-        collections=["flights-agent", "tolaria-agent"],
+        collections=["flights-agent", "notes-agent"],
         vault_path="/home/agent/vault",
     )
     block = build_instructions(config)
     assert "flights-agent" in block
-    assert "tolaria-agent" in block
+    assert "notes-agent" in block
     assert "/home/agent/vault" in block
 
 
@@ -90,15 +90,15 @@ def test_block_varies_with_config_not_a_constant_string() -> None:
     )
     second = build_instructions(
         _config(
-            agent="tolaria-agent",
-            collections=["tolaria-agent", "cowork-agent"],
+            agent="notes-agent",
+            collections=["notes-agent", "cowork-agent"],
             vault_path="/vault/b",
         )
     )
     assert first != second
     assert "flights-agent" in first
     assert "flights-agent" not in second
-    assert "tolaria-agent" in second
+    assert "notes-agent" in second
     assert "cowork-agent" in second
     assert "cowork-agent" not in first
     assert "/vault/a" in first
@@ -169,7 +169,7 @@ def test_degraded_variants_never_raise(config: Config | None) -> None:
     [
         None,
         _config(agent=None, collections=[]),
-        _config(agent="flights-agent", collections=["flights-agent", "tolaria-agent"]),
+        _config(agent="flights-agent", collections=["flights-agent", "notes-agent"]),
     ],
     ids=["no-config", "partial-config", "full-config"],
 )
@@ -201,7 +201,7 @@ def test_budget_constant_is_2048_bytes() -> None:
     [
         None,
         _config(agent=None, collections=[]),
-        _config(agent="flights-agent", collections=["flights-agent", "tolaria-agent"]),
+        _config(agent="flights-agent", collections=["flights-agent", "notes-agent"]),
         _config(collections=[f"agent-{i}" for i in range(25)]),  # a large roster
     ],
     ids=["no-config", "partial-config", "full-config", "large-roster"],
