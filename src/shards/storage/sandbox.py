@@ -1,6 +1,6 @@
 """Path sandboxing.
 
-All file access must stay inside the configured ``tolaria_path``. Both the base
+All file access must stay inside the configured ``vault_path``. Both the base
 and the candidate are canonicalized with ``os.path.realpath`` (which resolves
 symlinks and ``..`` segments); the candidate is rejected unless it is the base
 itself or lives beneath it. Canonicalizing *both* sides matters on macOS, where

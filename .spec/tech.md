@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-07-18
+updated: 2026-08-20
 ---
 
 # Shards — Technical Architecture
@@ -21,10 +21,12 @@ Daemon-centric, never daemon-dependent. Warm index + watcher in the daemon; writ
 | Data | Markdown + `python-frontmatter`, `msgspec` |
 | Watcher | `watchdog` |
 | Agents | `FastMCP` |
-| Vault | Tolaria folder + MCP (inherited) |
+| Vault | Any Markdown folder (operator-owned; Obsidian vault works as-is) |
 | Search engine | `indexed` (first-party hybrid; Shards wraps) |
 
 **Added deps only:** typer, python-frontmatter, msgspec, watchdog, FastMCP. Shards code stays small — wrapper, daemon, locks, wikilinks.
+
+**Vault requirement.** Shards needs only a directory it can write `notes/`/`tasks/` into — no notes application need be installed, running, or detected; `shards init` creates the folder when none exists. Obsidian is the maintainer's reference pairing, not a dependency: it is a supported value for `[core].vault_path`, not a requirement any code path checks for.
 
 ---
 
@@ -52,6 +54,7 @@ src/shards/
 5. Agent content is inert data.
 6. Instant CLI: daemon-only deps (`watchdog`) import lazily inside the daemon path, never at CLI import time.
 7. Read-lenses serve from the warm index when the daemon is up; a disk re-parse happens only on the daemon-down fallback.
+8. Shards owns the interface, not the vault — versioning, sync, and backup are the vault owner's job. That is the basis for hard delete (`unlink`, no trash, no promised recovery) and for skipping/round-tripping any file or key shards did not write, for any tool sharing the folder.
 
 ---
 
@@ -101,7 +104,7 @@ A task is a note with `type: task`, so every cross-cutting mechanic has **one** 
 | Folders | `storage/files.py` | `type`/`status` drives path; watcher reconciles mismatch. Notes: `note→notes/`, `log/decision/reference→notes/{logs,decisions,references}/`, `project→notes/projects/`. Tasks: `open\|claimed→tasks/open/`, `done\|cancelled→tasks/done/`. |
 | Atomic write | `storage/files.py` | temp + `os.replace`. `finish`/`cancel` order write-then-move so a crash mid-op never strands the file in an unrecoverable state (a terminal status must not sit in `tasks/open/` where the idempotent no-op refuses to move it). |
 | Locks | `storage/locks.py` | `O_EXCL` per entity; stale if PID dead or >300s; `shards status` reports count. Stale reclaim must be race-safe — re-`O_EXCL` rather than unlink-then-create, so a reclaimer never unlinks a fresh lock a peer just took. |
-| Sandbox | `storage/sandbox.py` | `realpath` must stay in `tolaria_path` |
+| Sandbox | `storage/sandbox.py` | `realpath` must stay in `vault_path` |
 | Exit codes | `cli/` | 0 ok · 1 error · 2 validation · 3 not found · 4 claimed · 5 blocked (`--strict` only, Phase 3). Codes live on the domain exception classes; the CLI boundary maps them once. |
 | Config | `~/.shards/config.toml` | `[core]` path+agent · `[search]` collection, hybrid, threshold · `[tasks]` collections. Every path value is `expanduser()`'d (`~` resolves). `$SHARDS_AGENT` overrides agent. Missing config → exit 2. Test override: `SHARDS_CONFIG_PATH`. |
 | Socket | `daemon/server.py`, `client.py` | NDJSON RPC over a `0600` unix socket; envelope + method table under [Implemented surfaces](#implemented-surfaces) |

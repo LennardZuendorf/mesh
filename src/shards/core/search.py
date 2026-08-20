@@ -22,6 +22,7 @@ plain ``core`` primitive.
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +31,28 @@ from shards.index import indexed_client
 from shards.index.fallback import search_fallback
 from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
-from shards.storage.files import read_post
+from shards.storage.files import read_body
 
-__all__ = ["hit_dict", "query_search", "search_health"]
+__all__ = ["hit_dict", "query_search", "resolve_effective_threshold", "search_health"]
+
+
+def resolve_effective_threshold(flag: float | None, config: Config) -> float | None:
+    """Resolve the ``threshold`` to pass to :func:`query_search`.
+
+    ``None`` only when neither an explicit caller value (``--threshold`` on the
+    CLI, or the equivalent typed MCP parameter) *nor* an explicit
+    ``[search].threshold`` in config was given — :func:`query_search` then lets
+    the substring fallback apply its own floor (root tech.md § B5) instead of a
+    silently-defaulted cutoff. Shared by the ``shards search`` CLI command and
+    the ``shards_search`` MCP tool so this three-way resolution is one mechanism,
+    not two copies that could drift (the two surfaces "must behave identically",
+    per the module docstring above).
+    """
+    if flag is not None:
+        return flag
+    if config.search.threshold_explicit():
+        return config.search.threshold
+    return None
 
 
 def _daemon_up() -> bool:
@@ -55,33 +75,59 @@ def query_search(
     owner: str | None,
     status: str | None,
     limit: int,
-    threshold: float,
+    threshold: float | None,
     quiet: bool,
-) -> list[SearchResult]:
+) -> tuple[list[SearchResult], str]:
     """Route a query to hybrid ``indexed`` recall or the substring fallback.
 
-    Hybrid runs only when ``[search].hybrid`` is on *and* the daemon is up; any
-    ``indexed`` failure (missing binary or non-zero exit) degrades to the substring
-    fallback, which prints its own stderr notice. Every filter — ``type`` / ``tags``
-    / ``owner`` / ``status`` — is applied post-retrieval by both paths; ``quiet`` is
-    forwarded so a degradation notice honours ``--quiet`` whichever path emits it.
+    Returns ``(results, mode)`` — ``mode`` is ``"indexed"`` only when
+    ``indexed`` actually answered, ``"fallback"`` otherwise (agent-usability/4,
+    round-1 review Finding 1). This is the branch *actually taken*, not a
+    prediction from :func:`search_health`'s static gates: those gates cannot
+    see a genuine runtime failure — a non-zero ``indexed`` exit for a reason
+    other than "binary absent" (corrupt collection, resource exhaustion, an
+    internal crash) — so a caller computing mode from the gates alone would
+    confidently mislabel a substring hit as ranked recall. Reusing this
+    return value is now the only supported way to know which engine answered;
+    computing it independently via a second :func:`search_health` call is the
+    bug this replaces.
+
+    Hybrid is attempted only when ``[search].hybrid`` is on, the daemon is up,
+    *and* ``[search].collection`` is set (hoisted here from
+    ``indexed_client.search``'s own internal check, so an unset collection
+    short-circuits to the fallback branch below directly, structurally
+    mirroring the gates :func:`search_health` reports, rather than round-
+    tripping through ``indexed_client.search``'s own silent redirect and
+    risking a mode mismatch). Any ``indexed`` failure (missing binary or
+    non-zero exit) degrades to the substring fallback, which prints its own
+    stderr notice. Every filter — ``type`` / ``tags`` / ``owner`` / ``status``
+    — is applied post-retrieval by both paths; ``quiet`` is forwarded so a
+    degradation notice honours ``--quiet`` whichever path emits it.
+
+    ``threshold`` is ``None`` when the caller has no *explicit* value (neither
+    ``--threshold`` nor an explicit ``[search].threshold`` in config) — the
+    substring fallback then applies its own floor (root tech.md § B5) rather
+    than a silently-defaulted cutoff. The ``indexed`` path is unaffected by that
+    rule: it always gets a concrete value, defaulting to ``[search].threshold``
+    when the caller left it unset.
     """
-    if config.search.hybrid and _daemon_up():
+    if config.search.hybrid and config.search.collection is not None and _daemon_up():
         try:
-            return indexed_client.search(
+            results = indexed_client.search(
                 config,
                 query,
                 limit=limit,
-                threshold=threshold,
+                threshold=threshold if threshold is not None else config.search.threshold,
                 type_filter=type_filter,
                 tags=tags,
                 owner=owner,
                 status=status,
                 quiet=quiet,
             )
+            return results, "indexed"
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass  # indexed unavailable → fall through to the substring scan below
-    return search_fallback(
+    results = search_fallback(
         config,
         query,
         type_filter=type_filter,
@@ -92,6 +138,7 @@ def query_search(
         threshold=threshold,
         quiet=quiet,
     )
+    return results, "fallback"
 
 
 def search_health(config: Config) -> dict[str, Any]:
@@ -136,10 +183,15 @@ def search_health(config: Config) -> dict[str, Any]:
     return payload
 
 
-def _read_body(path: str) -> str:
-    """Return the Markdown body at ``path`` (empty on a read/parse failure)."""
-    post = read_post(Path(path))
-    return post.content if post is not None else ""
+def _iso_z(value: datetime) -> str:
+    """Render a UTC-aware datetime with a ``Z`` suffix instead of ``+00:00``.
+
+    Mirrors :func:`shards.schemas.note._iso_z` — kept as a local one-liner per
+    the DRY-filter convention (root tech.md § Duplication) rather than a shared
+    import across an unrelated module boundary.
+    """
+    text = value.isoformat()
+    return f"{text[:-6]}Z" if text.endswith("+00:00") else text
 
 
 def hit_dict(result: SearchResult, *, meta_only: bool, full: bool) -> dict[str, Any]:
@@ -162,11 +214,11 @@ def hit_dict(result: SearchResult, *, meta_only: bool, full: bool) -> dict[str, 
     if result.owner is not None:
         hit["owner"] = result.owner
     if result.updated is not None:
-        hit["updated"] = result.updated.isoformat()
+        hit["updated"] = _iso_z(result.updated)
     if meta_only:
         return hit
     if full:
-        hit["snippet"] = _read_body(result.path)
+        hit["snippet"] = read_body(Path(result.path))
     elif result.snippet is not None:
         hit["snippet"] = result.snippet
     return hit

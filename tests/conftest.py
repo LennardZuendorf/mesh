@@ -28,7 +28,7 @@ _VAULT_SUBDIRS = (
 
 @pytest.fixture
 def vault(tmp_path: Path) -> Path:
-    """A tmp_path-backed Tolaria vault with ``notes/`` and ``notes/.locks/``.
+    """A tmp_path-backed vault with ``notes/`` and ``notes/.locks/``.
 
     tmp_path is torn down by pytest after each test, so no explicit cleanup is
     needed.
@@ -60,7 +60,7 @@ def shards_config(
         "\n".join(
             (
                 "[core]",
-                f'tolaria_path = "{vault}"',
+                f'vault_path = "{vault}"',
                 'agent = "test-agent"',
                 "",
                 "[search]",

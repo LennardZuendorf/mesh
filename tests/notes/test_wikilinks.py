@@ -11,7 +11,7 @@ on every body write and persist the derived ``related`` list — ``related`` is 
 pure function of the body.
 
 Only shards-owned notes (id ``n-…``) participate in title resolution, mirroring
-``list_notes``: a coexisting Tolaria/foreign file (title present, non-shards id)
+``list_notes``: a coexisting foreign file (title present, non-shards id)
 must never shadow a link nor leak a foreign id into ``related``.
 """
 
@@ -54,16 +54,18 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
-def _seed_tolaria(vault: Path, name: str, meta: dict[str, object]) -> Path:
+def _seed_foreign(vault: Path, name: str, meta: dict[str, object]) -> Path:
     """Write a non-shards Markdown file (id is not a shards ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
-    path.write_text(
-        frontmatter.dumps(frontmatter.Post("Tolaria content.", **meta)), encoding="utf-8"
-    )
+    post = frontmatter.Post("Foreign content.")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -147,14 +149,67 @@ def test_find_dangling_empty_when_all_resolve(vault: Path) -> None:
     assert find_dangling(vault) == []
 
 
+def _seed_task(
+    vault: Path,
+    *,
+    task_id: str,
+    rel: str = "tasks/open",
+    body: str = "Task body.",
+) -> Path:
+    """Write a shards task straight to disk (core-hardening/4: dangling covers tasks too)."""
+    meta: dict[str, object] = {
+        "id": task_id,
+        "type": "task",
+        "title": "A Task",
+        "tags": [],
+        "owner": "seed-agent",
+        "status": "open",
+        "created": _WHEN,
+        "updated": _WHEN,
+        "related": [],
+    }
+    folder = vault / rel
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    return path
+
+
+def test_find_dangling_covers_task_bodies(vault: Path) -> None:
+    # root tech.md § B6 / product.md "Vault-health counts cover the whole vault":
+    # a title-form wikilink in a task body that matches no note is dangling too.
+    _seed_task(vault, task_id="t-open1", body="Blocked on [[Missing Design Doc]].")
+    assert "Missing Design Doc" in find_dangling(vault)
+
+
+def test_find_dangling_task_id_form_link_is_not_dangling(vault: Path) -> None:
+    # An id-form link in a task body is never dangling, matching note behaviour.
+    _seed_task(vault, task_id="t-open2", body="See [[n-nope]] and [[t-nope]].")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_task_title_link_resolving_to_a_note_is_not_dangling(vault: Path) -> None:
+    _seed_note(vault, note_id="n-spec", title="Design Doc")
+    _seed_task(vault, task_id="t-open3", body="See [[Design Doc]] for details.")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_dedupes_across_notes_and_tasks(vault: Path) -> None:
+    _seed_note(vault, note_id="n-s1", title="S1", body="[[Phantom]]")
+    _seed_task(vault, task_id="t-open4", body="Also references [[Phantom]].")
+    assert find_dangling(vault) == ["Phantom"]
+
+
 # --------------------------------------------------------------------------- #
-# Shards-notes-only: coexisting Tolaria files must not resolve or leak ids       #
+# Shards-notes-only: coexisting foreign files must not resolve or leak ids      #
 # --------------------------------------------------------------------------- #
 
 
-def test_foreign_tolaria_title_does_not_resolve(vault: Path) -> None:
+def test_foreign_title_does_not_resolve(vault: Path) -> None:
     # A non-shards file with a title but a foreign id must not shadow the link.
-    _seed_tolaria(vault, "daily-2026-06-01", {"id": "tol-123", "title": "Daily Log"})
+    _seed_foreign(vault, "daily-2026-06-01", {"id": "ext-123", "title": "Daily Log"})
     _seed_note(vault, note_id="n-src", title="Src", body="See [[Daily Log]].")
     out_body, related = resolve_wikilinks("See [[Daily Log]].", vault)
     assert related == []  # foreign id never leaks into related
@@ -164,7 +219,7 @@ def test_foreign_tolaria_title_does_not_resolve(vault: Path) -> None:
 
 
 def test_shards_note_wins_over_foreign_same_title(vault: Path) -> None:
-    _seed_tolaria(vault, "foreign", {"id": "tol-9", "title": "Shared Title"})
+    _seed_foreign(vault, "foreign", {"id": "ext-9", "title": "Shared Title"})
     _seed_note(vault, note_id="n-shards", title="Shared Title")
     _, related = resolve_wikilinks("[[Shared Title]]", vault)
     assert related == ["n-shards"]

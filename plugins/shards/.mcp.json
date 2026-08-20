@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "shards": {
+      "command": "shards-mcp"
+    }
+  }
+}

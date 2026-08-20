@@ -32,12 +32,11 @@ shape. Three responsibilities, all daemon-optional:
   so it additionally **swallows** every subprocess failure (a dead ``indexed`` must
   never crash the observer); :func:`full_rebuild` / :func:`reindex` run on the main
   thread and let failures propagate. ``reindex`` is the delegate ``shards reindex``
-  calls.
-
-* **:func:`register_hook`** — subscribe :func:`incremental_update` to a daemon-owned
-  :class:`~shards.index.watcher.ChangeHooks` registry so a vault edit re-indexes
-  just that file. The mechanism lives here; the daemon owns the registry and wires
-  it up.
+  calls. The daemon subscribes :func:`incremental_update` to its own
+  :class:`~shards.index.watcher.ChangeHooks` registry directly (an inlined lambda at
+  ``daemon/server.py`` — see :func:`shards.daemon.server.DaemonServer.start`), rather
+  than through a wrapper here (core-hardening/8 deleted the unused
+  ``register_hook`` indirection: zero production callers).
 
 The subprocess calls live behind the small ``_run_indexed_*`` seams so the real
 ``indexed`` binary is never invoked in unit tests (they monkeypatch the seam). For
@@ -54,7 +53,6 @@ import functools
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import msgspec
 
@@ -69,11 +67,6 @@ from shards.index.tagpull import (
 from shards.schemas.config import Config
 from shards.schemas.search import SearchResult
 from shards.storage.sandbox import safe_resolve
-
-if TYPE_CHECKING:
-    # Typing-only import: keep the watcher (and its ``watchdog`` dependency) off
-    # this module's runtime import graph so the CLI search path stays cheap.
-    from shards.index.watcher import ChangeHooks
 
 _INDEXED_BIN = "indexed"
 _DEFAULT_LIMIT = 10
@@ -255,7 +248,7 @@ def search(
         )
 
     raw = _run_indexed_search(collection, query, limit)
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
 
     results: list[SearchResult] = []
     for hit in _parse_ndjson(raw):
@@ -313,7 +306,7 @@ def full_rebuild(config: Config) -> None:
     collection = config.search.collection
     if collection is None:
         return
-    _run_indexed_create(config.core.tolaria_path, collection)
+    _run_indexed_create(config.core.vault_path, collection)
 
 
 def reindex(config: Config) -> None:
@@ -321,20 +314,10 @@ def reindex(config: Config) -> None:
     full_rebuild(config)
 
 
-def register_hook(config: Config, hooks: ChangeHooks) -> None:
-    """Subscribe :func:`incremental_update` to a daemon-owned change-hook registry."""
-
-    def _hook(path: Path) -> None:
-        incremental_update(config, path)
-
-    hooks.register(_hook)
-
-
 __all__ = [
     "full_rebuild",
     "incremental_update",
     "indexed_available",
-    "register_hook",
     "reindex",
     "search",
 ]

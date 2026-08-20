@@ -1,6 +1,6 @@
 # AGENTS.md — Shards Engineering Guide
 
-> **`shards`** — a mesh for multi-agent collaboration over a single Tolaria Markdown folder.
+> **`shards`** — a mesh for multi-agent collaboration over a single Markdown folder.
 > Three verbs (`note`, `task`, `search`), one daemon, one folder, all agents.
 
 ---
@@ -46,7 +46,7 @@ coverage, and an instant-feeling CLI (heavy work lives in the warm daemon, not a
 ## 2. Repository Goals & Connections
 
 **Goal.** Give a human operator and a fleet of agents one shared substrate for capturing
-knowledge and coordinating work over a single Tolaria Markdown folder — without a database, a
+knowledge and coordinating work over a single Markdown folder — without a database, a
 memory subsystem, or an external task tracker.
 
 - **Notes + search = memory.** No separate memory store; recall delegates to `indexed`.
@@ -57,9 +57,9 @@ memory subsystem, or an external task tracker.
 
 | System | Role | Boundary |
 |---|---|---|
-| **Tolaria vault + MCP** | The one Markdown folder (`notes/`, `tasks/`) — source of truth — plus Tolaria's filesystem-direct MCP read tools | Shards **owns writes** and cheap direct reads; **coexists** with Tolaria on the same folder; Git/sync and the vault are Tolaria's job |
+| **The vault folder** | The one Markdown folder (`notes/`, `tasks/`) — source of truth | Shards **owns writes** and cheap direct reads inside `notes/` and `tasks/`; it **coexists** with any other tool on the same folder (Obsidian and its plugins, another MCP server, git). If `[search].collection` is set, `shards reindex` hands the whole configured vault root to `indexed`, which ingests everything under it — not just `notes/`/`tasks/`. Versioning, sync and backup are the vault owner's job, never shards's |
 | **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Shards's `search` is a thin wrapper; the shards↔indexed contract is co-designed; falls back to a built-in substring scan if absent |
-| **Cowork agents** | Consumers (flights-agent, tolaria-agent, …) | Call shards via CLI (`--json`) and the `memory` MCP tools |
+| **Cowork agents** | Consumers (flights-agent, notes-agent, …) | Call shards via CLI (`--json`) and the `memory` MCP tools |
 | **`$SHARDS_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine` |
 | **The daemon** | Watcher + warm frontmatter index; drives `indexed index update`; shared by CLI and MCP | An accelerator, never a hard dependency — CLI degrades gracefully when it's down |
 
@@ -94,7 +94,7 @@ uv run shards --help               # CLI help
 uv run shards daemon start         # Start the local daemon
 ```
 
-> Phase 1–2 is **delivered** — all five features implemented and tested (678 tests, ty clean,
+> Phase 1–2 is **delivered** — all five features implemented and tested (1331 tests, ty clean,
 > ruff clean). Phase 3 (tasks-graph) is deferred; the commands above are live.
 
 ### Git commit standards
@@ -149,7 +149,7 @@ shards/
   atomic test-and-set (`O_EXCL`); `task finish` is atomic and idempotent (the multi-file
   unblock-cascade arrives with the deferred dependency-graph phase).
 - **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys; never inject machinery into bodies.
-- **Path sandboxing.** All file access stays inside `tolaria_path`; reject traversal/symlink escapes.
+- **Path sandboxing.** All file access stays inside `vault_path`; reject traversal/symlink escapes.
 - **Owner identity is trusted local input, not an authorization boundary.** `$SHARDS_AGENT` /
   `--owner` / `claimed_by` say who an agent *claims* to be; `[tasks].collections` gates which
   identities are valid, but nothing verifies an agent calling the CLI/MCP tools actually *is* the
@@ -158,9 +158,12 @@ shards/
   as one if shards ever crosses a multi-user/multi-machine trust line.
 - **Agent content is data**, never instructions or shell input.
 - **Hash IDs** (`n-…`, `t-…`), never sequential.
-- **Delete is a hard `unlink`, by design.** No soft-delete/trash: Tolaria's git-backed vault is the
-  recovery path, and a `.trash/` would add a second delete lifecycle to keep in sync with it —
-  evaluated and deferred, not built.
+- **Delete is a hard `unlink`, by design.** No soft-delete/trash: the vault belongs to the
+  operator, and versioning/backup is the vault owner's concern (git, Obsidian Sync, Time Machine,
+  or nothing). Shards is not a backup tool and promises no recovery. A `.trash/` would add a second
+  delete lifecycle for shards to keep in sync with whatever history mechanism the operator already
+  runs — evaluated and deferred, not built. The trade-off is explicit: an unversioned vault has no
+  recovery path for a deleted note, and that is the operator's call.
 
 ---
 

@@ -103,7 +103,7 @@ def test_project_note_readable_through_note_verb(cfg: Config, vault: Path) -> No
 def test_reconcile_moves_misplaced_project_note(cfg: Config, vault: Path) -> None:
     # A project note wrongly sitting in notes/ root must move to notes/projects/.
     when = _now()
-    meta = {
+    meta: dict[str, object] = {
         "id": "n-proj",
         "type": "project",
         "title": "Q3 Launch",
@@ -114,7 +114,9 @@ def test_reconcile_moves_misplaced_project_note(cfg: Config, vault: Path) -> Non
         "related": [],
     }
     path = vault / "notes" / "n-proj.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("body", **meta)), encoding="utf-8")
+    post = frontmatter.Post("body")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
 
     final = reconcile_path(cfg, path)
 

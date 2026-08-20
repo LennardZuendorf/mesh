@@ -5,7 +5,7 @@ covers: feature sequence, build order, validation criteria
 children:
   - features/shards-rebrand/plan.md
   - features/cli-toolset-rework/plan.md
-updated: 2026-07-18
+updated: 2026-08-20
 ---
 
 # Shards — Plan
@@ -28,6 +28,7 @@ updated: 2026-07-18
 | 6 | tasks-graph | ⏳ deferred (Phase 3; design in `cli-toolset-rework/6`) | `tests/tasks/` | — |
 | 7 | [shards-rebrand](features/shards-rebrand/plan.md) | 🛠 in progress | full suite | `chore(rebrand)` |
 | 8 | [cli-toolset-rework](features/cli-toolset-rework/plan.md) | ✅ units 1–5 DONE (6 deferred) | full suite (678) | see [plan.md](features/cli-toolset-rework/plan.md) § Progress |
+| 9 | vault-agnostic | ✅ DONE — merged to root ([product.md](product.md), [tech.md](tech.md), [config.py](../src/shards/schemas/config.py)) | full suite (1331) | `docs(spec)` |
 
 ---
 

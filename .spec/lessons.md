@@ -70,3 +70,15 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** Extract a shared primitive only when the callers truly share one shape. If unifying them forces a discriminator, a strategy callable, or per-caller branches into the helper, the duplication is the simpler design — keep it. This refines "one mechanic, one home": one mechanic, yes; one *forced* shape, no.
 **Tags:** kiss, dry, duplication, abstraction, review
 **Date:** 2026-07-05
+
+### A scope claim must cover the process boundary, not just in-process walks
+**Pattern:** an analysis enumerated five in-process vault walks, concluded "shards only ever touches `notes/` and `tasks/`", and shipped that claim in `config.example.toml`. It missed `src/shards/index/indexed_client.py:309`, where `full_rebuild()` hands the *whole configured root* to the external `indexed` binary — a traversal that happens outside the process the walks were enumerated in.
+**Rule:** When claiming what a tool traverses, enumerate every path that escapes the process — subprocess arguments, external indexers, watchers — not only the in-process iterators.
+**Tags:** scope, spec-accuracy, subprocess, vault, indexed
+**Date:** 2026-08-20
+
+### Removing a dependency by name leaves the premise behind
+**Pattern:** the Tolaria removal was scoped by grepping the string "tolaria", so rationales *derived* from it survived where the word did not — e.g. `.spec/features/team-awareness/product.md` still rejected an `updated_by` key because "the git-backed vault is the audit trail", the exact premise the removal invalidated.
+**Rule:** After removing a dependency, grep for the *premises* it supplied — the guarantees other decisions leaned on — not just its name.
+**Tags:** spec-accuracy, dependency-removal, grep-scoping, vault-agnostic
+**Date:** 2026-08-20

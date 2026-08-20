@@ -44,3 +44,6 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+
+# subagent-driven-development scratch workspace (ledger, briefs, review packages)
+.superpowers/

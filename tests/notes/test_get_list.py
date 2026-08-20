@@ -4,7 +4,7 @@ Exercises R3 (Read / list): :func:`shards.core.notes.get_note` and
 :func:`shards.core.notes.list_notes` plus the ``shards note get`` / ``shards note
 list`` CLI surface. ``get`` yields frontmatter + a 200-char body preview
 (``--full`` / ``--meta-only`` / ``--related`` switch the shape); ``list`` only
-surfaces files carrying a valid shards ``n-`` id (Tolaria files are skipped) and
+surfaces files carrying a valid shards ``n-`` id (foreign files are skipped) and
 supports tag/owner/type/``--since`` filters with ``--sort`` and ``--limit``.
 
 Ordering tests seed *distinct* timestamps: Python's sort is stable, so ties fall
@@ -67,14 +67,17 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
-def _seed_tolaria(vault: Path, name: str, meta: dict[str, object] | None = None) -> Path:
+def _seed_foreign(vault: Path, name: str, meta: dict[str, object] | None = None) -> Path:
     """Write a non-shards Markdown file (no valid ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
-    post = frontmatter.Post("Tolaria content.", **(meta or {}))
+    post = frontmatter.Post("Foreign content.")
+    post.metadata = meta or {}
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
@@ -150,12 +153,12 @@ def test_get_note_not_found_raises(cfg: Config, vault: Path) -> None:
 
 
 def test_get_note_refuses_foreign_file(cfg: Config, vault: Path) -> None:
-    """Finding #1: a coexisting Tolaria file is never resolved by get."""
-    foreign = _seed_tolaria(vault, "tolaria-foo", {"title": "Tolaria Foo"})
+    """Finding #1: a coexisting foreign file is never resolved by get."""
+    foreign = _seed_foreign(vault, "othertool-foo", {"title": "Othertool Foo"})
     with pytest.raises(NoteNotFoundError):
-        get_note(cfg, "tolaria-foo")  # by stem
+        get_note(cfg, "othertool-foo")  # by stem
     with pytest.raises(NoteNotFoundError):
-        get_note(cfg, "tolaria-foo")  # by slug of the title
+        get_note(cfg, "othertool-foo")  # by slug of the title
     assert foreign.exists()  # untouched
 
 
@@ -166,9 +169,9 @@ def test_get_note_refuses_foreign_file(cfg: Config, vault: Path) -> None:
 
 def test_list_skips_files_without_shards_id(cfg: Config, vault: Path) -> None:
     _seed_note(vault, note_id="n-real", title="Real")
-    _seed_tolaria(vault, "tolaria-plain")  # no frontmatter at all
-    _seed_tolaria(vault, "tolaria-titled", {"title": "Tolaria", "tags": ["x"]})  # no id
-    _seed_tolaria(vault, "foreign-id", {"id": "x-123", "title": "Foreign"})  # wrong prefix
+    _seed_foreign(vault, "othertool-plain")  # no frontmatter at all
+    _seed_foreign(vault, "othertool-titled", {"title": "Othertool", "tags": ["x"]})  # no id
+    _seed_foreign(vault, "foreign-id", {"id": "x-123", "title": "Foreign"})  # wrong prefix
     ids = [v.note.id for v in list_notes(cfg)]
     assert ids == ["n-real"]
 
@@ -336,8 +339,8 @@ def test_cli_get_not_found_exits_3(shards_config: Path, vault: Path) -> None:
 
 def test_cli_get_foreign_file_exits_3(shards_config: Path, vault: Path) -> None:
     """Finding #1: a foreign file addressed by stem is not-found (exit 3), no crash."""
-    _seed_tolaria(vault, "tolaria-cli", {"title": "Tolaria Cli"})
-    result = _invoke(["note", "get", "tolaria-cli"])
+    _seed_foreign(vault, "othertool-cli", {"title": "Othertool Cli"})
+    result = _invoke(["note", "get", "othertool-cli"])
     assert result.exit_code == 3, result.output
 
 
@@ -406,11 +409,11 @@ def test_cli_get_quiet_emits_id_only(shards_config: Path, vault: Path) -> None:
 
 def test_cli_list_surfaces_shards_notes_only(shards_config: Path, vault: Path) -> None:
     _seed_note(vault, note_id="n-real", title="Real")
-    _seed_tolaria(vault, "tolaria", {"title": "Tolaria"})
+    _seed_foreign(vault, "othertool", {"title": "Othertool"})
     result = _invoke(["note", "list"])
     assert result.exit_code == 0, result.output
     assert "n-real" in result.output
-    assert "Tolaria" not in result.output
+    assert "Othertool" not in result.output
 
 
 def test_cli_list_json_is_array(shards_config: Path, vault: Path) -> None:

@@ -3,7 +3,7 @@ type: feature-tech
 feature: shards-rebrand
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-07-05
+updated: 2026-08-16
 ---
 
 # Feature: Shards Rebrand — Architecture
@@ -67,7 +67,9 @@ over-match.
 ## Verification gate
 
 - `uv run pytest -q` → green (the coverage suite is the real proof the rename stayed nominal).
-- `uv run ruff check .` and `uv run mypy src/` → clean.
+- `uv run ruff check .` and `uv run ty check src/` → clean. (As-built correction,
+  core-hardening/9: the toolchain is `ty`, not `mypy` — `mypy` is not and has never been a
+  project dependency; this gate could not literally pass as originally written.)
 - `git grep -in brain` → **expected residual = exactly** the `GBrain`/`gbrain` link in `product.md` and `brainstorming` under `.agents/skills/spec/`. Anything else is a miss or an over-match to fix before commit.
 - `shards --help` and `shards-mcp` resolve after `uv sync`.
 

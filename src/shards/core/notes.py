@@ -18,21 +18,22 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import frontmatter
 from msgspec import ValidationError
 
+from shards.core.errors import ShardsError
 from shards.core.ids import generate_note_id
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.note import Note, NoteType
-from shards.storage.files import atomic_write, note_folder, read_post
-from shards.storage.locks import hold
+from shards.storage.files import atomic_write, iter_md, note_folder, read_post
+from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
 
 _NOTE_TYPES: tuple[str, ...] = get_args(NoteType)
@@ -47,12 +48,18 @@ _DURATION = re.compile(r"^(\d+)([dhw])$")
 _DURATION_UNITS = {"d": "days", "h": "hours", "w": "weeks"}
 
 
-class NoteError(Exception):
+class NoteError(ShardsError):
     """Base class for note-resolution failures."""
 
 
 class NoteNotFoundError(NoteError):
     """No note matches the given id or slug (CLI exit 3)."""
+
+    code = 3
+
+    def __init__(self, id_or_slug: str) -> None:
+        self.id_or_slug = id_or_slug
+        super().__init__(f"note not found: {id_or_slug}")
 
 
 class AmbiguousSlugError(NoteError):
@@ -60,6 +67,8 @@ class AmbiguousSlugError(NoteError):
 
     Carries the matching ids so the CLI can list them in its exit-2 message.
     """
+
+    code = 2
 
     def __init__(self, slug: str, ids: list[str] | None = None) -> None:
         self.slug = slug
@@ -90,28 +99,46 @@ def _slugify(text: str) -> str:
 
 
 def _notes_root(config: Config) -> Path:
-    return config.core.tolaria_path / "notes"
+    return config.core.vault_path / "notes"
 
 
 def _iter_note_files(config: Config) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``notes/`` (``.locks/`` holds no ``.md``)."""
-    root = _notes_root(config)
-    if not root.is_dir():
-        return
-    yield from root.rglob("*.md")
+    """Yield every ``*.md`` under ``notes/`` (``.locks/`` holds no ``.md``).
+
+    The *canonical* note scope: :func:`_resolve_path`, :func:`_id_taken` and
+    :func:`note_rows` all read through here, so a file outside it is not a note as
+    far as this program is concerned. :func:`in_note_scope` is the membership form
+    of this same scope — keep the two in step. A thin recursive call onto the one
+    shared vault walk (:func:`shards.storage.files.iter_md`).
+    """
+    yield from iter_md(_notes_root(config))
+
+
+def in_note_scope(vault: Path, path: Path) -> bool:
+    """Whether ``path`` lies in the folder scope :func:`_iter_note_files` walks.
+
+    The membership form of that walk, for a caller holding a path rather than a
+    directory: the daemon's warm handlers hold one vault-wide index and must
+    project it down to exactly the rows the on-disk walk would have yielded.
+    Without this the warm answer is a *superset* of the cold one — an ``n-`` note
+    filed under ``tasks/`` is in the index but outside the note walk — and the two
+    paths stop agreeing. ``tests/daemon/test_warm_reads.py`` asserts the walk and
+    the predicate select the same set over a deliberately misfiled corpus.
+    """
+    return path.suffix == ".md" and path.is_relative_to(vault / "notes")
 
 
 def _resolve_path(config: Config, id_or_slug: str) -> Path:
     """Resolve ``<id|slug>`` to a *shards* note path, sandbox-checked.
 
     Only files whose stem carries a shards id (``n-`` prefix) are candidates, so a
-    coexisting Tolaria/foreign ``.md`` is never resolved (and thus never read,
+    coexisting foreign file (any writer sharing the folder) is never resolved (and thus never read,
     amended, or deleted) — mirroring the id gate ``list_notes`` applies. Id match
     (filename stem) wins; otherwise a normalized-title slug match. A slug hitting
     multiple notes raises :class:`AmbiguousSlugError`; no match raises
     :class:`NoteNotFoundError`.
     """
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     shards_files = [p for p in _iter_note_files(config) if p.stem.startswith(_ID_PREFIX)]
     by_id = [p for p in shards_files if p.stem == id_or_slug]
     if by_id:
@@ -161,9 +188,34 @@ def _append_under_section(body: str, block: str, section: str) -> str:
     return f"{result}\n\n{tail}" if tail else result
 
 
-def _format_block(text: str, timestamp: bool) -> str:
+def _format_stamp(iso: str, agent: str | None) -> str:
+    """Render the attribution-stamp contract: ``<iso> — <agent>`` (team-awareness/8).
+
+    The single place that contract is spelled — :func:`_format_block` (note/task
+    ``append``) and :func:`shards.core.tasks._terminate_task` (``## Outcome`` /
+    ``## Cancelled``) both call through here rather than each formatting their
+    own line, so the "who wrote this" prose stays one formatter, not two drifting
+    copies. ``agent`` is **who is actually running the command** — resolved by
+    each caller from an ``actor`` override when given (representing a resolved
+    ``--owner`` or global setting), else from ``config.agent`` — never the note's
+    ``owner`` field, which only names who a task/note is accountable to and may
+    be a completely different agent than the one appending right now (the bug
+    this unit fixes: an editor's append was silently attributed to the creator).
+    When ``agent`` is unset (no ``[core].agent``, no ``$SHARDS_AGENT``) this
+    degrades to the bare ``iso`` — no trailing separator, no placeholder — so a
+    misconfigured caller still gets a clean, human-readable line instead of a
+    dangling ``— None`` or a crash. This is prose, not metadata: nothing indexes
+    or queries the name embedded here, and no new frontmatter key is added
+    (rejected by the spec — see the feature plan's "Attribution on stamps"
+    entry).
+    """
+    return f"{iso} — {agent}" if agent else iso
+
+
+def _format_block(text: str, timestamp: bool, agent: str | None = None) -> str:
     if timestamp:
-        return f"{_now().strftime('%Y-%m-%dT%H:%M:%SZ')}\n{text}"
+        iso = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        return f"{_format_stamp(iso, agent)}\n{text}"
     return text
 
 
@@ -204,36 +256,47 @@ def create_note(
     ``created`` and ``updated`` are set to the same instant (birth). ``owner``
     defaults to the resolved config agent (``$SHARDS_AGENT`` override applied at
     load) when not given. Raises ``ValueError`` for an unknown ``note_type``.
+
+    Id allocation (``_id_taken`` scan + the ``generate_note_id`` extension loop)
+    and the write both run under the per-kind allocator lock at
+    ``notes/.locks/_create.lock`` (see :func:`shards.storage.locks.allocator_lock_path`),
+    so two concurrent creates that resolve the same candidate id can no longer
+    both pass the check and race ``os.replace`` — the second waits, rescans, and
+    extends past the collision instead of destroying the first file. A per-entity
+    lock cannot serve here (the id does not exist yet to name one), hence the
+    coarser per-kind lock; contention is bounded because a create is one scan
+    plus one write.
     """
     if note_type not in _NOTE_TYPES:
         raise ValueError(f"invalid note type: {note_type!r}")
     _validate_owner(config, owner)
 
-    vault = config.core.tolaria_path
-    now = _now()
-    note_id = generate_note_id(
-        now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
-    )
-    _, related = resolve_wikilinks(body, vault)
-    note = Note.model_validate(
-        {
-            "id": note_id,
-            "type": note_type,
-            "title": title,
-            "tags": list(tags or []),
-            "owner": owner if owner is not None else config.agent,
-            "created": now,
-            "updated": now,
-            "related": related,
-        }
-    )
+    vault = config.core.vault_path
+    with hold(allocator_lock_path(_notes_root(config))):
+        now = _now()
+        note_id = generate_note_id(
+            now.isoformat(), title, exists=lambda candidate: _id_taken(config, candidate)
+        )
+        _, related = resolve_wikilinks(body, vault)
+        note = Note.model_validate(
+            {
+                "id": note_id,
+                "type": note_type,
+                "title": title,
+                "tags": list(tags or []),
+                "owner": owner if owner is not None else config.agent,
+                "created": now,
+                "updated": now,
+                "related": related,
+            }
+        )
 
-    path = safe_resolve(vault, note_folder(note_type, vault) / f"{note_id}.md")
-    post = frontmatter.Post(body)
-    # Serialize the frontmatter from the validated model — the schema is the one
-    # on-disk contract, never a parallel hand-built dict that can drift from it.
-    post.metadata = note.model_dump(mode="python")
-    atomic_write(path, frontmatter.dumps(post))
+        path = safe_resolve(vault, note_folder(note_type, vault) / f"{note_id}.md")
+        post = frontmatter.Post(body)
+        # Serialize the frontmatter from the validated model — the schema is the
+        # one on-disk contract, never a parallel hand-built dict that can drift.
+        post.metadata = note.model_dump(mode="python")
+        atomic_write(path, frontmatter.dumps(post))
     return note
 
 
@@ -244,25 +307,40 @@ def append_note(
     *,
     section: str | None = None,
     timestamp: bool = False,
+    actor: str | None = None,
 ) -> Note:
     """Append ``text`` to a note's body and bump ``updated``.
 
     With ``section`` the text lands under a ``## {section}`` heading (created at
     end-of-body if missing). With ``timestamp`` an ISO-8601 UTC line is prepended
-    to the text block. The whole read-modify-write runs under the entity lock and
-    the result is written atomically.
+    to the text block, naming the acting agent (``<iso> — <agent>``, team-awareness/8
+    — see :func:`_format_stamp`) resolved from ``actor`` when given, else
+    ``config.agent``: the identity of *this* call, not the note's ``owner``, so an
+    editor's append is attributed to the editor even when it lands on a note it
+    does not own — the observed gap this unit closes. ``actor`` exists so a CLI
+    caller can thread the resolved ``--owner``/``[core].agent`` acting identity
+    through (the same identity ``note new``'s ``owner`` default and ``task
+    claim``/``release`` already resolve) rather than the stamp silently falling
+    back to ``config.agent`` regardless of ``--owner`` (agent-usability/`--owner`
+    role 5 — the fifth durable identity surface). The whole read-modify-write runs
+    under the entity lock and the result is written atomically. The re-read inside
+    the lock goes through :func:`shards.storage.files.read_post`; a file that
+    vanishes or turns unreadable between resolution and the lock raises
+    :class:`NoteNotFoundError`, matching :func:`get_note`.
     """
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
-    block = _format_block(text, timestamp)
+    block = _format_block(text, timestamp, actor if actor is not None else config.agent)
     with hold(_lock_path(config, note_id)):
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post = read_post(path)
+        if post is None:
+            raise NoteNotFoundError(id_or_slug)
         post.content = (
             _append_under_section(post.content, block, section)
             if section is not None
             else _append_to_end(post.content, block)
         )
-        _, related = resolve_wikilinks(post.content, config.core.tolaria_path)
+        _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         note = Note.model_validate(post.metadata)
@@ -270,15 +348,65 @@ def append_note(
     return note
 
 
-def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
-    """Apply a ``--tags`` spec to ``existing``.
+# agent-usability/3 — the one semantics sentence, verbatim in three surfaces:
+# the MCP `tags` parameter description (note_update/task_update, mcp/server.py),
+# the instructions block's tag-mutation section (mcp/instructions.py), and the
+# CLI `--tags` help on `note update` / `task update` (cli/note.py, cli/task.py).
+# A test asserts byte-identical text in all of them so they cannot drift —
+# change it here, once, and it propagates everywhere it is imported.
+TAG_SPEC_SEMANTICS = (
+    "Bare 'x,y' adds tags (additive, idempotent); '+x,-y' adds/removes; "
+    "'=x,y' replaces the whole list."
+)
 
-    ``+x,-y`` (every token prefixed) is a delta: add ``x``, remove ``y``. Any
-    unprefixed token makes the whole spec a replacement of the tag list. Both
-    forms dedupe while preserving order.
+
+def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
+    """Apply a ``--tags`` spec to ``existing`` — see :data:`TAG_SPEC_SEMANTICS`.
+
+    Three forms, checked in this order:
+
+    1. A leading ``=`` replaces the whole list: ``=x,y`` sets the tags to
+       exactly ``[x, y]``; a bare ``=`` clears them. This is the **only** path
+       that replaces — the explicit opt-in agent-usability/3 requires.
+    2. ``+x,-y`` (every token's *first character* is ``+``/``-``) is a delta:
+       add ``x``, remove ``y``. Adding a tag already present, or removing one
+       that is absent, is a no-op. Only the leading character counts as a
+       prefix — a tag whose name merely contains ``+``/``-`` (``c++``,
+       ``sci-fi``) is untouched by this rule as long as it doesn't *start*
+       with one.
+    3. A bare comma list — no token's first character is ``+``/``-`` — is
+       **additive**: each named tag is appended if missing, existing tags are
+       left alone. (Before agent-usability/3 this form replaced the whole
+       list; that was the silent-wipe bug this contract exists to kill.)
+
+    A spec that *mixes* prefixed and unprefixed tokens (some tokens start with
+    ``+``/``-``, others don't, and there's no leading ``=``) is rejected with
+    ``ValueError`` rather than guessed at — silently falling through to the
+    additive branch used to write the literal token (e.g. ``"+x"``) into the
+    vault as permanent garbage. Round-tripping that ambiguity to the caller as
+    an error (CLI exit 2 via :func:`shards.cli._errors.cli_errors`, an MCP
+    tool error via ``_guarded``) is cheaper than corrupting a tag list.
+
+    All non-error forms dedupe while preserving order.
     """
+    stripped = spec.strip()
+    if stripped.startswith("="):
+        tokens = [t.strip() for t in stripped[1:].split(",") if t.strip()]
+        result: list[str] = []
+        for token in tokens:
+            if token not in result:
+                result.append(token)
+        return result
+
     tokens = [t.strip() for t in spec.split(",") if t.strip()]
-    is_delta = bool(tokens) and all(t[0] in "+-" for t in tokens)
+    prefixed = [t[0] in "+-" for t in tokens]
+    is_delta = bool(tokens) and all(prefixed)
+    if tokens and any(prefixed) and not is_delta:
+        raise ValueError(
+            f"ambiguous tag spec {spec!r}: mixes prefixed (+/-) and unprefixed "
+            "tokens with no leading '='. Use '+x,-y' (delta), a bare 'x,y' "
+            "(additive), or '=x,y' (explicit replace) — not a mix of them."
+        )
     if is_delta:
         result = list(existing)
         for token in tokens:
@@ -291,7 +419,9 @@ def apply_tag_spec(existing: list[str], spec: str) -> list[str]:
                 result.remove(name)
         return result
 
-    result = []
+    # Bare comma list: additive. Keep every existing tag, append newly named
+    # ones that aren't already there (idempotent — no duplicates).
+    result = list(existing)
     for token in tokens:
         if token not in result:
             result.append(token)
@@ -307,26 +437,32 @@ def update_note(
 ) -> Note:
     """Update a note's fields and bump ``updated``.
 
-    ``tags`` mutates the tag list (delta or replace, see :func:`apply_tag_spec`).
+    ``tags`` mutates the tag list (additive, delta, or explicit replace — see
+    :func:`apply_tag_spec` / :data:`TAG_SPEC_SEMANTICS`).
     ``new_type`` rewrites the ``type`` field and moves the file into the matching
     folder via ``os.replace`` (atomic rename); the old path stops existing. Runs
-    under the entity lock; writes are atomic.
+    under the entity lock; writes are atomic. The re-read inside the lock goes
+    through :func:`shards.storage.files.read_post`; a file that vanishes or turns
+    unreadable between resolution and the lock raises :class:`NoteNotFoundError`,
+    matching :func:`get_note`.
     """
     if new_type is not None and new_type not in _NOTE_TYPES:
         raise ValueError(f"invalid note type: {new_type!r}")
 
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     path = _resolve_path(config, id_or_slug)
     note_id = path.stem
     with hold(_lock_path(config, note_id)):
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
+        post = read_post(path)
+        if post is None:
+            raise NoteNotFoundError(id_or_slug)
         if tags is not None:
             current = post.metadata.get("tags") or []
             existing = [str(t) for t in current] if isinstance(current, list) else []
             post.metadata["tags"] = apply_tag_spec(existing, tags)
         if new_type is not None:
             post.metadata["type"] = new_type
-        _, related = resolve_wikilinks(post.content, config.core.tolaria_path)
+        _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         note = Note.model_validate(post.metadata)
@@ -414,6 +550,265 @@ def _matches_tags(note_tags: list[str], want: list[str], any_tag: bool) -> bool:
     return not have.isdisjoint(want) if any_tag else set(want).issubset(have)
 
 
+# --------------------------------------------------------------------------- #
+# RPC param coercers — shared by every filter spec that crosses the socket      #
+# --------------------------------------------------------------------------- #
+#
+# Filter specs are rebuilt daemon-side from JSON that arrived over a socket, so
+# every field is untrusted: a wrong-typed value degrades to ``None``/the default
+# rather than raising, which would turn a garbled param into a 500 the caller
+# cannot fall back from. Defined once here and reused by the task and tag-pull
+# specs (``core.tasks``, ``index.tagpull``) — the same import direction those
+# modules already use for ``_matches_tags`` / ``_parse_since``.
+
+
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _opt_int(value: object) -> int | None:
+    """An ``int`` or ``None``; ``bool`` is excluded (a stray ``true`` must not cap to 1)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _str_tuple(value: object) -> tuple[str, ...] | None:
+    """A non-empty tuple of strings, or ``None`` (absent / empty / wrong type)."""
+    if not isinstance(value, list):
+        return None
+    items = tuple(item for item in value if isinstance(item, str))
+    return items or None
+
+
+def _opt_datetime(value: object) -> datetime | None:
+    """An ISO-8601 string parsed to an aware UTC datetime, or ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+# --------------------------------------------------------------------------- #
+# The one note list predicate — shared by the disk walk and the warm index      #
+# --------------------------------------------------------------------------- #
+
+# One candidate row: a path and its parsed frontmatter. Deliberately **no body**:
+# the daemon's warm index holds frontmatter only, so a body-bearing row shape
+# could never be filled warm — and a list result whose ``body`` silently emptied
+# whenever the daemon came up would be worse than one that never carries it. The
+# views a list produces therefore always have ``body=""``; a caller that needs a
+# body reads it per id (``get_note``/``get_task``, or ``storage.files.read_body``).
+MetaRow = tuple[Path, Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
+class NoteFilter:
+    """A normalized, socket-transportable ``note list`` filter/sort/limit spec.
+
+    Built once at the caller's boundary by :meth:`build` (which is where the
+    caller-facing strings — ``sort``, ``--since`` — are *validated*, so a bad
+    value fails the same way whether the daemon is up or down), then either
+    applied locally by :func:`select_notes` or shipped over the socket via
+    :meth:`to_params` and rebuilt daemon-side by :meth:`from_params`.
+    """
+
+    tags: tuple[str, ...] | None = None
+    any_tag: bool = False
+    owner: str | None = None
+    note_type: str | None = None
+    cutoff: datetime | None = None
+    sort: str = "updated"
+    limit: int | None = _DEFAULT_LIMIT
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        tags: list[str] | None = None,
+        any_tag: bool = False,
+        owner: str | None = None,
+        note_type: str | None = None,
+        since: str | None = None,
+        sort: str = "updated",
+        limit: int | None = _DEFAULT_LIMIT,
+    ) -> NoteFilter:
+        """Validate and normalize the caller-level arguments into a spec.
+
+        Raises ``ValueError`` for an unknown ``sort`` field or an unparseable
+        ``since`` (the boundary mappers turn both into exit 2) — *before* any
+        socket call, so validation never depends on the daemon being up.
+        """
+        if sort not in _SORT_FIELDS:
+            raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
+        return cls(
+            tags=tuple(tags) if tags else None,
+            any_tag=any_tag,
+            owner=owner,
+            note_type=note_type,
+            cutoff=_parse_since(since) if since else None,
+            sort=sort,
+            limit=limit,
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        """Render the spec as JSON-safe RPC params."""
+        return {
+            "tags": list(self.tags) if self.tags else None,
+            "any_tag": self.any_tag,
+            "owner": self.owner,
+            "note_type": self.note_type,
+            "cutoff": self.cutoff.isoformat() if self.cutoff is not None else None,
+            "sort": self.sort,
+            "limit": self.limit,
+        }
+
+    @classmethod
+    def from_params(cls, params: Mapping[str, Any]) -> NoteFilter:
+        """Rebuild a spec from RPC params, coercing defensively.
+
+        Params arrive off a socket, so every field is treated as untrusted: a
+        wrong-typed value falls back to its default rather than raising, and an
+        unknown ``sort`` collapses to ``updated``. The wire is not a validation
+        boundary — :meth:`build` already ran on the caller's side.
+        """
+        sort = params.get("sort")
+        return cls(
+            tags=_str_tuple(params.get("tags")),
+            any_tag=bool(params.get("any_tag", False)),
+            owner=_opt_str(params.get("owner")),
+            note_type=_opt_str(params.get("note_type")),
+            cutoff=_opt_datetime(params.get("cutoff")),
+            sort=sort if sort in _SORT_FIELDS else "updated",
+            limit=_opt_int(params.get("limit")),
+        )
+
+
+def note_rows(config: Config) -> Iterator[MetaRow]:
+    """Yield one :data:`MetaRow` per readable ``*.md`` under ``notes/``.
+
+    Unreadable and malformed files are skipped by
+    :func:`shards.storage.files.read_post`, so a foreign or corrupt sibling never
+    crashes the walk.
+    """
+    for path in _iter_note_files(config):
+        post = read_post(path)
+        if post is None:
+            continue
+        yield path, post.metadata
+
+
+def _title_collision(rows: Iterable[MetaRow], title: str, id_prefix: str) -> str | None:
+    """Return the ``id`` of the first row whose id carries ``id_prefix`` and whose
+    ``title`` slug-collides with ``title``; ``None`` if nothing matches (R9).
+
+    "Slug-collides" means :func:`_slugify` of the two titles is equal — the
+    identical normalization :func:`_resolve_path` applies for CLI ``<id|slug>``
+    lookups, deliberately mirrored here (see :func:`find_duplicate_title` for
+    the reasoning). A single pass, one target slug computed once and compared
+    against each row — no second scan and no index built on top of the row
+    iterator already being walked.
+
+    The shared engine behind :func:`find_duplicate_title` (here) and
+    :func:`shards.core.tasks.find_duplicate_title`: each passes its own row
+    iterator (``note_rows``/``task_rows``) and id prefix, so a note and a task
+    that happen to share a title never collide with each other — same-kind only,
+    matching the product decision (R9: warn on same-kind duplicates).
+    """
+    target = _slugify(title)
+    for _, meta in rows:
+        candidate_id = meta.get("id")
+        candidate_title = meta.get("title")
+        if (
+            isinstance(candidate_id, str)
+            and candidate_id.startswith(id_prefix)
+            and isinstance(candidate_title, str)
+            and _slugify(candidate_title) == target
+        ):
+            return candidate_id
+    return None
+
+
+def find_duplicate_title(config: Config, title: str) -> str | None:
+    """Return the id of an existing note whose title slug-collides with ``title`` (R9).
+
+    Mirrors the **slug-normalized** rule :func:`_resolve_path` uses for CLI
+    ``<id|slug>`` lookups (``_slugify`` — lower-cased, non-alphanumeric runs
+    collapsed to a single ``-``, trimmed) — *not* the exact-match rule
+    :func:`shards.core.wikilinks._title_index` uses for wikilink title
+    resolution. That is the point: a duplicate that only ``_resolve_path``
+    would consider the same is exactly the duplicate that later poisons the
+    slug resolver forever (``AmbiguousSlugError``, no way back short of
+    renaming/deleting) — so the warning has to use the resolver's own rule, or
+    it warns about the wrong set of collisions. A title differing only by case
+    or surrounding/internal whitespace **does** warn here, because it *would*
+    already collide once slugified — see
+    ``tests/notes/test_new.py::test_cli_new_case_whitespace_duplicate_warns_and_is_genuinely_ambiguous_slug``,
+    which ties the warning to the real harm (a subsequent ambiguous-slug
+    lookup), not to a string comparison.
+
+    Same-kind only — scans ``notes/`` and never sees a task, even a
+    title-identical one (see :func:`shards.core.tasks.find_duplicate_title` for
+    the task-side twin).
+
+    Reads every note's frontmatter (an ``O(vault-notes)`` scan via
+    :func:`note_rows`) — the same order of cost ``create_note``'s own id-collision
+    scan and the wikilink title index already pay. Call this *before* acquiring
+    the create lock: it is a plain, best-effort read (a concurrent creator can
+    still race past it unseen — this is advisory, not a guarantee) and must never
+    extend how long the per-kind allocator lock is held.
+    """
+    return _title_collision(note_rows(config), title, _ID_PREFIX)
+
+
+def select_notes(rows: Iterable[MetaRow], spec: NoteFilter) -> list[NoteView]:
+    """Apply ``spec`` to ``rows`` — the *one* note filter/sort/limit implementation.
+
+    Called with on-disk rows by :func:`list_notes` and with warm-index rows by the
+    daemon's ``note.list`` handler, so the two paths can never drift. Only rows
+    whose frontmatter carries a valid shards id (``n-`` prefix) and validates
+    against :class:`Note` are surfaced; foreign rows (any writer sharing the folder) are skipped silently.
+    Filters (all conjunctive): ``tags`` (AND, or OR with ``any_tag``), exact
+    ``owner``, exact ``note_type``, and the ``cutoff`` recency bound on
+    ``updated``. ``sort`` is ``updated``/``created`` (descending) or ``title``
+    (ascending), tie-broken by path so the order is deterministic and identical
+    on both paths; ``limit`` caps the result (``None`` for unbounded).
+
+    The returned views carry ``body=""`` — see :data:`MetaRow`.
+    """
+    views: list[NoteView] = []
+    for path, meta in rows:
+        note_id = meta.get("id")
+        if not isinstance(note_id, str) or not note_id.startswith(_ID_PREFIX):
+            continue
+        try:
+            note = Note.model_validate(meta)
+        except ValidationError:
+            continue
+        if spec.note_type is not None and note.type != spec.note_type:
+            continue
+        if spec.owner is not None and note.owner != spec.owner:
+            continue
+        if spec.tags and not _matches_tags(note.tags, list(spec.tags), spec.any_tag):
+            continue
+        if spec.cutoff is not None and note.updated < spec.cutoff:
+            continue
+        views.append(NoteView(note=note, body="", path=path))
+
+    views.sort(key=lambda v: str(v.path))  # deterministic tie order under a stable sort
+    if spec.sort == "title":
+        views.sort(key=lambda v: v.note.title.lower())
+    else:
+        views.sort(key=lambda v: getattr(v.note, spec.sort), reverse=True)
+
+    if spec.limit is not None and spec.limit >= 0:
+        return views[: spec.limit]
+    return views
+
+
 def list_notes(
     config: Config,
     *,
@@ -425,46 +820,22 @@ def list_notes(
     sort: str = "updated",
     limit: int | None = _DEFAULT_LIMIT,
 ) -> list[NoteView]:
-    """List shards notes under ``notes/``, filtered and sorted.
+    """List shards notes under ``notes/``, filtered and sorted — the on-disk path.
 
-    Only files whose frontmatter carries a valid shards id (``n-`` prefix) and
-    validates against :class:`Note` are surfaced; Tolaria/foreign files are
-    skipped silently. Filters (all conjunctive): ``tags`` (AND, or OR with
-    ``any_tag``), exact ``owner``, exact ``note_type``, and ``since`` recency on
-    ``updated``. ``sort`` is ``updated``/``created`` (descending) or ``title``
-    (ascending); ``limit`` caps the result (``None`` for unbounded).
+    A thin composition of :func:`note_rows` (the walk) and :func:`select_notes`
+    (the predicate); see the latter for the filter/sort/limit semantics, including
+    why the views carry no body. This is also the daemon-down fallback behind
+    :meth:`DaemonClient.note_list <shards.daemon.client.DaemonClient.note_list>`.
     """
-    if sort not in _SORT_FIELDS:
-        raise ValueError(f"invalid sort field: {sort!r} (use {', '.join(_SORT_FIELDS)})")
-    cutoff = _parse_since(since) if since else None
-
-    views: list[NoteView] = []
-    for path in _iter_note_files(config):
-        post = read_post(path)
-        if post is None:
-            continue
-        note_id = post.metadata.get("id")
-        if not isinstance(note_id, str) or not note_id.startswith(_ID_PREFIX):
-            continue
-        try:
-            note = Note.model_validate(post.metadata)
-        except ValidationError:
-            continue
-        if note_type is not None and note.type != note_type:
-            continue
-        if owner is not None and note.owner != owner:
-            continue
-        if tags and not _matches_tags(note.tags, tags, any_tag):
-            continue
-        if cutoff is not None and note.updated < cutoff:
-            continue
-        views.append(NoteView(note=note, body=post.content, path=path))
-
-    if sort == "title":
-        views.sort(key=lambda v: v.note.title.lower())
-    else:
-        views.sort(key=lambda v: getattr(v.note, sort), reverse=True)
-
-    if limit is not None and limit >= 0:
-        return views[:limit]
-    return views
+    return select_notes(
+        note_rows(config),
+        NoteFilter.build(
+            tags=tags,
+            any_tag=any_tag,
+            owner=owner,
+            note_type=note_type,
+            since=since,
+            sort=sort,
+            limit=limit,
+        ),
+    )

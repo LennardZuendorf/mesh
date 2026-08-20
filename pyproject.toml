@@ -1,7 +1,7 @@
 [project]
 name = "shards"
 version = "0.1.0"
-description = "A mesh for multi-agent collaboration over one Tolaria Markdown folder — note, task, search."
+description = "A mesh for multi-agent collaboration over one Markdown folder — note, task, search."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -46,7 +46,7 @@ ignore = ["E501"]
 
 [tool.ty.environment]
 python-version = "3.11"
-root = ["src"]
+root = ["src", "."]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -55,3 +55,11 @@ addopts = "-q"
 
 [tool.coverage.run]
 source = ["src/shards"]
+
+[tool.coverage.report]
+# Measured at core-hardening/7: 98.17-98.20% (3053-3052/3109 stmts, timing-
+# sensitive watcher branch). Floored ~1.2pt below the observed range, per
+# .spec/features/core-hardening/plan.md's own recommendation ("measured minus
+# 1 point, ratcheted upward only") — never lower this without a coverage
+# regression backing it, and always ratchet it up as coverage genuinely grows.
+fail_under = 97

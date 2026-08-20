@@ -40,7 +40,7 @@ from watchdog.events import (
 )
 
 from shards.index.reconcile import reconcile_path
-from shards.index.warm import VaultIndex, _iter_vault_md
+from shards.index.warm import VaultIndex, iter_vault_md
 from shards.schemas.config import Config
 
 if TYPE_CHECKING:
@@ -141,7 +141,7 @@ class Watcher:
 
     def warm(self) -> None:
         """Populate the index from an initial full scan of the vault."""
-        for path in _iter_vault_md(self._config.core.tolaria_path):
+        for path in iter_vault_md(self._config.core.vault_path):
             self._index.reparse(path)
 
     def start(self) -> None:
@@ -149,7 +149,7 @@ class Watcher:
         from watchdog.observers import Observer  # lazy: heavy platform backend
 
         self.warm()
-        vault = self._config.core.tolaria_path
+        vault = self._config.core.vault_path
         observer = Observer()
         self._watched = []
         for sub in ("notes", "tasks"):

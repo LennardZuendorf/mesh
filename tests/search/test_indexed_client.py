@@ -35,7 +35,6 @@ from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
 from shards.index import indexed_client
-from shards.index.watcher import ChangeHooks
 from shards.schemas.config import Config, load_config
 from shards.schemas.search import SearchResult
 
@@ -86,7 +85,9 @@ def _seed(
     folder = vault / rel
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{entry_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -147,7 +148,7 @@ def test_search_maps_hits_to_search_results(
 def test_search_foreign_file_id_none(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    foreign = _seed_foreign(vault, "notes", "tolaria", title="Foreign Doc")
+    foreign = _seed_foreign(vault, "notes", "othertool", title="Foreign Doc")
     _patch_search(monkeypatch, _ndjson({"path": str(foreign), "score": 0.8, "snippet": "s"}))
     results = indexed_client.search(cfg, "foreign")
     assert len(results) == 1
@@ -618,22 +619,6 @@ def test_incremental_update_noop_without_collection(
 
     monkeypatch.setattr(indexed_client.subprocess, "run", _boom)
     indexed_client.incremental_update(cfg, vault / "notes" / "n-x.md")
-
-
-def test_register_hook_drives_incremental_update(
-    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[tuple[Config, Path]] = []
-
-    def _record(config: Config, path: Path) -> None:
-        calls.append((config, path))
-
-    monkeypatch.setattr(indexed_client, "incremental_update", _record)
-    hooks = ChangeHooks()
-    indexed_client.register_hook(cfg, hooks)
-    changed = vault / "notes" / "n-x.md"
-    hooks.fire(changed)  # the watcher fans out to registered hooks
-    assert calls == [(cfg, changed)]
 
 
 # --------------------------------------------------------------------------- #

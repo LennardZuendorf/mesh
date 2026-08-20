@@ -30,7 +30,7 @@ __all__ = ["reconcile_path"]
 
 def _correct_folder(config: Config, meta: dict[str, Any]) -> Path | None:
     """The folder ``meta`` *should* live in, or ``None`` if its type/status is unknown."""
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     try:
         if meta.get("type") == "task":
             return task_folder(str(meta.get("status")), vault)
@@ -60,7 +60,7 @@ def reconcile_path(config: Config, path: Path) -> Path:
     folder = _correct_folder(config, meta)
     if folder is None:
         return p
-    vault = config.core.tolaria_path
+    vault = config.core.vault_path
     try:
         src = safe_resolve(vault, p)
         dest = safe_resolve(vault, folder / p.name)
