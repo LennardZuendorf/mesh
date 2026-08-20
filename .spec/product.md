@@ -5,23 +5,23 @@ children:
   - tech.md
   - design.md
   - plan.md
-updated: 2026-07-18
+updated: 2026-08-20
 ---
 
 # Shards — Product
 
-A mesh for multi-agent collaboration over one Tolaria Markdown folder. Three verbs — `note`, `task`, `search` — give a fleet of agents and their human operator a shared substrate to capture knowledge and coordinate work through low-level tools: a CLI and an MCP server. No database; the daemon accelerates but never gates.
+A mesh for multi-agent collaboration over one shared Markdown folder. Three verbs — `note`, `task`, `search` — give a fleet of agents and their human operator a shared substrate to capture knowledge and coordinate work through low-level tools: a CLI and an MCP server. No database; the daemon accelerates but never gates.
 
 **One-liner:** Three verbs, one folder, one mesh — notes + search = shared memory, tasks = coordination + handoff.
 
-**Idea:** Many agents (e.g. flights-agent, tolaria-agent) plus a human operator share one vault as a collaboration mesh. Sessions stop starting cold; knowledge is searchable; work is claimable task files, not chat paste — agents coordinate through files over CLI and MCP, not a bespoke protocol. Contrast [GBrain](https://github.com/garrytan/gbrain) (Postgres, graph, job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
+**Idea:** Many agents (e.g. flights-agent, notes-agent) plus a human operator share one vault as a collaboration mesh. Sessions stop starting cold; knowledge is searchable; work is claimable task files, not chat paste — agents coordinate through files over CLI and MCP, not a bespoke protocol. Contrast [GBrain](https://github.com/garrytan/gbrain) (Postgres, graph, job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
 
 ---
 
 ## Requirements
 
 1. **Three verbs.** `note`, `task`, `search` cover capture, coordination, recall. Read-only lenses, not a fourth verb — all shipped: `recent-activity`, `build-context`, `session-start` (Phase 2); `graph` (`shards graph <id>` / `shards_graph`) and **projects** as a convention (`type: project` note, `project` task field, `shards project <id>` / `shards_project` scoped view), shipped in `cli-toolset-rework` units 1–5. Admin (`daemon`, `status`, `reindex`) is human-only. → [features/cli-toolset-rework/](features/cli-toolset-rework/product.md), [tech.md](tech.md) § Implemented surfaces
-2. **Markdown is truth.** Schema-valid frontmatter; Shards owns the interface, Tolaria owns the vault/Git.
+2. **Markdown is truth.** Schema-valid frontmatter; Shards owns the interface, the operator owns the vault.
 3. **Tasks are handoff.** Model: `owner`, `claimed_by`, `claim`/`finish`/`cancel`, later `blocks`/`blocked_by`. **v1:** claim/finish/cancel/list; graph edges recordable but inert until Phase 3.
 4. **Hybrid recall via `indexed`.** Ranked search over `notes/` + `tasks/`; JSON with `path`; substring fallback when `indexed`/daemon unavailable or `[search].hybrid=false`.
 5. **`$SHARDS_AGENT` identity.** Default `--owner`, `--mine` filter; unknown owners rejected via `[tasks].collections`.
@@ -44,7 +44,7 @@ A mesh for multi-agent collaboration over one Tolaria Markdown folder. Three ver
 
 | Feature | Role |
 |---|---|
-| notes | `note` — writes, wikilinks; coexists with Tolaria |
+| notes | `note` — writes, wikilinks; coexists with any other writer on the folder |
 | tasks | `task` — atomic claim, lifecycle (graph deferred) |
 | daemon | Watcher, warm index, socket, fallback |
 | search | `search` — `indexed` wrapper, tag-pull, fallback |
@@ -58,7 +58,7 @@ root layer and removed — the source of truth is `src/shards/`, `tests/`, and
 
 ## Non-Goals
 
-No memory primitive, handoff primitive, DB, external task backend, enrichment loop, synthesis layer, job queue, knowledge graph, dashboard/RBAC, sequential IDs, git sync, or replacing Tolaria.
+No memory primitive, handoff primitive, DB, external task backend, enrichment loop, synthesis layer, job queue, knowledge graph, dashboard/RBAC, sequential IDs, or git sync (versioning is the vault owner's job).
 
 ---
 
@@ -67,3 +67,9 @@ No memory primitive, handoff primitive, DB, external task backend, enrichment lo
 - **MCP annotations:** `read-only` / `idempotent` / `write` / `destructive`. Cancel exposed; hard-delete and admin withheld. → [tech.md](tech.md) § Implemented surfaces
 - **`[tasks].collections`:** valid agent identities for `--owner` validation; not folder splits. → [tech.md](tech.md)
 - **Toolset direction (2026-07):** evaluated replacing shards with GBrain (rejected — mandates Postgres/PGLite, no task primitive) and Beads (rejected — moved its source of truth to Dolt, a SQL DB, contradicting Markdown-as-truth). Decision: keep shards, rework internals + performance + two additive capabilities (graph-query output, projects convention); task-graph (Phase 3) designed but stays deferred. → [features/cli-toolset-rework/](features/cli-toolset-rework/product.md)
+- **Vault coupling (2026-08):** naming the vault after a specific notes tool was dropped — it was
+  never a code dependency (no package, import, subprocess or MCP call), only a name and a set of
+  spec claims. `[core].vault_path` is canonical, with two legacy input spellings kept as permanent
+  aliases; versioning and backup are the vault owner's job, which is now what justifies hard
+  delete. Supersedes `features/shards-rebrand/`'s decision to keep that coupling unchanged. →
+  [features/vault-agnostic/](features/vault-agnostic/product.md)

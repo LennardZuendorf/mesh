@@ -3,7 +3,7 @@ type: feature-product
 feature: team-awareness
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-08-15
+updated: 2026-08-20
 ---
 
 # Feature: Team Awareness — Product
@@ -255,7 +255,7 @@ $ shards task append t-10NT "waiting on [[n-FEWP]] before I continue" --timestam
 appended t-10NT
 
 $ shards task release t-7B4Q
-task t-7B4Q is claimed by notes-agent          # exit 4
+task t-7B4Q is claimed by notes-agent        # exit 4
 $ shards task release t-7B4Q --force
 released t-7B4Q
 
@@ -297,9 +297,10 @@ n-3PDA  note  Retry policy draft                    # my recent activity
    needs a claim-start instant and this decision must be revisited with invariant 3 in hand.
 3. **Filterable last-editor.** `--mine` / `--owner` mean *creator*, always; the attribution stamp
    makes an edit visible but not filterable. A `updated_by` frontmatter key would fix that at the
-   cost of a third arm on `--mine` and a key on every file. *Recommendation:* reject for v1; the
-   git-backed vault is the audit trail. *Reopen trigger:* an operator query that genuinely cannot be
-   answered by stamp + inbound links.
+   cost of a third arm on `--mine` and a key on every file. *Recommendation:* reject for v1;
+   attribution stamps live in the body where a human reads them, and audit history is the vault
+   owner's mechanism. *Reopen trigger:* an operator query that genuinely cannot be answered by
+   stamp + inbound links.
 4. **Priority vocabulary.** Fixed `high | normal | low`. *Recommendation:* keep it fixed; a
    `[tasks].priorities` config knob is configuration for its own sake.
 5. **Duplicate-check cost.** The collision check adds a frontmatter-reading walk to `note new` /

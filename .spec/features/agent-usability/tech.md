@@ -3,7 +3,7 @@ type: feature-tech
 feature: agent-usability
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-08-16
+updated: 2026-08-20
 ---
 
 # Feature: Agent Usability — Architecture
@@ -53,7 +53,7 @@ Sections, in order:
 | What shards is | static — three verbs, one folder, Markdown is truth | — |
 | **Your identity** | `config.agent` (already `$SHARDS_AGENT`-resolved at load, `schemas/config.py`) | "no agent identity configured — run `shards init`; `task_claim` will fail without one" |
 | **Valid owners** | `config.tasks.collections` | "no roster configured; any owner string is accepted" |
-| **Vault** | `config.core.tolaria_path` | — (required key; absent config never reaches here) |
+| **Vault** | `config.core.vault_path` | — (required key; absent config never reaches here) |
 | Recall | `config.search.collection` / `.hybrid` — whether hybrid is even configured | "substring fallback only" |
 | Tag mutation trap | static, mirrors § Tag mutation below | — |
 | Coordination protocol | static — the same seven rules as the skill | — |

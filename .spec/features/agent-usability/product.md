@@ -3,7 +3,7 @@ type: feature-product
 feature: agent-usability
 sibling: tech.md
 parent: ../../product.md
-updated: 2026-08-16
+updated: 2026-08-20
 ---
 
 # Feature: Agent Usability — Product
@@ -29,7 +29,7 @@ described tool schemas, honest flags, one shipped skill, and a first-run path.
 | | |
 |---|---|
 | **Owns** | The MCP `instructions` block and its composition from live config; tool/parameter self-description; the tag-mutation semantics contract; agent-legible identity and search-health readback; structured MCP error payloads; the **user-facing** CLI flag contract (which flag works on which command, and what `--owner` means); help-text truthfulness; the shipped `shards` skill + plugin bundle and its distribution story; first-run onboarding (`shards init`, example config, README). |
-| **Does not own** | Correctness bugs, dead code, the mechanical de-duplication of the three output-flag readers, spec drift, test/CI gaps → **core-hardening**. Backlinks, `task append`, `task release`, `session-start --team`, priority ordering, the team board → **team-awareness**. The three-verb thesis (no new verbs; `init` is admin, not a verb). Tolaria's vault/Git. |
+| **Does not own** | Correctness bugs, dead code, the mechanical de-duplication of the three output-flag readers, spec drift, test/CI gaps → **core-hardening**. Backlinks, `task append`, `task release`, `session-start --team`, priority ordering, the team board → **team-awareness**. The three-verb thesis (no new verbs; `init` is admin, not a verb). The vault itself — its versioning, sync and backup. |
 | **Deferred** | Per-agent instruction personalization beyond identity/roster/vault; an MCP `resources`/`prompts` surface; publishing the plugin to a third-party marketplace. |
 
 ---

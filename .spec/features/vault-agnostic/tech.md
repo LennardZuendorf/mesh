@@ -3,7 +3,7 @@ type: feature-tech
 feature: vault-agnostic
 sibling: product.md
 parent: ../../tech.md
-updated: 2026-08-18
+updated: 2026-08-20
 ---
 
 # Feature: Vault-Agnostic — Architecture

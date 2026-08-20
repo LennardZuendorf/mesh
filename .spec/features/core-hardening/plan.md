@@ -3,7 +3,7 @@ type: feature-plan
 feature: core-hardening
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-08-16
+updated: 2026-08-20
 ---
 
 # Feature: Core Hardening — Implementation Plan
@@ -466,7 +466,7 @@ user approval.
 | `tech.md:91` | Reword to match :105 — codes live on the exception classes, the boundary maps them once | 3 |
 | `tech.md:134` | RPC method table: drop `note.get`, `task.get`, `search.query`, `index.reindex`; mark the rest warm-served | 5 |
 | `tech.md:54` | Invariant 7 becomes true — no text change needed if 5 ships; delete the invariant if it does not | 5 |
-| `tech.md` § Contracts, Config row | Document the `[core].path` → `tolaria_path` alias (`schemas/config.py::load_config`, alias applied at lines ~176-178 as of this unit — cite the function, not a line number, since it has already drifted once) | 9 |
+| `tech.md` § Contracts, Config row | **Resolved** — closed by the `vault-agnostic` feature (root `plan.md` Feature Sequence). Canonical key is `vault_path`; `path` and the pre-rename spelling are permanent input aliases (`schemas/config.py::load_config`) — documented in `README.md` and `config.example.toml`. | 9 |
 | `tech.md` § Contracts | Document that both delete verbs hard-`unlink` (stance currently lives only in `AGENTS.md` § 6) | 9 |
 | `product.md:23` / `tech.md:137` | Remove `build-context` in favour of `graph` (~390 LOC incl. `tests/memory/test_build_context.py`) — **product decision required** | 8 |
 | `lessons.md` | Record: "a fixed lesson is not a fixed codebase — apply a cross-cutting rule to every reader/writer at fix time, and re-verify it in the unit that claims the fix" | compound |
