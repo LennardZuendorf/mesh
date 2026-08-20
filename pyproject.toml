@@ -1,7 +1,7 @@
 [project]
 name = "shards"
 version = "0.1.0"
-description = "A mesh for multi-agent collaboration over one Tolaria Markdown folder — note, task, search."
+description = "A mesh for multi-agent collaboration over one Markdown folder — note, task, search."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

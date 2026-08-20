@@ -36,7 +36,7 @@ _MAX_ROSTER_SHOWN = 8
 
 _WHAT_SHARDS_IS = (
     "# shards\n"
-    "Three verbs over one shared Markdown vault (Tolaria): note, task, search. "
+    "Three verbs over one shared Markdown vault: note, task, search. "
     "Markdown is the source of truth; shards owns writes and fast reads — no "
     "separate memory store, no external task tracker."
 )

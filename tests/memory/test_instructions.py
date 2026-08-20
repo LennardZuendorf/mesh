@@ -184,6 +184,14 @@ def test_no_authorization_language(config: Config | None) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_instructions_name_no_notes_application() -> None:
+    """The block an agent reads must not imply a particular notes app is required."""
+    block = build_instructions(_config(vault_path="/home/agent/vault"))
+
+    assert "tolaria" not in block.lower()
+    assert "obsidian" not in block.lower()
+
+
 def test_budget_constant_is_2048_bytes() -> None:
     assert BUDGET_BYTES == 2048
 
