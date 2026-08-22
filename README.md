@@ -42,7 +42,8 @@ uv run shards init --help
                              Default: empty — an open roster, any owner string accepted.
 --search-collection TEXT    indexed collection name ([search].collection). Default: unset.
 --hybrid/--no-hybrid        Hybrid lexical+vector search via indexed ([search].hybrid). Default: on.
---threshold        FLOAT    Substring-fallback score floor ([search].threshold). Default: 0.65.
+--threshold        FLOAT    Substring-fallback score floor ([search].threshold). Default: unset —
+                             the key is omitted so the fallback keeps its own floor.
 --force                     Overwrite an existing config. Default: refuse.
 ```
 
@@ -68,13 +69,14 @@ gitignored, since it names a real vault path and identity.
 
 ```toml
 [core]
-vault_path = "~/shards-vault"     # required — the vault folder; ~ is expanded at load
+vault_path = "~/shards-vault"     # required — the vault folder; ~ expanded and symlinks resolved
 agent = "my-agent"                # optional — default owner/claimer; $SHARDS_AGENT overrides
 
 [search]
 collection = "my-vault"           # optional — indexed collection name
 hybrid = true                     # default true — false or indexed absent -> substring fallback
-threshold = 0.65                  # default 0.65 — min score to count a hit as hybrid-quality
+# threshold = 0.65                # optional — leave unset (init omits it): set explicitly and
+                                  # tag (0.6) / body (0.4) fallback matches drop out
 
 [tasks]
 collections = ["my-agent", "another-agent"]  # optional roster; empty = any --owner accepted

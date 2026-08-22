@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -264,3 +265,42 @@ def test_init_absent_from_mcp_tool_table() -> None:
     names = {tool.name for tool in tools}
     assert "shards_init" not in names
     assert not any("init" in name for name in names)
+
+
+# --------------------------------------------------------------------------- #
+# [search].threshold is omitted unless the caller asks for it                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_init_omits_threshold_unless_passed(tmp_path: Path, cfg_path: Path) -> None:
+    """A generated config must leave `[search].threshold` unset.
+
+    The substring fallback applies `threshold` only when it is *explicit*
+    (`SearchConfig.threshold_explicit`), so writing the schema default into
+    every generated config would re-arm the very cutoff that fix removed: the
+    body tier (0.4) and tag tier (0.6) both sit below 0.65 and become
+    unreachable on a fresh install.
+    """
+    result = _invoke(["init", "--path", str(tmp_path / "vault")])
+    assert result.exit_code == 0, result.output
+
+    with cfg_path.open("rb") as fh:
+        assert "threshold" not in tomllib.load(fh)["search"]
+    cfg = load_config(cfg_path)
+    assert cfg.search.threshold_explicit() is False
+    assert cfg.search.threshold == pytest.approx(0.65)  # schema default, not written
+
+
+def test_init_writes_threshold_when_explicitly_passed(tmp_path: Path, cfg_path: Path) -> None:
+    result = _invoke(["init", "--path", str(tmp_path / "vault"), "--threshold", "0.8"])
+    assert result.exit_code == 0, result.output
+
+    cfg = load_config(cfg_path)
+    assert cfg.search.threshold_explicit() is True
+    assert cfg.search.threshold == pytest.approx(0.8)
+
+
+def test_example_config_leaves_threshold_unset() -> None:
+    """The committed reference must model the same fresh-install shape as `init`."""
+    example = Path(__file__).resolve().parents[2] / "config.example.toml"
+    assert load_config(example).search.threshold_explicit() is False

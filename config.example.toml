@@ -47,10 +47,13 @@ collection = "my-vault"
 # a built-in substring scan over frontmatter + body. Default: true.
 hybrid = true
 
-# Minimum indexed score to keep a hit as "hybrid" quality; below this the
-# result is reported as a fallback-quality match. Only applies when a caller
-# sets it explicitly here — default: 0.65.
-threshold = 0.65
+# Minimum score to keep a hit. Deliberately left commented out — and `shards
+# init` omits it too. It applies *only* when set explicitly here (or passed as
+# `search --threshold`); with it unset, the substring fallback keeps its own
+# floor, so tag matches (0.6) and body matches (0.4) still come back. Setting
+# it to the nominal 0.65 makes both tiers unreachable, which is body search
+# switched off. Set it only if you want that cutoff.
+# threshold = 0.65
 
 [tasks]
 # The roster of identities `--owner` (CLI) / `owner` (MCP) is allowed to take
