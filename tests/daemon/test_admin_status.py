@@ -44,7 +44,7 @@ from shards.cli.admin import (
 )
 from shards.core.lenses import scan_stale_locks
 from shards.core.tasks import list_tasks
-from shards.daemon.client import DaemonClient
+from shards.daemon.client import DaemonClient, default_socket_path
 from shards.schemas.config import Config, load_config
 from shards.storage.files import note_folder, task_folder
 from shards.storage.locks import LOCK_TTL_SECONDS
@@ -549,7 +549,9 @@ def test_daemon_status_json_when_down(cfg: Config, runtime_dir: Path) -> None:
     obj = json.loads(result.output)
     assert obj["running"] is False
     assert obj["pid"] is None
-    assert obj["socket"].endswith("shards.sock")
+    # The socket file is keyed on the vault it serves, so the reported path is
+    # this vault's socket — not a machine-wide ``shards.sock``.
+    assert obj["socket"] == str(default_socket_path())
 
 
 def test_daemon_status_running_when_live_pid(cfg: Config, runtime_dir: Path) -> None:
@@ -607,7 +609,7 @@ def test_daemon_stop_terminates_and_cleans_up(
 ) -> None:
     pid_path = default_pid_path()
     write_pid(pid_path, os.getpid())  # a "live" daemon (us)
-    socket_path = runtime_dir / "shards.sock"
+    socket_path = default_socket_path()  # this vault's socket, under runtime_dir
     socket_path.write_text("", encoding="utf-8")  # stand-in for the socket file
 
     killed: list[int] = []

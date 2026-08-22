@@ -1,18 +1,22 @@
 """Asyncio unix-socket server speaking NDJSON RPC.
 
 The daemon is the warm accelerator behind the CLI and MCP surfaces. This module
-owns the *transport* — a unix socket at ``$XDG_RUNTIME_DIR/shards.sock`` (mode
-``0600``, owner-only, so no other user can connect) and the request/response
-envelope — plus a dispatch table. Writes never reach this server: they bypass the
-socket and go straight through ``core``/``storage`` (see
+owns the *transport* — a unix socket at ``$XDG_RUNTIME_DIR/shards-<digest>.sock``
+(mode ``0600``, owner-only, so no other user can connect; ``<digest>`` keys the
+socket to the vault served, so two vaults never share one) and the
+request/response envelope — plus a dispatch table. Writes never reach this
+server: they bypass the socket and go straight through ``core``/``storage`` (see
 :mod:`shards.daemon.client`), so every write works with the daemon down.
 
 **Envelope.** One JSON object per line. Request: ``{"id","method","params"}``.
 Success echoes the id: ``{"id","ok":true,"result":{...}}``. Error omits it:
-``{"ok":false,"error":{"code","message"}}``. Handlers return a result dict on
-success and raise :class:`RpcError` to produce an error envelope, so the envelope
-machinery lives in one place — later units claim a dispatch slot by registering a
-handler, never by touching :meth:`DaemonServer._dispatch`.
+``{"ok":false,"error":{"code","message"}}``. A server that serves a vault adds
+``"vault": "<resolved vault root>"`` to *both* (see :meth:`DaemonServer._stamp`),
+which is how a client refuses rows from a daemon left running on a vault its
+config no longer names. Handlers return a result dict on success and raise
+:class:`RpcError` to produce an error envelope, so the envelope machinery lives
+in one place — later units claim a dispatch slot by registering a handler, never
+by touching :meth:`DaemonServer._dispatch`.
 
 **What the daemon serves.** The base table holds ``ping`` alone; unknown methods
 answer ``404``. When the server is constructed **with a vault ``config``** it warms
@@ -67,7 +71,7 @@ import msgspec
 from shards.core.lenses import status_inputs
 from shards.core.notes import MetaRow, NoteFilter, in_note_scope, select_notes
 from shards.core.tasks import TaskFilter, in_task_scope, select_tasks
-from shards.daemon.client import default_socket_path, entity_row
+from shards.daemon.client import default_socket_path, entity_row, vault_id
 from shards.index.indexed_client import incremental_update
 from shards.index.tagpull import TagPullFilter, select_tagpull
 from shards.index.warm import DEFAULT_RECENT_LIMIT, IndexEntry, VaultIndex
@@ -140,6 +144,10 @@ class DaemonServer:
     ) -> None:
         self.socket_path = Path(socket_path)
         self._config = config
+        # The vault this daemon serves, stamped on every reply so a client can
+        # tell a foreign daemon's rows from its own. ``None`` on a config-less
+        # server: it serves no vault, so it has nothing to name.
+        self._vault = vault_id(config) if config is not None else None
         self._handlers = handlers if handlers is not None else default_dispatch()
         self._server: asyncio.AbstractServer | None = None
         self._index: VaultIndex | None = None
@@ -298,14 +306,28 @@ class DaemonServer:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
+    def _stamp(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Name the vault this reply speaks for (config-ful servers only).
+
+        The client compares it against the vault *it* reads and degrades to its
+        file-op fallback on a mismatch, so a daemon left running on the vault the
+        config named before an edit can never serve foreign rows — the case a
+        vault-keyed socket name alone cannot catch. Omitted by a config-less
+        server, whose envelope stays exactly the documented ``{id,ok,result}`` /
+        ``{ok,error}``.
+        """
+        if self._vault is not None:
+            envelope["vault"] = self._vault
+        return envelope
+
     def _dispatch(self, line: bytes) -> dict[str, Any]:
         """Parse one request line and route it, returning a reply envelope."""
         try:
             request = json.loads(line)
         except json.JSONDecodeError:
-            return _error_envelope(400, "malformed request")
+            return self._stamp(_error_envelope(400, "malformed request"))
         if not isinstance(request, dict):
-            return _error_envelope(400, "malformed request")
+            return self._stamp(_error_envelope(400, "malformed request"))
 
         method = request.get("method")
         params = request.get("params")
@@ -314,21 +336,24 @@ class DaemonServer:
 
         handler = self._handlers.get(method) if isinstance(method, str) else None
         if handler is None:
-            return _error_envelope(404, "unknown method")
+            return self._stamp(_error_envelope(404, "unknown method"))
         try:
             result = handler(params)
         except RpcError as exc:
-            return _error_envelope(exc.code, exc.message)
+            return self._stamp(_error_envelope(exc.code, exc.message))
         except Exception:
             # A handler that fails for any other reason must still answer with a
             # structured envelope — never drop the connection unanswered.
-            return _error_envelope(500, "internal error")
-        return {"id": request.get("id"), "ok": True, "result": result}
+            return self._stamp(_error_envelope(500, "internal error"))
+        return self._stamp({"id": request.get("id"), "ok": True, "result": result})
 
 
 def serve(socket_path: Path | None = None) -> None:  # pragma: no cover - process entry
     """Blocking entry point: run the daemon (with a warm watcher) until interrupted."""
-    path = Path(socket_path) if socket_path is not None else default_socket_path()
-    server = DaemonServer(path, config=load_config())
+    # One config load feeds both the socket name and the served vault, so the
+    # daemon can never bind a socket keyed on a vault other than the one it warms.
+    config = load_config()
+    path = Path(socket_path) if socket_path is not None else default_socket_path(config)
+    server = DaemonServer(path, config=config)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(server.serve_forever())
