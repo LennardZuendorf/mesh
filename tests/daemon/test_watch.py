@@ -248,7 +248,7 @@ def test_reconcile_does_not_bump_updated_and_roundtrips_unknown_keys(
 def test_reconcile_leaves_correctly_placed_file(cfg: Config, vault: Path) -> None:
     path = _write_note(vault, note_id="n-ok", note_type="note")  # correct folder
     final = reconcile_path(cfg, path)
-    assert final == path.resolve()
+    assert final == path  # unchanged path space: the caller's path, not a realpath
     assert path.exists()
 
 
@@ -260,7 +260,7 @@ def test_reconcile_ignores_foreign_file(cfg: Config, vault: Path) -> None:
         encoding="utf-8",
     )
     final = reconcile_path(cfg, foreign)
-    assert final == foreign.resolve()
+    assert final == foreign
     assert foreign.exists()  # no shards id → never moved
 
 
@@ -279,10 +279,34 @@ def test_reconcile_returns_unmoved_when_source_races_away(
 
     monkeypatch.setattr("shards.index.reconcile.os.replace", _vanish)
     result = reconcile_path(cfg, path)  # must not raise
-    # Left in place (move failed); the resolved original path is returned so a
-    # later event can reconcile it.
-    assert result == safe_resolve(cfg.core.vault_path, path)
+    # Left in place (move failed); the caller's own path is returned so a later
+    # event can reconcile it — and so the index never changes path space.
+    assert result == path
     assert path.exists()
+
+
+def test_reconcile_keeps_the_caller_path_space_when_nothing_moves(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A correctly-placed file reached through a symlink comes back unresolved.
+
+    ``Watcher.warm`` seeds the index with paths exactly as walked, and every scope
+    predicate compares against the configured vault, so a no-move reconcile that
+    handed back ``safe_resolve``'s realpath dropped the row out of scope: with a
+    symlinked vault the whole index emptied one edit after daemon start.
+    """
+    link = tmp_path / "vault-link"
+    link.symlink_to(vault, target_is_directory=True)
+    cfg_path = tmp_path / "linked.toml"
+    cfg_path.write_text(f'[core]\nvault_path = "{link}"\nagent = "test-agent"\n', encoding="utf-8")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_path))
+    linked_cfg = load_config()
+
+    _write_note(vault, note_id="n-link", note_type="note")
+    walked = link / "notes" / "n-link.md"
+
+    assert reconcile_path(linked_cfg, walked) == walked
+    assert reconcile_path(linked_cfg, walked) != safe_resolve(linked_cfg.core.vault_path, walked)
 
 
 # --------------------------------------------------------------------------- #
