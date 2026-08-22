@@ -457,6 +457,14 @@ def status_command(ctx: typer.Context) -> None:
     with cli_errors():
         report = DaemonClient().vault_status(config)
         running = daemon_running(default_pid_path())
+        # Name the folder every count above was taken from, and whether it is
+        # actually there: a mistyped ``[core].vault_path`` otherwise reads as a
+        # healthy-but-empty vault (``notes: 0``, ``freshness: (no vault
+        # files)``, exit 0) right up until the next write lazily materialises a
+        # parallel vault at the typo. Reported, never fatal — lazy creation is
+        # ``shards init``'s documented behaviour.
+        vault_path = config.core.vault_path
+        report["vault"] = {"path": str(vault_path), "exists": vault_path.is_dir()}
         report["daemon"] = {"running": running is not None, "pid": running}
         report["agents"] = _agent_breakdown(DaemonClient().task_list(config, limit=None))
 
@@ -476,7 +484,10 @@ def _status_lines(report: dict[str, Any]) -> list[str]:
     dangling = report["dangling_links"]
     daemon = report["daemon"]
     daemon_line = f"running (pid {daemon['pid']})" if daemon["running"] else "stopped"
+    vault = report["vault"]
+    vault_line = vault["path"] + ("" if vault["exists"] else " (does not exist)")
     lines = [
+        f"vault: {vault_line}",
         f"notes: {report['notes']}",
         f"tasks: {task_line}",
         f"freshness: {freshness}",

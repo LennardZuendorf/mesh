@@ -118,9 +118,10 @@ list filters, unchanged on `claim`/`release`/`session-start` (which already read
 
 `init`, `daemon start|stop|status`, `status`, `reindex` — human-only, out of the three-verb
 surface, and withheld from MCP. `daemon` supervises the warm socket accelerator (every command
-still works, just slower, with the daemon down); `status` reports vault health (counts,
-freshness, dangling links, stale locks, per-agent claim breakdown); `reindex` rebuilds the
-search index and degrades to a notice if `indexed` is missing.
+still works, just slower, with the daemon down); `status` reports vault health (the vault
+path — flagged when it does not exist yet — counts, freshness, dangling links, stale locks,
+per-agent claim breakdown); `reindex` rebuilds the search index and degrades to a notice if
+`indexed` is missing or no `[search].collection` is configured.
 
 ```bash
 uv run shards daemon start
