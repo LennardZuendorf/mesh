@@ -298,3 +298,30 @@ def test_malformed_yaml_note_does_not_crash_wikilinks(cfg: Config, vault: Path) 
     assert related == ["n-ref"]
     # find_dangling (feeds `shards status`) skips the corrupt file instead of raising.
     assert find_dangling(vault) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task scope — the dangling scan walks exactly the task lifecycle folders        #
+# --------------------------------------------------------------------------- #
+
+
+def test_find_dangling_ignores_files_outside_the_task_lifecycle_folders(vault: Path) -> None:
+    """The scan walks ``tasks/{open,done}`` non-recursively, like ``core.tasks``.
+
+    ``core.tasks._iter_task_files`` / ``in_task_scope`` are deliberately
+    non-recursive over exactly those two folders, so a file filed beside them
+    (``tasks/archive/``) or a level deeper (``tasks/open/sub/``) is not a task
+    this program can get, claim, finish or edit. ``shards status`` must not
+    count broken links from files no verb can reach — the count would name a
+    problem the tool offers no way to fix.
+    """
+    _seed_task(vault, task_id="t-arch", rel="tasks/archive", body="[[Ghost From Archive]]")
+    _seed_task(vault, task_id="t-nest", rel="tasks/open/sub", body="[[Ghost From Subfolder]]")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_still_covers_both_lifecycle_folders(vault: Path) -> None:
+    """Narrowing the walk must not lose ``tasks/done/`` — both folders still scan."""
+    _seed_task(vault, task_id="t-o", rel="tasks/open", body="[[Ghost Open]]")
+    _seed_task(vault, task_id="t-d", rel="tasks/done", body="[[Ghost Done]]")
+    assert find_dangling(vault) == ["Ghost Open", "Ghost Done"]

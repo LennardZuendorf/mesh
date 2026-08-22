@@ -40,6 +40,13 @@ _WIKILINK = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 _ID_FORM = re.compile(r"^[nt]-[0-9A-Za-z]+$")
 _SHARDS_ID_PREFIX = "n-"
 _SHARDS_ID_PREFIXES = ("n-", "t-")
+# The task lifecycle folders, walked non-recursively — the same two folders and
+# the same shape as ``core.tasks._TASK_SUBDIRS`` / ``core.tasks.in_task_scope``.
+# Spelled here rather than imported because ``core.tasks`` imports *this* module
+# (:func:`resolve_wikilinks` runs on every task body write); the two must be kept
+# in step, and ``tests/notes/test_wikilinks.py`` pins that they select the same
+# files.
+_TASK_SUBDIRS: tuple[str, ...] = ("open", "done")
 
 
 def _notes_root(vault_path: Path) -> Path:
@@ -60,8 +67,21 @@ def _iter_note_files(vault_path: Path) -> Iterator[Path]:
 
 
 def _iter_task_files(vault_path: Path) -> Iterator[Path]:
-    """Yield every ``*.md`` under ``tasks/`` (both ``open/`` and ``done/``), sorted."""
-    yield from sorted(iter_md(_tasks_root(vault_path)))
+    """Yield every ``*.md`` directly under ``tasks/open/`` then ``tasks/done/``, sorted.
+
+    Non-recursive over exactly those two folders, mirroring
+    :func:`shards.core.tasks._iter_task_files` and
+    :func:`shards.core.tasks.in_task_scope`: those folders *are* the task
+    lifecycle, so a file filed beside them (``tasks/archive/t-z.md``) or a level
+    deeper (``tasks/open/sub/t-z.md``) is not a task any verb can resolve, get,
+    claim or edit. Walking it anyway would let ``shards status`` count dangling
+    links from files the tool offers no way to fix — a health signal naming a
+    problem outside its own scope. Sorted per folder, so the scan order is
+    deterministic and ``open`` precedes ``done`` exactly as in ``core.tasks``.
+    """
+    root = _tasks_root(vault_path)
+    for sub in _TASK_SUBDIRS:
+        yield from sorted(iter_md(root / sub, recursive=False))
 
 
 def _link_targets(body: str) -> list[str]:
@@ -126,11 +146,12 @@ def resolve_wikilinks(body: str, vault_path: Path) -> tuple[str, list[str]]:
 def find_dangling(vault_path: Path) -> list[str]:
     """Return the unresolvable ``[[Title]]`` link texts across the whole vault.
 
-    Scans every shards note **and task** body (``notes/**`` + ``tasks/{open,done}/``,
-    reusing the same per-root walk :func:`_iter_note_files` / :func:`_iter_task_files`
-    share) for title-form links whose title matches no shards note, de-duplicated
-    in first-seen order (sorted file scan per root, notes before tasks, body order
-    within a file). Id-form links are never dangling. The title *index* itself
+    Scans every shards note **and task** body (``notes/**`` recursively, plus
+    ``tasks/open/`` and ``tasks/done/`` non-recursively — exactly the folder scope
+    ``core.tasks`` resolves through, so every file counted here is one a verb can
+    actually reach) for title-form links whose title matches no shards note,
+    de-duplicated in first-seen order (sorted file scan per root, notes before
+    tasks, body order within a file). Id-form links are never dangling. The title *index* itself
     stays notes-only — titles resolve to notes by contract (see module docstring)
     — only the scan for link *targets* widens to cover tasks. Consumed by
     ``shards status`` to surface broken references across the whole corpus (root
