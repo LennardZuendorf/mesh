@@ -15,6 +15,14 @@ Two link shapes:
   mirroring ``list_notes`` — a coexisting foreign file (any writer sharing the
   folder) never shadows a link nor leaks a foreign id into ``related``.
 
+Either shape may carry the dialect's decorations — a display alias after ``|``
+and/or a heading (``#``) / block (``^``) anchor — which name a label for, or a
+location inside, the target rather than a different entity. They are stripped by
+:func:`_normalise_target` before lookup, so ``[[Note|display]]``,
+``[[Note#Section]]``, ``[[Note^block]]`` and ``[[Note#Section|display]]`` all
+resolve exactly as ``[[Note]]`` does, and a broken one is reported by its entity
+name rather than by text still carrying a pipe or hash.
+
 The match is an **exact** title comparison, deliberately unlike the
 slug-normalized matching that ``core.notes`` uses for CLI ``<id|slug>`` args:
 wikilinks name a note's title; slugs are user shorthand.
@@ -40,6 +48,11 @@ _WIKILINK = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
 _ID_FORM = re.compile(r"^[nt]-[0-9A-Za-z]+$")
 _SHARDS_ID_PREFIX = "n-"
 _SHARDS_ID_PREFIXES = ("n-", "t-")
+# The alias separator and the two anchor sigils of the wikilink dialect. Kept
+# next to ``_WIKILINK`` because they are the same grammar: what the brackets
+# capture, :func:`_normalise_target` reduces to the entity name.
+_ALIAS_SEPARATOR = "|"
+_ANCHOR_SIGILS = ("#", "^")
 # The task lifecycle folders, walked non-recursively — the same two folders and
 # the same shape as ``core.tasks._TASK_SUBDIRS`` / ``core.tasks.in_task_scope``.
 # Spelled here rather than imported because ``core.tasks`` imports *this* module
@@ -84,9 +97,45 @@ def _iter_task_files(vault_path: Path) -> Iterator[Path]:
         yield from sorted(iter_md(root / sub, recursive=False))
 
 
+def _normalise_target(text: str) -> str:
+    """Reduce one raw ``[[…]]`` inner text to the entity name it addresses.
+
+    The dialect the surrounding Markdown ecosystem writes is wider than
+    ``[[Title]]``: a link may carry a display alias after ``|``
+    (``[[Note|display]]``) and/or a heading (``[[Note#Section]]``) or block
+    (``[[Note^block-id]]``) anchor, in any combination
+    (``[[Note#Section|display]]``). All three decorations name a *location
+    inside* the target or a *label for* it — never a different entity — so they
+    are stripped before lookup: alias first (everything after the first ``|``
+    is display text, anchors included), then everything from the first ``#`` or
+    ``^``. A link carrying none of them is returned unchanged, so the plain-link
+    path is byte-identical to what it was before this normalisation existed.
+
+    A bare anchor (``[[#Heading]]``, ``[[^block]]``) names a spot in the *current*
+    file and reduces to ``""``; :func:`_link_targets` drops those, so they neither
+    resolve into ``related`` nor count as dangling.
+
+    The trade-off is explicit: a note whose *title* contains ``|``, ``#`` or ``^``
+    can no longer be linked by title, because the dialect gives no way to escape
+    them — the same restriction every host app that writes this syntax imposes.
+    """
+    target = text.split(_ALIAS_SEPARATOR, 1)[0]
+    for sigil in _ANCHOR_SIGILS:
+        target = target.split(sigil, 1)[0]
+    return target.strip()
+
+
 def _link_targets(body: str) -> list[str]:
-    """Return the stripped inner text of every ``[[…]]`` link, in body order."""
-    return [match.group(1).strip() for match in _WIKILINK.finditer(body)]
+    """Return the normalised target of every ``[[…]]`` link, in body order.
+
+    The one boundary where raw link text becomes a lookup key — both
+    :func:`resolve_wikilinks` and :func:`find_dangling` read through here, so the
+    dialect they accept and the text ``shards status`` reports can never drift
+    apart. Empty targets (a bare ``[[#anchor]]``, or an ``[[|display]]`` with no
+    name) are dropped: they address no entity.
+    """
+    targets = (_normalise_target(match.group(1)) for match in _WIKILINK.finditer(body))
+    return [target for target in targets if target]
 
 
 def _title_index(vault_path: Path) -> dict[str, str]:
@@ -149,9 +198,12 @@ def find_dangling(vault_path: Path) -> list[str]:
     Scans every shards note **and task** body (``notes/**`` recursively, plus
     ``tasks/open/`` and ``tasks/done/`` non-recursively — exactly the folder scope
     ``core.tasks`` resolves through, so every file counted here is one a verb can
-    actually reach) for title-form links whose title matches no shards note,
+    actually reach) for title-form links whose target matches no shards note,
     de-duplicated in first-seen order (sorted file scan per root, notes before
-    tasks, body order within a file). Id-form links are never dangling. The title *index* itself
+    tasks, body order within a file). Targets are reported *normalised* (see
+    :func:`_normalise_target`), so a broken ``[[Ghost#Sec|display]]`` is reported
+    as ``Ghost`` — the entity that is missing, not the raw link text.
+    Id-form links are never dangling. The title *index* itself
     stays notes-only — titles resolve to notes by contract (see module docstring)
     — only the scan for link *targets* widens to cover tasks. Consumed by
     ``shards status`` to surface broken references across the whole corpus (root
