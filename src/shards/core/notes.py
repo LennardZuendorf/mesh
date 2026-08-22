@@ -164,6 +164,31 @@ def _lock_path(config: Config, note_id: str) -> Path:
     return _notes_root(config) / ".locks" / f"{note_id}.lock"
 
 
+def _lock_id(config: Config, id_or_slug: str) -> str:
+    """Resolve ``<id|slug>`` to the note id the entity lock is named after.
+
+    The note-side counterpart of the id a task caller simply hands in: tasks
+    resolve id-only, so ``core.tasks`` can name its lock straight from the
+    argument, while a note may be addressed by slug and has to look the id up
+    first. This is a *naming* step only — it deliberately does **not** produce
+    the path the verb then acts on.
+
+    That split is the whole point. The id is stable across everything a racing
+    writer can do (``update_note(new_type=...)`` moves the *file* between
+    folders but never renames it), so the lock derived from it stays the same
+    lock both racers contend for; the **path**, which is not stable, is resolved
+    again inside the lock by each amend/delete verb. Resolving the path out here
+    instead is the TOCTOU this function exists to avoid: a concurrent type move
+    would leave the caller holding a path that no longer exists, and it would
+    unlink into thin air or report a live note as missing.
+
+    Raises :class:`NoteNotFoundError` / :class:`AmbiguousSlugError` exactly as
+    :func:`_resolve_path` does, so an unresolvable argument still fails before
+    any lock is taken.
+    """
+    return _resolve_path(config, id_or_slug).stem
+
+
 def _append_to_end(body: str, block: str) -> str:
     base = body.rstrip("\n")
     return f"{base}\n\n{block}" if base else block
@@ -323,15 +348,21 @@ def append_note(
     claim``/``release`` already resolve) rather than the stamp silently falling
     back to ``config.agent`` regardless of ``--owner`` (agent-usability/`--owner`
     role 5 — the fifth durable identity surface). The whole read-modify-write runs
-    under the entity lock and the result is written atomically. The re-read inside
+    under the entity lock and the result is written atomically. The id is
+    resolved *inside* the lock (the lock name derives from ``<id|slug>`` via
+    :func:`_lock_id`, not from the file location, so it stays stable across a
+    concurrent type move), closing the window where a racing
+    ``update_note(new_type=...)`` renames the file into another folder before
+    this read — which used to surface as a spurious "note not found" for a note
+    that is right there. Mirrors ``core.tasks.append_task``. The re-read inside
     the lock goes through :func:`shards.storage.files.read_post`; a file that
-    vanishes or turns unreadable between resolution and the lock raises
+    vanishes or turns unreadable between resolution and the read raises
     :class:`NoteNotFoundError`, matching :func:`get_note`.
     """
-    path = _resolve_path(config, id_or_slug)
-    note_id = path.stem
+    note_id = _lock_id(config, id_or_slug)
     block = _format_block(text, timestamp, actor if actor is not None else config.agent)
     with hold(_lock_path(config, note_id)):
+        path = _resolve_path(config, note_id)
         post = read_post(path)
         if post is None:
             raise NoteNotFoundError(id_or_slug)
@@ -441,18 +472,25 @@ def update_note(
     :func:`apply_tag_spec` / :data:`TAG_SPEC_SEMANTICS`).
     ``new_type`` rewrites the ``type`` field and moves the file into the matching
     folder via ``os.replace`` (atomic rename); the old path stops existing. Runs
-    under the entity lock; writes are atomic. The re-read inside the lock goes
-    through :func:`shards.storage.files.read_post`; a file that vanishes or turns
-    unreadable between resolution and the lock raises :class:`NoteNotFoundError`,
-    matching :func:`get_note`.
+    under the entity lock; writes are atomic. The id is resolved *inside* the
+    lock (the lock name derives from ``<id|slug>`` via :func:`_lock_id`, not from
+    the file location, so it stays stable across a concurrent type move) — this
+    verb is both the racer and the *cause* of the race, since its own
+    ``os.replace`` is what invalidates a path another agent resolved, so two
+    concurrent updates now serialize on the same lock instead of one of them
+    reading a path the other just renamed. Mirrors ``core.tasks.update_task``.
+    The re-read inside the lock goes through
+    :func:`shards.storage.files.read_post`; a file that vanishes or turns
+    unreadable between resolution and the read raises
+    :class:`NoteNotFoundError`, matching :func:`get_note`.
     """
     if new_type is not None and new_type not in _NOTE_TYPES:
         raise ValueError(f"invalid note type: {new_type!r}")
 
     vault = config.core.vault_path
-    path = _resolve_path(config, id_or_slug)
-    note_id = path.stem
+    note_id = _lock_id(config, id_or_slug)
     with hold(_lock_path(config, note_id)):
+        path = _resolve_path(config, note_id)
         post = read_post(path)
         if post is None:
             raise NoteNotFoundError(id_or_slug)
@@ -479,20 +517,27 @@ def update_note(
 def delete_note(config: Config, id_or_slug: str) -> str:
     """Hard-delete a note under the entity lock; return the deleted id.
 
-    Resolves ``<id|slug>`` to a sandbox-checked path (raising
-    :class:`NoteNotFoundError` / :class:`AmbiguousSlugError` before touching the
-    filesystem), then removes the file permanently — no archive, no trash —
-    *inside* the per-entity ``O_EXCL`` lock. Holding the lock serializes the
-    delete against a concurrent ``append``/``update`` so a racing writer can never
-    resurrect the note or have its in-flight lock stolen. :func:`shards.storage.locks.hold`
-    clears only *stale* locks (dead PID or aged out) on acquire and releases the
-    lock on exit, so residue is cleaned without unconditionally destroying a live
-    lock.
+    Resolves ``<id|slug>`` to the note id (raising :class:`NoteNotFoundError` /
+    :class:`AmbiguousSlugError` before touching the filesystem), then removes the
+    file permanently — no archive, no trash — *inside* the per-entity ``O_EXCL``
+    lock. Holding the lock serializes the delete against a concurrent
+    ``append``/``update`` so a racing writer can never resurrect the note or have
+    its in-flight lock stolen.
+
+    The **path** is resolved inside the lock too (the lock name derives from the
+    id via :func:`_lock_id`, not from the file location, so it stays stable
+    across a concurrent type move), mirroring ``core.tasks.delete_task``. Without
+    that, a racing ``update_note(new_type=...)`` could ``os.replace`` the file
+    into another folder between resolution and the ``unlink``, which then raised
+    ``FileNotFoundError`` (surfacing as ``io error: [Errno 2]``, exit 1) **and
+    left the note undeleted** — a delete that both failed loudly and failed to
+    delete. :func:`shards.storage.locks.hold` clears only *stale* locks (dead PID
+    or aged out) on acquire and releases the lock on exit, so residue is cleaned
+    without unconditionally destroying a live lock.
     """
-    path = _resolve_path(config, id_or_slug)
-    note_id = path.stem
+    note_id = _lock_id(config, id_or_slug)
     with hold(_lock_path(config, note_id)):
-        path.unlink()
+        _resolve_path(config, note_id).unlink()
     return note_id
 
 
