@@ -303,7 +303,12 @@ def cancel_command(
 
 
 def _task_meta_lines(task: Task) -> list[str]:
-    """Render a task's canonical frontmatter fields as terse ``key: value`` lines."""
+    """Render a task's canonical frontmatter fields as terse ``key: value`` lines.
+
+    Timestamps go through :func:`shards.cli._output._iso_z`, the same helper
+    ``emit_mutation`` and ``hit_dict`` use — one field must not render ``Z`` on
+    the JSON surfaces and ``+00:00`` here (core-hardening/4).
+    """
     return [
         f"id: {task.id}",
         f"type: {task.type}",
@@ -316,8 +321,8 @@ def _task_meta_lines(task: Task) -> list[str]:
         f"tags: {', '.join(task.tags)}",
         f"blocks: {', '.join(task.blocks)}",
         f"blocked_by: {', '.join(task.blocked_by)}",
-        f"created: {task.created.isoformat()}",
-        f"updated: {task.updated.isoformat()}",
+        f"created: {_output._iso_z(task.created)}",
+        f"updated: {_output._iso_z(task.updated)}",
         f"related: {', '.join(task.related)}",
     ]
 
