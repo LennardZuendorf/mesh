@@ -919,13 +919,22 @@ def test_reparse_evicts_when_a_directory_replaces_the_file(vault: Path) -> None:
 
 
 def test_index_moves_an_id_between_paths_without_leaking(vault: Path) -> None:
-    """Re-indexing an id at a new path drops the old path's row (no duplicates)."""
-    first = _note(vault, note_id="n-move", title="Move")
+    """A moved file ends up as exactly one row, at its new path.
+
+    The index no longer infers that a re-parsed id means the previous holder of
+    that id must be gone — that inference is precisely what collapsed two files
+    sharing an id. A move is instead driven the way the filesystem reports it, and
+    the way :meth:`~shards.index.watcher.Watcher.handle_event` drives it: evict the
+    source, re-parse the destination.
+    """
+    first = _note(vault, note_id="n-move", title="Move", note_type="decision")
     index = VaultIndex()
     index.reparse(first)
     moved = vault / "notes" / "decisions" / "n-move.md"
     moved.parent.mkdir(parents=True, exist_ok=True)
     first.replace(moved)
+
+    index.evict(first)
     index.reparse(moved)
 
     assert len(index) == 1
