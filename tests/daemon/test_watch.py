@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,9 @@ from pathlib import Path
 import frontmatter
 import pytest
 from watchdog.events import (
+    DirDeletedEvent,
+    DirModifiedEvent,
+    DirMovedEvent,
     FileCreatedEvent,
     FileDeletedEvent,
     FileModifiedEvent,
@@ -358,6 +362,95 @@ def test_handle_event_reconciles_folder_mismatch(cfg: Config, vault: Path) -> No
     assert entry.path.resolve() == (vault / "tasks" / "done" / "t-rec.md").resolve()
     assert (vault / "tasks" / "done" / "t-rec.md").exists()
     assert not path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Directory events — watchdog reports a subtree rename as ONE event            #
+# --------------------------------------------------------------------------- #
+
+
+def test_directory_moved_out_of_the_vault_evicts_the_whole_subtree(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """``mv notes/decisions ../archive`` arrives as one ``DirMovedEvent``.
+
+    There are no per-file events behind it, so a handler that returned early on
+    ``is_directory`` served phantom rows for every file in that subtree for the
+    daemon's whole lifetime. (``rmtree`` is unaffected — it emits a delete per
+    file.)
+    """
+    inside = _write_note(vault, note_id="n-sub", note_type="decision")
+    index = VaultIndex()
+    index.reparse(inside)
+    watcher = Watcher(cfg, index)
+    seen: list[Path] = []
+    watcher.hooks.register(seen.append)
+
+    src = vault / "notes" / "decisions"
+    dest = tmp_path / "archive"
+    shutil.move(str(src), str(dest))
+    watcher.handle_event(DirMovedEvent(str(src), str(dest)))
+
+    assert len(index) == 0
+    assert index.get("n-sub") is None
+    assert [p.name for p in seen] == ["n-sub.md"]  # the hook heard about it too
+
+
+def test_directory_deleted_evicts_the_whole_subtree(cfg: Config, vault: Path) -> None:
+    """A directory delete reported without per-file events still empties the subtree."""
+    inside = _write_note(vault, note_id="n-rm", note_type="decision")
+    index = VaultIndex()
+    index.reparse(inside)
+    watcher = Watcher(cfg, index)
+
+    folder = vault / "notes" / "decisions"
+    shutil.rmtree(folder)
+    watcher.handle_event(DirDeletedEvent(str(folder)))
+
+    assert len(index) == 0
+
+
+def test_directory_moved_into_the_vault_indexes_the_whole_subtree(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """A folder moved *in* must be walked — nothing else will announce its files."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _write_note(staging, note_id="n-in", note_type="decision", folder=".")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+
+    dest = vault / "notes" / "decisions" / "arrived"
+    shutil.move(str(staging), str(dest))
+    watcher.handle_event(DirMovedEvent(str(staging), str(dest)))
+
+    assert index.get("n-in") is not None
+
+
+def test_directory_moved_outside_the_watched_tree_is_not_indexed(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """A destination outside ``notes/``/``tasks/`` is not a vault row source."""
+    staging = tmp_path / "elsewhere"
+    staging.mkdir()
+    _write_note(staging, note_id="n-out", folder=".")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+
+    dest = vault / "archive"
+    shutil.move(str(staging), str(dest))
+    watcher.handle_event(DirMovedEvent(str(staging), str(dest)))
+
+    assert len(index) == 0
+
+
+def test_directory_modified_events_are_ignored(cfg: Config, vault: Path) -> None:
+    """Every file write also modifies its parent dir — that must stay a no-op."""
+    _write_note(vault, note_id="n-dm", note_type="decision")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+    watcher.handle_event(DirModifiedEvent(str(vault / "notes" / "decisions")))
+    assert len(index) == 0
 
 
 def test_event_handler_routes_created(cfg: Config, vault: Path) -> None:

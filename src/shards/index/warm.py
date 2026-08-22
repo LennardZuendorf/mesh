@@ -180,6 +180,20 @@ class VaultIndex:
         with self._lock:
             self._rows.pop(rp, None)
 
+    def paths_under(self, root: Path) -> list[Path]:
+        """Every indexed path inside the directory ``root``.
+
+        The subtree query behind the watcher's directory-event branch: watchdog
+        reports a folder rename or delete as a *single* event with no per-file
+        events behind it, so the rows under it have to be found by prefix rather
+        than announced one by one. Matching is done on real paths (the dict key),
+        so a subtree reached through a symlink still matches; the returned paths
+        are the ones the index holds, in the caller's own path space.
+        """
+        prefix = self._rp(Path(root)) + os.sep
+        with self._lock:
+            return [row.path for rp, row in self._rows.items() if rp.startswith(prefix)]
+
     def get(self, entry_id: str) -> IndexEntry | None:
         """The row carrying ``entry_id``; the lowest path when the vault holds duplicates.
 
