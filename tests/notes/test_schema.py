@@ -155,6 +155,84 @@ def test_config_agent_used_when_env_absent(shards_config: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Vault-path canonicalisation                                                   #
+# --------------------------------------------------------------------------- #
+
+_VAULT_KEY_SPELLINGS = ("vault_path", "path", "tolaria_path")
+
+
+def _write_core(cfg_file: Path, key: str, value: object) -> None:
+    cfg_file.write_text(f'[core]\n{key} = "{value}"\n', encoding="utf-8")
+
+
+@pytest.mark.parametrize("key", _VAULT_KEY_SPELLINGS)
+def test_vault_path_resolves_through_a_symlink(tmp_path: Path, key: str) -> None:
+    """A symlinked vault must canonicalise to its target, on every spelling.
+
+    The daemon's watcher indexes realpaths while the scope predicates compare
+    against the configured path: an unresolved symlink puts the two in different
+    path spaces, and every file touched after daemon start silently falls out of
+    scope (`note list` / `task list` / `status` go empty while the daemon is up).
+    """
+    real = tmp_path / "real-vault"
+    real.mkdir()
+    link = tmp_path / "linked-vault"
+    link.symlink_to(real)
+
+    cfg_file = tmp_path / "config.toml"
+    _write_core(cfg_file, key, link)
+
+    assert load_config(cfg_file).core.vault_path == real
+
+
+def test_nonexistent_vault_path_still_loads(tmp_path: Path) -> None:
+    """`shards init` creates the vault lazily — resolution must not require it."""
+    missing = tmp_path / "not-yet" / "vault"
+    cfg_file = tmp_path / "config.toml"
+    _write_core(cfg_file, "vault_path", missing)
+
+    assert load_config(cfg_file).core.vault_path == missing
+
+
+def test_nonexistent_vault_path_under_a_symlink_resolves(tmp_path: Path) -> None:
+    """Canonicalisation applies to the existing prefix of a not-yet-created vault."""
+    real = tmp_path / "real-parent"
+    real.mkdir()
+    link = tmp_path / "linked-parent"
+    link.symlink_to(real)
+
+    cfg_file = tmp_path / "config.toml"
+    _write_core(cfg_file, "vault_path", link / "vault")
+
+    assert load_config(cfg_file).core.vault_path == real / "vault"
+
+
+def test_tilde_expands_before_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`~` still expands — and the expansion is then canonicalised, not literalised."""
+    real_home = tmp_path / "real-home"
+    (real_home / "vault").mkdir(parents=True)
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(real_home)
+    monkeypatch.setenv("HOME", str(linked_home))
+
+    cfg_file = tmp_path / "config.toml"
+    _write_core(cfg_file, "vault_path", "~/vault")
+
+    assert load_config(cfg_file).core.vault_path == real_home / "vault"
+
+
+@pytest.mark.parametrize("key", _VAULT_KEY_SPELLINGS)
+def test_relative_vault_path_becomes_absolute(tmp_path: Path, key: str) -> None:
+    """One path space means absolute: a relative spelling is anchored, not kept."""
+    cfg_file = tmp_path / "config.toml"
+    _write_core(cfg_file, key, "some/vault")
+
+    resolved = load_config(cfg_file).core.vault_path
+    assert resolved.is_absolute()
+    assert resolved == (Path.cwd() / "some" / "vault").resolve()
+
+
+# --------------------------------------------------------------------------- #
 # Note schema                                                                   #
 # --------------------------------------------------------------------------- #
 

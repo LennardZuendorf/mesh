@@ -13,8 +13,11 @@
 
 [core]
 # Path to your Markdown vault folder — any directory shards can write
-# `notes/` and `tasks/` into. `~` is expanded at load. `path` and
-# `tolaria_path` are still accepted as legacy spellings.
+# `notes/` and `tasks/` into. `~` is expanded at load and the result is
+# canonicalised (made absolute, symlinks followed) so the CLI, the daemon's
+# watcher and the sandbox all speak one path space. The folder need not exist
+# yet — `shards init` creates it. `path` and `tolaria_path` are still accepted
+# as legacy spellings.
 #
 # Shards' own reads and writes stay inside `notes/` and `tasks/` — an
 # Obsidian vault root works as-is, and `.obsidian/`/`.trash/` are never

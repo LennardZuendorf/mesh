@@ -70,9 +70,27 @@ class CoreConfig(msgspec.Struct, kw_only=True):
     agent: str | None = None
 
     def __post_init__(self) -> None:
-        """Expand a leading ``~`` — ``realpath`` does not, so ``~/vault`` would
-        otherwise become a literal ``./~/vault`` under the process CWD."""
-        self.vault_path = self.vault_path.expanduser()
+        """Canonicalise the vault path once, here, at the loader boundary.
+
+        Two steps, in this order:
+
+        1. Expand a leading ``~`` — ``realpath`` does not, so ``~/vault`` would
+           otherwise become a literal ``./~/vault`` under the process CWD.
+        2. ``resolve()`` — absolutise and follow symlinks, so every consumer
+           (the corpus walkers, the sandbox's ``safe_resolve``, the daemon's
+           watcher and its scope predicates) speaks one path space. The
+           watcher reports realpaths; comparing those against an unresolved
+           ``vault_path`` puts a symlinked vault (external drive, cloud-synced
+           folder, container bind mount, macOS ``/var`` → ``/private/var``) out
+           of scope for every file touched after daemon start, emptying the
+           warm index behind ``note list`` / ``task list`` / ``status``.
+
+        ``resolve()`` is deliberately non-strict (its default): a vault that
+        does not exist yet must still load — ``shards init`` creates it lazily,
+        and the missing directory is reported by ``shards status``, not by
+        refusing to parse the config.
+        """
+        self.vault_path = self.vault_path.expanduser().resolve()
 
 
 #: Legacy ``[core]`` spellings of the vault key, accepted on input forever.
