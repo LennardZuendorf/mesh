@@ -15,6 +15,15 @@ daemon that answers ``ok: false`` surfaces as :class:`DaemonError`, except for t
 fallback-eligible codes, which also run the fallback. :meth:`ping` is the one
 exception: it is a liveness probe with no fallback, so a down daemon propagates.
 
+**One vault, one socket.** :func:`default_socket_path` keys the socket file on a
+digest of the resolved vault root, so a daemon warmed on one vault is not even
+reachable from a CLI configured for another. As a second layer, a config-ful
+daemon names its vault in every reply and :meth:`DaemonClient._check_vault`
+refuses a mismatch — degrading to the file-op fallback, exactly like a daemon-down
+error — which covers the stale daemon still holding the socket the config named
+before an edit. Neither layer can make a read *fail*: the daemon accelerates, it
+never gates.
+
 **The wired read verbs.** :meth:`~DaemonClient.note_list`,
 :meth:`~DaemonClient.task_list`, :meth:`~DaemonClient.vault_status` and
 :meth:`~DaemonClient.tag_pull` are the list-shaped reads the daemon can actually
@@ -36,6 +45,7 @@ reads it per id, which is what ``session-start`` does for its live queue.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -46,16 +56,23 @@ from typing import Any
 
 import msgspec
 
+from shards.core.errors import ShardsError
 from shards.core.notes import NoteFilter, NoteView, list_notes
 from shards.core.tasks import TaskFilter, TaskView, list_tasks
 from shards.index.tagpull import TagPullFilter, tagpull
 from shards.index.warm import DEFAULT_RECENT_LIMIT, scan_recent
-from shards.schemas.config import Config
+from shards.schemas.config import Config, load_config
 from shards.schemas.note import Note
 from shards.schemas.search import SearchResult
 from shards.schemas.task import Task
 
+# The socket file is keyed on the vault it serves — ``shards-<digest>.sock`` — so
+# two vaults on one machine can never meet on one socket. ``shards.sock`` (no
+# digest) is the vault-unknown name: a process with no resolvable config has no
+# vault to key on, and a path helper must still answer.
 _SOCKET_NAME = "shards.sock"
+_SOCKET_PREFIX = "shards-"
+_VAULT_DIGEST_CHARS = 12
 _DEFAULT_TIMEOUT = 5.0
 _RECV_CHUNK = 4096
 # RPC error codes eligible for the daemon-down fallback even on a *live* daemon:
@@ -79,16 +96,78 @@ Fallback = Callable[[], Any]
 _UNSERVED: Any = object()
 
 
-def default_socket_path() -> Path:
-    """Resolve the daemon socket path.
+def vault_id(config: Config) -> str:
+    """The vault identity both ends compare — the ``realpath`` of the vault root.
 
-    ``$XDG_RUNTIME_DIR/shards.sock`` when the runtime dir is set, else
-    ``~/.shards/run/shards.sock``. An empty ``$XDG_RUNTIME_DIR`` counts as unset.
+    ``realpath`` (not the configured spelling) so two configs naming the same
+    folder through a symlink, a ``~`` or a trailing slash resolve to one identity —
+    the same canonicalization :func:`shards.storage.sandbox.safe_resolve` uses.
     """
+    return os.path.realpath(config.core.vault_path)
+
+
+def _ambient_vault(config: Config | None) -> str | None:
+    """The vault this process reads: ``config``'s, else the ambient config's.
+
+    ``None`` when no config resolves at all (no file, or a malformed one). A path
+    helper must never raise — a broken config is the CLI boundary's problem to
+    report, not a reason for socket resolution to explode — so the vault-unknown
+    name is the answer here.
+    """
+    if config is not None:
+        return vault_id(config)
+    try:
+        return vault_id(load_config())
+    except (ShardsError, OSError, ValueError, msgspec.ValidationError):
+        return None
+
+
+def _socket_dir() -> Path:
+    """``$XDG_RUNTIME_DIR`` when set (an empty value counts as unset), else ``~/.shards/run``."""
     runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        return Path(runtime) / _SOCKET_NAME
-    return Path.home() / ".shards" / "run" / _SOCKET_NAME
+    return Path(runtime) if runtime else Path.home() / ".shards" / "run"
+
+
+def _socket_name(vault: str | None) -> str:
+    """``shards-<sha256(vault)[:12]>.sock``, or the legacy name when the vault is unknown."""
+    if vault is None:
+        return _SOCKET_NAME
+    digest = hashlib.sha256(vault.encode("utf-8")).hexdigest()[:_VAULT_DIGEST_CHARS]
+    return f"{_SOCKET_PREFIX}{digest}.sock"
+
+
+def default_socket_path(config: Config | None = None) -> Path:
+    """Resolve the daemon socket path for ``config``'s vault.
+
+    ``$XDG_RUNTIME_DIR/shards-<digest>.sock`` when the runtime dir is set, else
+    ``~/.shards/run/shards-<digest>.sock``, where ``<digest>`` is a stable digest
+    of the resolved vault root: **one socket per vault**, so a daemon warmed on
+    one vault is unreachable from a CLI configured for another rather than
+    silently serving it foreign rows.
+
+    ``config`` defaults to the ambient one (``$SHARDS_CONFIG_PATH``, else
+    ``~/.shards/config.toml``), which keeps every existing zero-argument caller
+    vault-correct without passing a config down. With no resolvable config the
+    name degrades to the undigested ``shards.sock``.
+    """
+    return _socket_dir() / _socket_name(_ambient_vault(config))
+
+
+class VaultMismatch(Exception):
+    """The daemon on this socket serves a *different* vault than the caller's.
+
+    Belt to the vault-keyed socket name's braces: it catches the case a socket
+    name cannot — a daemon still running on the vault the config named *before*
+    an edit, holding a socket path that is no longer this vault's. Treated by
+    :meth:`DaemonClient.call` exactly like a transport failure (run the file-op
+    fallback), never surfaced: a read must never fail because the accelerator
+    was pointed at the wrong folder.
+    """
+
+    def __init__(self, expected: str, served: str) -> None:
+        super().__init__(f"daemon serves {served!r}, caller reads {expected!r}")
+        self.expected = expected
+        self.served = served
 
 
 class DaemonError(Exception):
@@ -167,9 +246,18 @@ class DaemonClient:
         self,
         socket_path: Path | None = None,
         *,
+        config: Config | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
     ) -> None:
-        self._socket_path = Path(socket_path) if socket_path is not None else default_socket_path()
+        # The vault this client reads. Resolved once, from ``config`` when given
+        # and from the ambient config otherwise, and used for both halves of the
+        # vault guard: which socket to dial, and which vault a reply must name.
+        self._vault = _ambient_vault(config)
+        self._socket_path = (
+            Path(socket_path)
+            if socket_path is not None
+            else _socket_dir() / _socket_name(self._vault)
+        )
         self._timeout = timeout
 
     # -- transport --------------------------------------------------------- #
@@ -179,8 +267,9 @@ class DaemonClient:
 
         Raises an ``OSError`` (missing/refused socket, timeout, broken pipe) when
         the exchange fails and ``json.JSONDecodeError`` on a truncated reply — both
-        caught by :meth:`call` — and :class:`DaemonError` when the daemon answers
-        with an ``ok: false`` envelope.
+        caught by :meth:`call` — :class:`VaultMismatch` when the reply names a
+        vault other than this client's, and :class:`DaemonError` when the daemon
+        answers with an ``ok: false`` envelope.
         """
         request = {"id": str(uuid.uuid4()), "method": method, "params": params}
         payload = (json.dumps(request) + "\n").encode("utf-8")
@@ -196,10 +285,24 @@ class DaemonClient:
                 buf.extend(chunk)
         line = bytes(buf).split(b"\n", 1)[0]
         response: dict[str, Any] = json.loads(line)
+        self._check_vault(response)
         if not response.get("ok", False):
             error = response.get("error") or {}
             raise DaemonError(int(error.get("code", 1)), str(error.get("message", "error")))
         return response.get("result")
+
+    def _check_vault(self, response: dict[str, Any]) -> None:
+        """Raise :class:`VaultMismatch` if the reply came from another vault.
+
+        Checked *before* the ``ok`` flag, so a foreign daemon's error envelope
+        degrades on the same path its success envelope would. A reply carrying no
+        ``vault`` is unverifiable and therefore allowed: only a config-ful server
+        stamps one, and a config-less server has no vault rows to leak — it serves
+        ``ping`` and answers ``404`` for every read.
+        """
+        served = response.get("vault")
+        if self._vault is not None and isinstance(served, str) and served != self._vault:
+            raise VaultMismatch(self._vault, served)
 
     def call(
         self,
@@ -216,13 +319,17 @@ class DaemonClient:
         (``BrokenPipeError`` / ``ConnectionResetError``), or a truncated reply
         (``json.JSONDecodeError``) — is swallowed and the fallback's result
         returned; it is never re-raised. A *live* daemon's ``ok: false`` reply
-        surfaces as :class:`DaemonError`, except for ``fallback_codes`` (default
-        ``{503}`` — reserved-but-unimplemented methods), which also run the
-        fallback. Every other code (domain errors 2/3/4) propagates.
+        surfaces as :class:`DaemonError`, except for ``fallback_codes``, which also
+        run the fallback. Every other code (domain errors 2/3/4) propagates.
+
+        A :class:`VaultMismatch` — the daemon on this socket serves a different
+        vault — falls back *unconditionally*, whatever ``fallback_codes`` says:
+        there is no read for which another vault's answer is better than this
+        vault's own disk.
         """
         try:
             return self._request(method, params)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, VaultMismatch):
             return fallback()
         except DaemonError as exc:
             if exc.code in fallback_codes:
@@ -249,11 +356,13 @@ class DaemonClient:
 
         A down/absent daemon (missing or refused socket, timeout, garbled reply)
         yields ``False`` — the single liveness check both the ``search`` hybrid gate
-        and the ``recent-activity`` degradation notice share.
+        and the ``recent-activity`` degradation notice share. Liveness is
+        *per-vault*: a daemon answering for another vault is no accelerator for
+        this one, so a :class:`VaultMismatch` reads as down too.
         """
         try:
             self.ping()
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, VaultMismatch):
             return False
         return True
 

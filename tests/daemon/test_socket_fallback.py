@@ -154,15 +154,30 @@ def _roundtrip(path: Path, request: dict[str, object]) -> dict[str, object]:
 
 
 def test_default_socket_path_uses_xdg_runtime_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cfg: Config
+) -> None:
+    """The runtime dir is the socket's *folder*; the vault names the file."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    path = default_socket_path(cfg)
+    assert path.parent == tmp_path
+    assert path.name.startswith("shards-")
+    assert path.suffix == ".sock"
+
+
+def test_default_socket_path_falls_back_to_shards_run(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config
+) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert default_socket_path(cfg).parent == Path.home() / ".shards" / "run"
+
+
+def test_default_socket_path_without_a_config_keeps_the_legacy_name(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """No resolvable config → no vault to key on, and never an exception."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(tmp_path / "absent.toml"))
     assert default_socket_path() == tmp_path / "shards.sock"
-
-
-def test_default_socket_path_falls_back_to_shards_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    assert default_socket_path() == Path.home() / ".shards" / "run" / "shards.sock"
 
 
 # --------------------------------------------------------------------------- #
