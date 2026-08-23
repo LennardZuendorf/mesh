@@ -42,9 +42,7 @@ def fresh_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_body_only_match_is_returned_after_init(fresh_install: Path) -> None:
-    new_result = _invoke(
-        ["--quiet", "note", "new", "Unrelated Title", "--body", f"a {_TOKEN} b"]
-    )
+    new_result = _invoke(["--quiet", "note", "new", "Unrelated Title", "--body", f"a {_TOKEN} b"])
     assert new_result.exit_code == 0, new_result.output
     note_id = new_result.stdout.strip()
 
