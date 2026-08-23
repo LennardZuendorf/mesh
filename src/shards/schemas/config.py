@@ -91,6 +91,12 @@ class CoreConfig(msgspec.Struct, kw_only=True):
         refusing to parse the config.
         """
         self.vault_path = self.vault_path.expanduser().resolve()
+        # A vault that does not exist yet is fine (created lazily). A vault that
+        # exists and is *not a directory* never can be: every write below it would
+        # fail with a bare ``ENOTDIR`` at exit 1, an internal-error code for what is
+        # plainly a bad config value. Reject it here so it reads as validation.
+        if self.vault_path.exists() and not self.vault_path.is_dir():
+            raise ValueError(f"[core].vault_path is not a directory: {self.vault_path}")
 
 
 #: Legacy ``[core]`` spellings of the vault key, accepted on input forever.

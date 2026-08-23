@@ -52,7 +52,7 @@ from shards.schemas.config import load_config
 
 search_app = typer.Typer(
     name="search",
-    help="Recall across notes + tasks: tag pull (--tags) or substring fallback (query).",
+    help="Recall across notes + tasks: ranked query, or an exact tag pull (--tags).",
     # ``search`` is a single leaf command whose args are its own — allow options to
     # follow the positional QUERY (a Typer callback group defaults to stopping option
     # parsing at the first non-option, which would read ``--limit`` as a subcommand).
