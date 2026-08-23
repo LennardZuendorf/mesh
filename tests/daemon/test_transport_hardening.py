@@ -187,3 +187,36 @@ def _sync_start(path: Path) -> Callable[[], None]:
             loop.close()
 
     return start
+
+
+# --------------------------------------------------------------------------- #
+# Wire-payload coercion                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_boolean_limit_falls_back_to_the_default(shards_config: Path, socket_path: Path) -> None:
+    """`bool` is an `int` subclass, so `"limit": true` must not mean "limit 1".
+
+    The daemon protocol is JSON and the MCP surface is typed by a client, so a
+    stray `true` is reachable over the wire. The guard excluding bool from the
+    int branch was deletable with the whole suite green.
+    """
+    import json as _json
+
+    from shards.core.notes import create_note
+    from shards.schemas.config import load_config
+    from tests.daemon.conftest import running_daemon
+
+    config = load_config()
+    for n in range(4):
+        create_note(config, f"Recent {n}", body="body")
+
+    with running_daemon(socket_path, config) as server:
+        reply = server._dispatch(
+            _json.dumps(
+                {"id": "1", "method": "activity.recent", "params": {"limit": True}}
+            ).encode()
+        )
+
+    assert reply["ok"] is True
+    assert len(reply["result"]["entries"]) > 1, "a boolean limit was treated as limit=1"

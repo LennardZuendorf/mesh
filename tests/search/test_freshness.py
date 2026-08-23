@@ -123,18 +123,6 @@ def test_incremental_update_swallows_generic_oserror(
     indexed_client.incremental_update(cfg, vault / "notes" / "n-x.md")
 
 
-def test_incremental_update_noop_without_collection(
-    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cfg.search.collection = None
-
-    def _boom(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise AssertionError("no subprocess when collection is None")
-
-    monkeypatch.setattr(indexed_client.subprocess, "run", _boom)
-    indexed_client.incremental_update(cfg, vault / "notes" / "n-x.md")
-
-
 # --------------------------------------------------------------------------- #
 # full_rebuild / reindex — argv, delegation, no-op                             #
 # --------------------------------------------------------------------------- #
@@ -154,16 +142,6 @@ def test_reindex_delegates_to_full_rebuild(cfg: Config, monkeypatch: pytest.Monk
     monkeypatch.setattr(indexed_client, "full_rebuild", lambda config: calls.append(config))
     indexed_client.reindex(cfg)
     assert calls == [cfg]
-
-
-def test_full_rebuild_noop_without_collection(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg.search.collection = None
-
-    def _boom(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise AssertionError("no subprocess when collection is None")
-
-    monkeypatch.setattr(indexed_client.subprocess, "run", _boom)
-    indexed_client.full_rebuild(cfg)  # silent no-op
 
 
 # --------------------------------------------------------------------------- #

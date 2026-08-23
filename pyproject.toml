@@ -55,11 +55,13 @@ addopts = "-q"
 
 [tool.coverage.run]
 source = ["src/shards"]
+# Branch mode on: a statement-only gate cannot see a deleted guard clause, and a
+# mutation audit found every guard in index/reconcile.py deletable with the suite
+# green. Costs nothing here — branch-inclusive coverage already clears the floor.
+branch = true
 
 [tool.coverage.report]
-# Measured at core-hardening/7: 98.17-98.20% (3053-3052/3109 stmts, timing-
-# sensitive watcher branch). Floored ~1.2pt below the observed range, per
-# .spec/features/core-hardening/plan.md's own recommendation ("measured minus
-# 1 point, ratcheted upward only") — never lower this without a coverage
+# Measured with branch mode on: 97.7% combined (statement-only is 98.2%).
+# Floored ~0.7pt below the observed value — never lower this without a coverage
 # regression backing it, and always ratchet it up as coverage genuinely grows.
 fail_under = 97

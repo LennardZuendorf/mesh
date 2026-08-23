@@ -155,8 +155,18 @@ def test_empty_roster_renders_degraded_statement() -> None:
     [None, _config(agent=None, collections=[])],
     ids=["no-config", "partial-config"],
 )
-def test_degraded_variants_never_raise(config: Config | None) -> None:
-    build_instructions(config)  # must not raise
+def test_degraded_variants_still_orient_an_agent(config: Config | None) -> None:
+    """A degraded block must still be *useful*, not merely non-throwing.
+
+    Asserting only "does not raise" would pass on an empty string — which is the
+    one output that fails the block's whole purpose, since a client with no config
+    is exactly the reader who most needs telling what to do next.
+    """
+    text = build_instructions(config)
+
+    assert text.strip(), "a degraded instructions block must not be empty"
+    assert "shards" in text.lower()
+    assert "shards init" in text, "a config-less agent must be told how to fix it"
 
 
 # --------------------------------------------------------------------------- #

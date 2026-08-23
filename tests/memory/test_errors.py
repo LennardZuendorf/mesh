@@ -54,6 +54,7 @@ from shards.core.notes import create_note as core_create_note
 from shards.core.tasks import claim_task as core_claim_task
 from shards.core.tasks import create_task as core_create_task
 from shards.schemas.config import Config, load_config
+from shards.storage import locks
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                     #
@@ -128,10 +129,18 @@ def test_release_conflict_over_mcp_yields_structured_fields(cfg: Config) -> None
     assert payload["existing_owner"] == "other-agent"
 
 
-def test_lock_conflict_over_mcp_yields_lock_conflict_kind(cfg: Config, vault: Path) -> None:
+def test_lock_conflict_over_mcp_yields_lock_conflict_kind(
+    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A contended entity lock is ``LockError``, distinct from ``claim_conflict``
     — ``_KIND_BY_TYPE`` maps it to its own ``kind="lock_conflict"`` (previously
-    an untested branch)."""
+    an untested branch).
+
+    The real wait policy is 15s, and this test asserts only the *kind*, so waiting
+    it out was 38% of the suite's wall-clock for no added coverage. The policy
+    value deserves its own test, not a tax on this one.
+    """
+    monkeypatch.setattr(locks, "_LOCK_WAIT_SECONDS", 0.05)
     task = core_create_task(cfg, "Locked Task", body="details")
     lock_path = vault / "tasks" / ".locks" / f"{task.id}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
