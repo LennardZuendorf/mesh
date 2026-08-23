@@ -23,6 +23,7 @@ from typing import Any
 from shards.index.warm import _is_shards_id
 from shards.schemas.config import Config
 from shards.storage.files import note_folder, read_post, task_folder
+from shards.storage.locks import LockError, acquire
 from shards.storage.sandbox import safe_resolve
 
 __all__ = ["reconcile_path"]
@@ -37,6 +38,20 @@ def _correct_folder(config: Config, meta: dict[str, Any]) -> Path | None:
         return note_folder(str(meta.get("type", "note")), vault)
     except ValueError:
         return None
+
+
+def _entity_lock_path(src: Path, entity_id: str) -> Path:
+    """The lock file ``core`` uses for this entity, derived from its live folder.
+
+    ``core.notes``/``core.tasks`` lock at ``<notes|tasks>/.locks/<id>.lock``; the
+    watcher must name the *same* file or the lock protects nothing. ``src`` is the
+    file's current location, so its ``notes/``-or-``tasks/`` root is the one the
+    writer is locking under.
+    """
+    root = src.parent
+    while root.name not in ("notes", "tasks") and root.parent != root:
+        root = root.parent
+    return root / ".locks" / f"{entity_id}.lock"
 
 
 def reconcile_path(config: Config, path: Path) -> Path:
@@ -79,9 +94,22 @@ def reconcile_path(config: Config, path: Path) -> Path:
         return p
     if src == dest:
         return p  # nothing moved — hand back the caller's path space, not a realpath
+    entity_id = str(meta.get("id"))
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(src, dest)  # atomic rename; content (and `updated`) preserved verbatim
+        # Take the same per-entity lock every writer in ``core`` holds. Without it
+        # the watcher can move a file out from under a locked writer *between* that
+        # writer's resolve and its write, and the write then recreates the old path
+        # — two files carrying one id, which is exactly the corpus state the warm
+        # index cannot represent. Non-blocking on purpose: reconcile is opportunistic
+        # folder healing, so a contended entity is simply left for the next event
+        # rather than stalling the observer behind another process's edit.
+        with acquire(_entity_lock_path(src, entity_id)):
+            if not src.exists():
+                return p  # the writer finished and moved it already
+            os.replace(src, dest)  # atomic rename; content (and `updated`) preserved
+    except LockError:
+        return p  # a writer holds this entity — heal it on a later event
     except OSError:
         # The source raced away (concurrent delete/move) between the checks above
         # and the rename. Swallow it and leave the file where it is — a later event

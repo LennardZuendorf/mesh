@@ -29,7 +29,10 @@ byte-preserving reconcile (and its exception guard) lives in
 
 from __future__ import annotations
 
+import contextlib
 import os
+import queue
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -66,6 +69,12 @@ _WATCHED_SUBS = ("notes", "tasks")
 # --------------------------------------------------------------------------- #
 
 
+# Bounded backlog of paths awaiting hook delivery. Deep enough to absorb a
+# burst (a git pull, a scripted import); shallow enough that a wedged hook
+# cannot turn the queue into a memory leak.
+_HOOK_QUEUE_MAX = 1024
+
+
 class ChangeHooks:
     """A fan-out registry of vault-change subscribers, owned by the daemon server.
 
@@ -98,22 +107,36 @@ class ChangeHooks:
 
 
 class VaultEventHandler(FileSystemEventHandler):
-    """Thin watchdog adapter: forwards every file event to :class:`Watcher`."""
+    """Thin watchdog adapter: forwards every file event to :class:`Watcher`.
+
+    Every callback routes through :meth:`_guarded`, because watchdog does not
+    isolate handler failures: one exception escaping here kills the observer
+    thread, and the warm index then silently stops updating for the daemon's whole
+    life with nothing surfaced anywhere. That is the failure mode recorded in
+    `.spec/lessons.md` § "An exception in a watcher thread silently kills
+    freshness" — a transient race must degrade one event, never the watcher.
+    """
 
     def __init__(self, watcher: Watcher) -> None:
         self._watcher = watcher
 
+    def _guarded(self, event: FileSystemEvent) -> None:
+        try:
+            self._watcher.handle_event(event)
+        except Exception:  # noqa: BLE001 - a bad event must not kill the observer
+            return
+
     def on_created(self, event: FileSystemEvent) -> None:
-        self._watcher.handle_event(event)
+        self._guarded(event)
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        self._watcher.handle_event(event)
+        self._guarded(event)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        self._watcher.handle_event(event)
+        self._guarded(event)
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        self._watcher.handle_event(event)
+        self._guarded(event)
 
 
 class Watcher:
@@ -126,6 +149,16 @@ class Watcher:
         self._handler = VaultEventHandler(self)
         self._observer: BaseObserver | None = None
         self._watched: list[str] = []
+        # Hook delivery runs on its own thread. The registered hook shells out to
+        # ``indexed index update``, a blocking subprocess: fired inline it made
+        # every filesystem event wait for search re-indexing before the next event
+        # could be reparsed, so a burst of writes pushed the warm index seconds
+        # behind disk while reads kept answering confidently from stale RAM. The
+        # queue is bounded so an unbounded backlog cannot grow into memory
+        # pressure either; when it is full the oldest pending path is dropped,
+        # because search freshness is best-effort and index freshness is not.
+        self._hook_queue: queue.Queue[Path | None] = queue.Queue(maxsize=_HOOK_QUEUE_MAX)
+        self._hook_worker: threading.Thread | None = None
 
     @property
     def index(self) -> VaultIndex:
@@ -167,6 +200,7 @@ class Watcher:
             self._watched.append(str(folder))
         observer.start()
         self._observer = observer
+        self._start_hook_worker()
 
     def is_alive(self) -> bool:
         return self._observer is not None and self._observer.is_alive()
@@ -177,7 +211,53 @@ class Watcher:
             self._observer.stop()
             self._observer.join(timeout=5)
             self._observer = None
+        self._stop_hook_worker()
         self._index.clear()
+
+    def _start_hook_worker(self) -> None:
+        """Spawn the thread that delivers change hooks off the observer thread."""
+        worker = threading.Thread(target=self._drain_hooks, name="shards-hooks", daemon=True)
+        self._hook_worker = worker
+        worker.start()
+
+    def _stop_hook_worker(self) -> None:
+        """Signal the hook worker to finish and join it."""
+        worker = self._hook_worker
+        if worker is None:
+            return
+        self._hook_worker = None
+        with contextlib.suppress(queue.Full):
+            self._hook_queue.put_nowait(None)  # sentinel: drain and exit
+        worker.join(timeout=5)
+
+    def _drain_hooks(self) -> None:
+        """Deliver queued paths to the hooks until the sentinel arrives."""
+        while True:
+            path = self._hook_queue.get()
+            if path is None:
+                return
+            try:
+                self._hooks.fire(path)
+            except Exception:  # noqa: BLE001 - a failing hook must not end delivery
+                continue
+
+    def _queue_hook(self, path: Path) -> None:
+        """Hand ``path`` to the hook worker, never blocking the caller.
+
+        Falls back to firing inline when no worker is running (a directly-driven
+        Watcher in tests, or an event arriving after ``stop``), so hook delivery
+        stays observable without a started observer.
+        """
+        if self._hook_worker is None:
+            self._hooks.fire(path)
+            return
+        try:
+            self._hook_queue.put_nowait(path)
+        except queue.Full:
+            with contextlib.suppress(queue.Empty):
+                self._hook_queue.get_nowait()  # drop the oldest, keep the newest
+            with contextlib.suppress(queue.Full):
+                self._hook_queue.put_nowait(path)
 
     # -- event handling ---------------------------------------------------- #
 
@@ -189,16 +269,16 @@ class Watcher:
         if event.event_type == EVENT_TYPE_DELETED:
             path = Path(os.fsdecode(event.src_path))
             self._index.evict(path)
-            self._hooks.fire(path)
+            self._queue_hook(path)
             return
         if event.event_type == EVENT_TYPE_MOVED and isinstance(event, FileSystemMovedEvent):
             src = Path(os.fsdecode(event.src_path))
             self._index.evict(src)
             final = self._process(Path(os.fsdecode(event.dest_path)))
-            self._hooks.fire(final)
+            self._queue_hook(final)
             return
         final = self._process(Path(os.fsdecode(event.src_path)))
-        self._hooks.fire(final)
+        self._queue_hook(final)
 
     def _handle_directory_event(self, event: FileSystemEvent) -> None:
         """Apply a whole-subtree event — the one shape with no per-file events behind it.
