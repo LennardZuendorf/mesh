@@ -298,3 +298,115 @@ def test_malformed_yaml_note_does_not_crash_wikilinks(cfg: Config, vault: Path) 
     assert related == ["n-ref"]
     # find_dangling (feeds `shards status`) skips the corrupt file instead of raising.
     assert find_dangling(vault) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task scope — the dangling scan walks exactly the task lifecycle folders        #
+# --------------------------------------------------------------------------- #
+
+
+def test_find_dangling_ignores_files_outside_the_task_lifecycle_folders(vault: Path) -> None:
+    """The scan walks ``tasks/{open,done}`` non-recursively, like ``core.tasks``.
+
+    ``core.tasks._iter_task_files`` / ``in_task_scope`` are deliberately
+    non-recursive over exactly those two folders, so a file filed beside them
+    (``tasks/archive/``) or a level deeper (``tasks/open/sub/``) is not a task
+    this program can get, claim, finish or edit. ``shards status`` must not
+    count broken links from files no verb can reach — the count would name a
+    problem the tool offers no way to fix.
+    """
+    _seed_task(vault, task_id="t-arch", rel="tasks/archive", body="[[Ghost From Archive]]")
+    _seed_task(vault, task_id="t-nest", rel="tasks/open/sub", body="[[Ghost From Subfolder]]")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_still_covers_both_lifecycle_folders(vault: Path) -> None:
+    """Narrowing the walk must not lose ``tasks/done/`` — both folders still scan."""
+    _seed_task(vault, task_id="t-o", rel="tasks/open", body="[[Ghost Open]]")
+    _seed_task(vault, task_id="t-d", rel="tasks/done", body="[[Ghost Done]]")
+    assert find_dangling(vault) == ["Ghost Open", "Ghost Done"]
+
+
+# --------------------------------------------------------------------------- #
+# Dialect — aliases (``|``) and heading/block anchors (``#`` / ``^``)           #
+# --------------------------------------------------------------------------- #
+#
+# The wikilink dialect the surrounding Markdown ecosystem writes is wider than
+# ``[[Title]]``: a link may carry a display alias after ``|`` and/or a heading
+# (``#``) or block (``^``) anchor. Those decorations name a *location inside*
+# the target, never a different entity, so the target is normalised before
+# lookup — otherwise a link every host app resolves is reported as dangling with
+# the pipe or hash still in its text, which is what made the health signal
+# useless on a real vault.
+
+
+def test_alias_link_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al1", title="First note")
+    _, related = resolve_wikilinks("See [[First note|the first]].", vault)
+    assert related == ["n-al1"]
+
+
+def test_heading_anchor_link_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al2", title="First note")
+    _, related = resolve_wikilinks("See [[First note#Section]].", vault)
+    assert related == ["n-al2"]
+
+
+def test_block_ref_link_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al3", title="First note")
+    _, related = resolve_wikilinks("See [[First note^block-id]].", vault)
+    assert related == ["n-al3"]
+
+
+def test_heading_anchor_with_alias_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al4", title="First note")
+    _, related = resolve_wikilinks("See [[First note#Sec|display]].", vault)
+    assert related == ["n-al4"]
+
+
+def test_decorated_links_to_the_same_note_dedupe_into_one_related_id(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al5", title="First note")
+    body = "[[First note]] [[First note|x]] [[First note#S]] [[First note#S|x]] [[First note^b]]"
+    _, related = resolve_wikilinks(body, vault)
+    assert related == ["n-al5"]
+
+
+def test_decorated_links_are_not_reported_dangling(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al6", title="First note")
+    _seed_note(
+        vault,
+        note_id="n-al7",
+        title="Source",
+        body="See [[First note|the first]] and [[First note#Section]].",
+    )
+    assert find_dangling(vault) == []
+
+
+def test_dangling_decorated_link_reports_the_normalised_target(vault: Path) -> None:
+    """A genuinely broken decorated link reports the *entity* it failed to find."""
+    _seed_note(vault, note_id="n-al8", title="Source", body="See [[Ghost Note#Sec|display]].")
+    assert find_dangling(vault) == ["Ghost Note"]
+
+
+def test_id_form_link_with_alias_passes_through(vault: Path) -> None:
+    _, related = resolve_wikilinks("See [[n-abcd|the note]] and [[t-wxyz#Outcome]].", vault)
+    assert related == ["n-abcd", "t-wxyz"]
+
+
+def test_bare_anchor_link_is_neither_resolved_nor_dangling(vault: Path) -> None:
+    """``[[#Heading]]`` / ``[[^block]]`` name a spot in *this* file, not another entity."""
+    _seed_note(vault, note_id="n-al9", title="Source", body="Jump to [[#Heading]] or [[^blk]].")
+    _, related = resolve_wikilinks("Jump to [[#Heading]] or [[^blk]].", vault)
+    assert related == []
+    assert find_dangling(vault) == []
+
+
+def test_plain_link_resolution_is_byte_identical(vault: Path) -> None:
+    """The undecorated path must be untouched by normalisation."""
+    _seed_note(vault, note_id="n-pl1", title="Plain Title")
+    body = "See [[Plain Title]] and [[Missing Title]] and [[n-idform]]."
+    out_body, related = resolve_wikilinks(body, vault)
+    assert out_body == body
+    assert related == ["n-pl1", "n-idform"]
+    _seed_note(vault, note_id="n-pl2", title="Src", body=body)
+    assert find_dangling(vault) == ["Missing Title"]
