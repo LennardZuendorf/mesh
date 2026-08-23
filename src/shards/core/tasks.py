@@ -306,6 +306,19 @@ def create_task(
     return task
 
 
+def _validated_task(meta: dict[str, Any], target: str) -> Task:
+    """Decode on-disk frontmatter into a :class:`Task`, or raise not-found.
+
+    The task-side twin of ``notes._validated_note`` — same reasoning, same single
+    boundary: a schema-invalid file yields one exit code (3) whatever verb reached
+    it, instead of 3 from ``get`` and 2 from every mutation.
+    """
+    try:
+        return Task.model_validate(meta)
+    except ValidationError as exc:
+        raise TaskNotFoundError(target) from exc
+
+
 def update_task(
     config: Config,
     task_id: str,
@@ -377,7 +390,7 @@ def update_task(
         if blocked_by is not None:
             post.metadata["blocked_by"] = list(blocked_by)
         post.metadata["updated"] = _now()
-        task = Task.model_validate(post.metadata)
+        task = _validated_task(post.metadata, task_id)
         atomic_write(path, dump_post(post))
     return task
 
@@ -439,7 +452,7 @@ def append_task(
         _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
-        task = Task.model_validate(post.metadata)
+        task = _validated_task(post.metadata, task_id)
         atomic_write(path, dump_post(post))
     return task
 
@@ -485,16 +498,16 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
         if post is None:
             raise TaskNotFoundError(task_id)
         if post.metadata.get("status") in _TERMINAL_STATUSES:
-            return Task.model_validate(post.metadata)  # idempotent terminal no-op
+            return _validated_task(post.metadata, task_id)  # idempotent terminal no-op
         existing = post.metadata.get("claimed_by")
         if existing == claimer:
-            return Task.model_validate(post.metadata)  # idempotent same-owner no-op
+            return _validated_task(post.metadata, task_id)  # idempotent same-owner no-op
         if existing is not None:
             raise ClaimConflictError(task_id, str(existing))
         post.metadata["claimed_by"] = claimer
         post.metadata["status"] = "claimed"
         post.metadata["updated"] = _now()
-        task = Task.model_validate(post.metadata)
+        task = _validated_task(post.metadata, task_id)
         atomic_write(path, dump_post(post))
     return task
 
@@ -550,16 +563,16 @@ def release_task(config: Config, task_id: str, releaser: str, *, force: bool = F
         if post is None:
             raise TaskNotFoundError(task_id)
         if post.metadata.get("status") in _TERMINAL_STATUSES:
-            return Task.model_validate(post.metadata)  # idempotent terminal no-op
+            return _validated_task(post.metadata, task_id)  # idempotent terminal no-op
         existing = post.metadata.get("claimed_by")
         if existing is None:
-            return Task.model_validate(post.metadata)  # idempotent already-released no-op
+            return _validated_task(post.metadata, task_id)  # idempotent already-released no-op
         if existing != releaser and not force:
             raise ClaimConflictError(task_id, str(existing))
         post.metadata["claimed_by"] = None
         post.metadata["status"] = "open"
         post.metadata["updated"] = _now()
-        task = Task.model_validate(post.metadata)
+        task = _validated_task(post.metadata, task_id)
         atomic_write(path, dump_post(post))
     return task
 
@@ -616,7 +629,7 @@ def _terminate_task(
             raise TaskNotFoundError(task_id)
         if post.metadata.get("status") in _TERMINAL_STATUSES:
             _move_if_needed(path, done_path)  # heal a crash-stranded terminal file
-            return Task.model_validate(post.metadata)
+            return _validated_task(post.metadata, task_id)
 
         now = _now()
         stamp = _format_stamp(_iso_utc(now), actor if actor is not None else config.agent)
@@ -629,7 +642,7 @@ def _terminate_task(
         post.metadata["related"] = related
         post.metadata["status"] = status
         post.metadata["updated"] = now
-        task = Task.model_validate(post.metadata)
+        task = _validated_task(post.metadata, task_id)
 
         atomic_write(path, dump_post(post))
         _move_if_needed(path, done_path)
@@ -725,7 +738,7 @@ def get_task(config: Config, task_id: str) -> TaskView:
     post = read_post(path)
     if post is None:
         raise TaskNotFoundError(task_id)
-    task = Task.model_validate(post.metadata)
+    task = _validated_task(post.metadata, task_id)
     return TaskView(task=task, body=post.content, path=path)
 
 

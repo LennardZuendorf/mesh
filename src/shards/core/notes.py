@@ -325,6 +325,26 @@ def create_note(
     return note
 
 
+def _validated_note(meta: dict[str, Any], target: str) -> Note:
+    """Decode on-disk frontmatter into a :class:`Note`, or raise not-found.
+
+    A file whose frontmatter does not satisfy the schema is not a note shards can
+    act on, so every verb must say so the same way. Left unmapped, msgspec's
+    ``ValidationError`` is a ``ValueError`` and lands in the CLI's generic
+    validation branch — which gave one broken file three different exit codes
+    depending on the verb that touched it (3 from ``get``, 2 from ``append`` and
+    ``update``), so no script could classify it. Mapping lives here, at the single
+    read-then-decode boundary, rather than in a ``try`` around two of six handlers.
+
+    ``delete`` deliberately does not route through this: removing a corrupt file
+    is the repair path, and it must not require the file to parse first.
+    """
+    try:
+        return Note.model_validate(meta)
+    except ValidationError as exc:
+        raise NoteNotFoundError(target) from exc
+
+
 def append_note(
     config: Config,
     id_or_slug: str,
@@ -374,7 +394,7 @@ def append_note(
         _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
-        note = Note.model_validate(post.metadata)
+        note = _validated_note(post.metadata, id_or_slug)
         atomic_write(path, dump_post(post))
     return note
 
@@ -503,7 +523,7 @@ def update_note(
         _, related = resolve_wikilinks(post.content, config.core.vault_path)
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
-        note = Note.model_validate(post.metadata)
+        note = _validated_note(post.metadata, id_or_slug)
 
         atomic_write(path, dump_post(post))
         if new_type is not None:
@@ -568,7 +588,7 @@ def get_note(config: Config, id_or_slug: str) -> NoteView:
     post = read_post(path)
     if post is None:
         raise NoteNotFoundError(id_or_slug)
-    note = Note.model_validate(post.metadata)
+    note = _validated_note(post.metadata, id_or_slug)
     return NoteView(note=note, body=post.content, path=path)
 
 
