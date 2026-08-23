@@ -21,7 +21,9 @@ Before you touch anything:
    - **If the `spec` skill is missing, stop and install it before proceeding.** Tell the user it's
      not installed rather than working around it.
 2. **Read the `.spec/` root layer** (`product.md`, `tech.md`, `design.md`, `plan.md`, `lessons.md`) before
-   writing code or docs; follow links down into `.spec/features/<name>/` as needed.
+   writing code or docs. There is no feature layer right now — every landed feature has been
+   compounded into the root layer and deleted, so the root files plus `src/shards/` and `tests/`
+   are the whole truth. A new feature arc creates `.spec/features/<name>/` again, branch-scoped.
 3. **Any change that contradicts or extends the spec updates the spec first** — via the `spec`
    skill, with user confirmation — *then* the implementation follows.
 4. Keep the surface honest: this project's whole thesis is staying at **three verbs**. New
@@ -94,8 +96,9 @@ uv run shards --help               # CLI help
 uv run shards daemon start         # Start the local daemon
 ```
 
-> Phase 1–2 is **delivered** — all five features implemented and tested (1331 tests, ty clean,
-> ruff clean). Phase 3 (tasks-graph) is deferred; the commands above are live.
+> Phase 1–2 is **delivered** and hardened across four further tracks — core-hardening,
+> team-awareness, agent-usability and vault-agnostic (1455 tests, branch coverage on, `ty` clean,
+> `ruff` clean). Phase 3 (tasks-graph) is deferred; the commands above are live.
 
 ### Git commit standards
 
@@ -128,7 +131,7 @@ shards/
 │   ├── product.md       # root: mini PRD            ├── tech.md     # root: architecture
 │   ├── design.md        # root: CLI design language  ├── plan.md     # root: feature sequence
 │   ├── lessons.md       # root: accumulated lessons
-│   └── features/        # notes, tasks, daemon, search, memory (product + tech + plan each)
+│   └── (no features/ — all landed arcs compounded into the root layer and deleted)
 └── src/shards/
     ├── cli/             # typer app: note, task, search, daemon, status (thin)
     ├── mcp/             # FastMCP memory server over the same daemon (thin)

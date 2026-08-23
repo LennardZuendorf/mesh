@@ -82,8 +82,11 @@ hybrid = true                     # default true — false or indexed absent -> 
 collections = ["my-agent", "another-agent"]  # optional roster; empty = any --owner accepted
 ```
 
-`path` and `tolaria_path` are also accepted as legacy spellings of `vault_path`;
-`$SHARDS_AGENT` always wins over `[core].agent` when both are set.
+`path` and `tolaria_path` are also accepted as legacy spellings of `vault_path` (precedence:
+`vault_path` > `path` > `tolaria_path`, no warning); `$SHARDS_AGENT` always wins over
+`[core].agent` when both are set. `vault_path` is resolved at load, so a symlinked vault works.
+A vault folder that does not exist yet is created on first write; one that points at a *file* is
+a config error (exit 2), and `shards status` names the vault path and flags it when it is missing.
 
 ## CLI surface
 
@@ -150,7 +153,14 @@ uv run shards daemon stop
 ```
 
 The daemon is an accelerator, never a gatekeeper: every command above degrades to a direct
-filesystem scan when it is down, never fails because it's down.
+filesystem scan when it is down, never fails because it's down — and a write is durable on disk
+before the daemon is ever told about it.
+
+The socket is named per vault (`shards-<digest>.sock`) and every reply states which vault it
+served, so pointing two configs at two folders gives you two independent daemons and neither can
+answer the other's reads. After a write, the writing process tells the daemon what changed, so an
+agent that creates a note and immediately lists sees its own note rather than racing the
+filesystem watcher.
 
 ## MCP + plugin wiring
 

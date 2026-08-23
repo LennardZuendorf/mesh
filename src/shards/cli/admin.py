@@ -248,36 +248,36 @@ def init_command(
     path: str | None = typer.Option(
         None,
         "--path",
-        help="Vault folder ([core].vault_path). Defaults to ~/.shards/vault.",
+        help="Vault folder (\[core].vault_path). Defaults to ~/.shards/vault.",
     ),
     agent: str | None = typer.Option(
         None,
         "--agent",
-        help="This agent's identity ([core].agent). Defaults to $SHARDS_AGENT, else 'agent'.",
+        help="This agent's identity (\[core].agent). Defaults to $SHARDS_AGENT, else 'agent'.",
     ),
     collections: str | None = typer.Option(
         None,
         "--collections",
         help=(
-            "Comma-separated roster of valid --owner identities ([tasks].collections). "
+            "Comma-separated roster of valid --owner identities (\[tasks].collections). "
             "Default: empty — an open roster, any owner string accepted."
         ),
     ),
     search_collection: str | None = typer.Option(
         None,
         "--search-collection",
-        help="indexed collection name ([search].collection). Default: unset.",
+        help="indexed collection name (\[search].collection). Default: unset.",
     ),
     hybrid: bool = typer.Option(
         True,
         "--hybrid/--no-hybrid",
-        help="Hybrid lexical+vector search via indexed ([search].hybrid). Default: on.",
+        help="Hybrid lexical+vector search via indexed (\[search].hybrid). Default: on.",
     ),
     threshold: float | None = typer.Option(
         None,
         "--threshold",
         help=(
-            "Substring-fallback score floor ([search].threshold). Default: unset — "
+            "Substring-fallback score floor (\[search].threshold). Default: unset — "
             "the key is omitted so the fallback keeps its own floor."
         ),
     ),

@@ -82,3 +82,39 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** After removing a dependency, grep for the *premises* it supplied — the guarantees other decisions leaned on — not just its name.
 **Tags:** spec-accuracy, dependency-removal, grep-scoping, vault-agnostic
 **Date:** 2026-08-20
+
+### A per-user accelerator silently serves the wrong vault
+**Pattern:** the daemon socket was named from `$XDG_RUNTIME_DIR`/`$HOME` and the RPC envelope carried no vault identity, so there was one daemon per *user* rather than per *vault*. A CLI configured for vault B and a daemon started on vault A talked happily: `note list` returned A's rows, `recent-activity` leaked A's absolute paths out of B's sandbox, and `note get` on those ids said not found. Four independent reviewers hit it — three of them as "flaky tests" first, because the suite pinned no runtime dir either.
+**Rule:** an accelerator keyed to a *user* while the data is keyed to a *vault* is a correctness bug, not a config nuisance. Name the socket from a digest of the resolved data root, and have every reply state which root it served so a mismatch degrades to the fallback. Pin the runtime dir in the test suite too, or "cold path" tests are only cold by accident of the environment.
+**Tags:** daemon, socket, multi-vault, isolation, test-isolation
+**Date:** 2026-08-23
+
+### Freshness that depends on a watcher has no read-your-writes
+**Pattern:** the warm index was refreshed only by inotify, so `create` followed immediately by `list` — the commonest agent sequence there is — returned a list without the agent's own new entity (5/5 creations missed). The parity suite never caught it because it only ever tested a *frozen* vault seeded before the daemon started; every divergence found later lived in exactly that untested region.
+**Rule:** "the accelerator is invisible" is a claim about a vault that *changes*, so test it against one that does — mutate while the daemon is up, then re-compare. When a writer knows what it changed, tell the accelerator rather than waiting for the filesystem to mention it; keep the notification post-durability and failure-swallowing so the accelerator still never gates a write.
+**Tags:** daemon, freshness, read-your-writes, parity, testing
+**Date:** 2026-08-23
+
+### A default written into a config file is not the same as a default in code
+**Pattern:** the substring fallback was fixed to apply `[search].threshold` only when a caller set it explicitly — then `shards init` wrote `threshold = 0.65` into every config it generated, which made it explicit and restored the exact behaviour the fix removed. Body search returned `[]` on every fresh install. The unit's own test passed because its fixture hand-wrote a config shape `init` cannot produce.
+**Rule:** when behaviour keys off "did the user set this?", the tool's own scaffolding must not answer yes on the user's behalf. Omit defaulted keys from generated config, and write the regression test *through* the generator rather than against a hand-built fixture.
+**Tags:** config, defaults, init, search, test-fixtures
+**Date:** 2026-08-23
+
+### Fix one side of a shared mechanic and the other side is now the bug
+**Pattern:** the task verbs were hardened to resolve the entity path *inside* the lock, closing a TOCTOU against a racing folder move. The note verbs were left resolving outside it, so `note delete` racing `note update --type` raised a raw `FileNotFoundError` at exit 1 and did not delete. The same asymmetry appeared twice more in one review: the dangling-link scan walked `tasks/**` recursively while the task reader was deliberately non-recursive, and `_iso_z` was applied to the JSON surfaces but not the human `get` output.
+**Rule:** when a repo's thesis is "a task is a note", a fix to one verb family is unfinished until the sibling family is checked. Grep for the *pattern* being fixed, not the symptom that reported it.
+**Tags:** dry, symmetry, toctou, notes, tasks, review-scoping
+**Date:** 2026-08-23
+
+### A guard nothing tests is a guard that will be deleted
+**Pattern:** every defensive guard in `index/reconcile.py` could be removed with all 1331 tests still green — including the one its own docstring calls out as "never remove that guard", citing an existing lesson. The watcher had no try/except around its callback either, so a single malformed `.md` would kill the observer thread and freeze freshness for the daemon's whole life, silently, with the suite green.
+**Rule:** a comment saying a guard is load-bearing is an admission that nothing proves it. Pin each guard with a test that exercises the hostile input and asserts the *system survives* — not just that the call returned. Statement coverage cannot see a deleted guard clause; turn branch mode on.
+**Tags:** testing, mutation-testing, guards, watcher, coverage
+**Date:** 2026-08-23
+
+### Serialisation defaults leak into files other tools have to read
+**Pattern:** binding one `datetime` object to both `created` and `updated` made PyYAML emit an anchor/alias pair (`created: &id001 …` / `updated: *id001`) in every file shards created. Valid YAML, and shards round-tripped it fine — but a restricted frontmatter parser reads `updated` as the literal string `*id001`, so the breakage landed entirely on the coexisting tool the spec promises to be safe with. `atomic_write` had the same shape of bug: `mkstemp` creates 0600 and `os.replace` carried that onto a file another tool had checked in at 0644.
+**Rule:** "the Markdown stays clean" is a claim about what *other* programs can read, so audit the bytes on disk, not the round-trip through your own reader. Enforce it at the single serialisation boundary — a dumper that cannot emit anchors, a write that preserves the destination's mode — so no caller can reintroduce it.
+**Tags:** markdown, yaml, interop, permissions, atomicity
+**Date:** 2026-08-23

@@ -2,33 +2,36 @@
 type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
-children:
-  - features/shards-rebrand/plan.md
-  - features/cli-toolset-rework/plan.md
-updated: 2026-08-20
+updated: 2026-08-23
 ---
 
 # Shards — Plan
 
-**Status:** Phase 1–2 **delivered** — all five features implemented and tested (678 tests, ty clean, ruff clean) on branch `feat/phase-1-mvp` (test count since grown on `cli-toolset-rework`). Built bottom-up behind binary whole-feature gates.
+**Status:** Phases 1–2 **delivered** and hardened. Nine feature arcs are complete; every
+per-feature spec has been compounded into the root layer and deleted. Unit-level truth is
+`src/shards/` + `tests/` (1455 tests, branch coverage on, `ty` clean, `ruff` clean).
 
-**Focus:** [cli-toolset-rework](features/cli-toolset-rework/plan.md) units 1–5 — keep-and-rework decision (GBrain/Beads rejected), internal tidying, performance push (msgspec, lazy imports), graph-query output, projects convention, CI + gaps — **shipped, reviewed, and end-to-end verified** on branch `claude/cli-toolset-rework-xys6hl`. Phase 3 (tasks-graph) — `ready` / `release`, `blocks`/`blocked_by`, cycle-check, no parent-child hierarchy — is designed inside that feature (unit `cli-toolset-rework/6`, tech.md § Workstream D); its dependency gate (`cli-toolset-rework/1`–`5` DONE) is now satisfied, but the unit itself **stays deferred by product decision** — not yet scheduled to build.
+**Focus:** none in flight. The next scheduled work is Phase 3 (`tasks-graph`), which stays
+**deferred by product decision** — its dependency gate is satisfied, it is simply not scheduled.
 
 ---
 
 ## Sequence
 
-| # | Feature | Status | Tests | Commit |
-|---:|---|---|---|---|
-| 1 | notes | ✅ DONE | `tests/notes/` | `feat(notes)` |
-| 2 | tasks | ✅ DONE | `tests/tasks/` | `feat(tasks)` |
-| 3 | daemon | ✅ DONE | `tests/daemon/` | `feat(daemon)` |
-| 4 | search | ✅ DONE | `tests/search/` | `feat(search)` |
-| 5 | memory | ✅ DONE | `tests/memory/` | `feat(memory)` |
-| 6 | tasks-graph | ⏳ deferred (Phase 3; design in `cli-toolset-rework/6`) | `tests/tasks/` | — |
-| 7 | [shards-rebrand](features/shards-rebrand/plan.md) | 🛠 in progress | full suite | `chore(rebrand)` |
-| 8 | [cli-toolset-rework](features/cli-toolset-rework/plan.md) | ✅ units 1–5 DONE (6 deferred) | full suite (678) | see [plan.md](features/cli-toolset-rework/plan.md) § Progress |
-| 9 | vault-agnostic | ✅ DONE — merged to root ([product.md](product.md), [tech.md](tech.md), [config.py](../src/shards/schemas/config.py)) | full suite (1331) | `docs(spec)` |
+| # | Feature | Status | Live surface |
+|---:|---|---|---|
+| 1 | notes | ✅ DONE | `src/shards/core/notes.py`, `tests/notes/` |
+| 2 | tasks | ✅ DONE | `src/shards/core/tasks.py`, `tests/tasks/` |
+| 3 | daemon | ✅ DONE | `src/shards/daemon/`, `src/shards/index/`, `tests/daemon/` |
+| 4 | search | ✅ DONE | `src/shards/index/`, `tests/search/` |
+| 5 | memory | ✅ DONE | `src/shards/mcp/`, `src/shards/core/lenses.py`, `tests/memory/` |
+| 6 | tasks-graph | ⏳ deferred (Phase 3) | — |
+| 7 | shards-rebrand | ✅ DONE | tree-wide rename; no live spec surface |
+| 8 | cli-toolset-rework | ✅ DONE (unit 6 = Phase 3, deferred) | msgspec schemas, `graph`/`project` lenses, CI startup guard |
+| 9 | vault-agnostic | ✅ DONE | `[core].vault_path` + permanent aliases → [tech.md](tech.md) § Contracts |
+| 10 | core-hardening | ✅ DONE | warm reads, `cli/_errors.py`, `storage/locks.py` CAS → [tech.md](tech.md) § Invariants |
+| 11 | team-awareness | ✅ DONE | inbound mentions, `task append`/`release`, `session-start --team` → [tech.md](tech.md) § Implemented surfaces |
+| 12 | agent-usability | ✅ DONE | MCP `instructions`, tool schemas, flag contract, `shards init` → [tech.md](tech.md) § Implemented surfaces |
 
 ---
 
@@ -37,33 +40,36 @@ updated: 2026-08-20
 | Feature | Owns |
 |---|---|
 | **notes** | schema, writes, wikilinks, config, global CLI |
-| **tasks** | lifecycle, `O_EXCL` claim (v1) |
-| **daemon** | socket, watcher, warm index, admin, `ChangeHooks` (daemon-owned hook registry; watcher fires the registered hook → search's `indexed_client.incremental_update`) |
+| **tasks** | lifecycle, `O_EXCL` claim, release |
+| **daemon** | socket, watcher, warm index, admin, `ChangeHooks` |
 | **search** | `indexed_client`, tag-pull, fallback, `shards search` |
-| **memory** | MCP, `recent-activity`, `build-context`, `session-start` |
+| **memory** | MCP, `recent-activity`, `build-context`, `graph`, `project`, `session-start` |
 
-**Freshness:** daemon watcher fires hook → search `indexed_client.incremental_update`. `shards reindex` → `full_rebuild()`.
+**Freshness:** the watcher fires `ChangeHooks` on a bounded worker thread (never inline, so
+search re-indexing cannot stall index freshness) → `indexed_client.incremental_update`. A writer
+additionally pokes `vault.touch` so its own next read is current. `shards reindex` →
+`full_rebuild()`.
 
-Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces. Per-feature unit plans were compounded here and removed — unit-level truth is now `tests/` + `src/shards/`.
+Cross-cutting contracts: [tech.md](tech.md) § Implemented surfaces.
 
 ---
 
 ## Open reviews
 
-- **Product-positioning review** (post-rebrand, cross-cutting — not rebrand-scoped). Critique the
-  "mesh for multi-agent collaboration over CLI + MCP" repositioning against the three-verbs-over-a-folder
-  mechanic: is it substantive or buzzword; does the story match the code / where does it overclaim;
-  name `shards` collisions vs `brain`; differentiation vs GBrain / Mem0 / Basic Memory; internal
-  consistency across `product.md`, `tech.md`, `design.md`, `README.md`, `AGENTS.md`, CLI help; what
-  to cut or tone down. Run in a fresh thread, adversarial; may reopen root `product.md`. Findings →
-  `file:line` + concrete fix. (Rebrand-correctness audit lives in
-  [features/shards-rebrand/plan.md](features/shards-rebrand/plan.md) § Follow-ups — that one is the
-  feature's own pre-merge gate.)
+- **Product-positioning review** (cross-cutting). Critique the "mesh for multi-agent collaboration
+  over CLI + MCP" repositioning against the three-verbs-over-a-folder mechanic: substantive or
+  buzzword; where the story overclaims; `shards` name collisions; differentiation vs GBrain /
+  Mem0 / Basic Memory; consistency across `product.md`, `tech.md`, `design.md`, `README.md`,
+  `AGENTS.md`, CLI help. Run in a fresh thread, adversarial; may reopen root `product.md`.
+  Findings → `file:line` + concrete fix.
 
 ---
 
 ## Resolved
 
-- **Rust rewrite for CLI startup performance** — evaluated and shelved; runtime stays Python
-  3.11+, optimized via the pydantic→msgspec swap (~150–180ms floor). →
-  [features/cli-toolset-rework/tech.md](features/cli-toolset-rework/tech.md) § Decisions
+- **Rust rewrite for CLI startup performance** — evaluated and shelved; runtime stays Python 3.11+,
+  optimized via the pydantic→msgspec swap (~150–180ms floor). → [tech.md](tech.md) § Risks
+- **Vault adaptivity** — shards is vault-*agnostic* (no notes app required, any folder accepted) but
+  not vault-*adaptive*: `notes/` and `tasks/{open,done}/` are the layout contract, and a pre-existing
+  Markdown file outside them is coexisted with, never indexed. Deliberate, and the honest limit on
+  "works over any Markdown folder". → [product.md](product.md) § Non-Goals
