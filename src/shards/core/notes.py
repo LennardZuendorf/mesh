@@ -32,7 +32,7 @@ from shards.core.ids import generate_note_id
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.note import Note, NoteType
-from shards.storage.files import atomic_write, iter_md, note_folder, read_post
+from shards.storage.files import atomic_write, dump_post, iter_md, note_folder, read_post
 from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
 
@@ -321,7 +321,7 @@ def create_note(
         # Serialize the frontmatter from the validated model — the schema is the
         # one on-disk contract, never a parallel hand-built dict that can drift.
         post.metadata = note.model_dump(mode="python")
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
     return note
 
 
@@ -375,7 +375,7 @@ def append_note(
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         note = Note.model_validate(post.metadata)
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
     return note
 
 
@@ -505,7 +505,7 @@ def update_note(
         post.metadata["updated"] = _now()
         note = Note.model_validate(post.metadata)
 
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
         if new_type is not None:
             dest = safe_resolve(vault, note_folder(new_type, vault) / path.name)
             if dest != path:

@@ -50,6 +50,7 @@ def atomic_write(path: Path, content: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
             fh.flush()
+            _match_destination_mode(fh.fileno(), path)
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
         _fsync_dir(path.parent)
@@ -57,6 +58,49 @@ def atomic_write(path: Path, content: str) -> None:
         with contextlib.suppress(FileNotFoundError):
             tmp_path.unlink()
         raise
+
+
+def _match_destination_mode(fd: int, path: Path) -> None:
+    """Give the temp file the mode the destination should end up with.
+
+    ``mkstemp`` creates 0600, and ``os.replace`` carries that mode onto the
+    destination — so without this an existing 0644 note silently becomes 0600 on
+    its first append, one file at a time. The vault is shared with whatever else
+    writes to the folder (git, another tool, a second operator), so shards must
+    not quietly narrow a file's permissions. An overwrite keeps the destination's
+    current mode; a fresh file gets the process umask's default, exactly as any
+    other tool writing that folder would produce.
+    """
+    try:
+        mode = path.stat().st_mode & 0o7777
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    with contextlib.suppress(OSError):
+        os.fchmod(fd, mode)
+
+
+class _NoAliasDumper(yaml.SafeDumper):
+    """A YAML dumper that never emits anchors or aliases.
+
+    Binding one object to two frontmatter keys (``created`` and ``updated`` on a
+    freshly created entity) makes PyYAML emit ``&id001``/``*id001``. That is valid
+    YAML, but anchors are an advanced feature plain-Markdown consumers routinely
+    do not implement — a restricted frontmatter parser reads ``updated`` as the
+    literal string ``*id001``. Invariant 3 says the Markdown stays clean for every
+    other tool sharing the folder, so the guarantee lives here, at the single
+    serialisation boundary, rather than depending on every caller remembering to
+    pass distinct objects.
+    """
+
+    def ignore_aliases(self, data: object) -> bool:
+        return True
+
+
+def dump_post(post: frontmatter.Post) -> str:
+    """Serialise ``post`` to Markdown with anchor-free frontmatter."""
+    return frontmatter.dumps(post, Dumper=_NoAliasDumper)
 
 
 def _fsync_dir(directory: Path) -> None:

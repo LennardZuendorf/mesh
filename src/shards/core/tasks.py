@@ -48,7 +48,7 @@ from shards.core.notes import (
 from shards.core.wikilinks import resolve_wikilinks
 from shards.schemas.config import Config
 from shards.schemas.task import Task, TaskStatus
-from shards.storage.files import atomic_write, iter_md, read_post, task_folder
+from shards.storage.files import atomic_write, dump_post, iter_md, read_post, task_folder
 from shards.storage.locks import allocator_lock_path, hold
 from shards.storage.sandbox import safe_resolve
 
@@ -302,7 +302,7 @@ def create_task(
         post = frontmatter.Post(body)
         # Serialize the frontmatter from the validated model — one on-disk contract.
         post.metadata = task.model_dump(mode="python")
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
     return task
 
 
@@ -378,7 +378,7 @@ def update_task(
             post.metadata["blocked_by"] = list(blocked_by)
         post.metadata["updated"] = _now()
         task = Task.model_validate(post.metadata)
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
     return task
 
 
@@ -440,7 +440,7 @@ def append_task(
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         task = Task.model_validate(post.metadata)
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
     return task
 
 
@@ -495,7 +495,7 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
         post.metadata["status"] = "claimed"
         post.metadata["updated"] = _now()
         task = Task.model_validate(post.metadata)
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
     return task
 
 
@@ -560,7 +560,7 @@ def release_task(config: Config, task_id: str, releaser: str, *, force: bool = F
         post.metadata["status"] = "open"
         post.metadata["updated"] = _now()
         task = Task.model_validate(post.metadata)
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
     return task
 
 
@@ -631,7 +631,7 @@ def _terminate_task(
         post.metadata["updated"] = now
         task = Task.model_validate(post.metadata)
 
-        atomic_write(path, frontmatter.dumps(post))
+        atomic_write(path, dump_post(post))
         _move_if_needed(path, done_path)
     return task
 
