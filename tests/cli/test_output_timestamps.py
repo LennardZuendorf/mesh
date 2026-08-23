@@ -88,3 +88,58 @@ def test_cli_search_hit_updated_is_z_suffixed(shards_config: Path, vault: Path) 
     assert hits and "updated" in hits[0]
     assert hits[0]["updated"].endswith("Z")
     assert "+00:00" not in hits[0]["updated"]
+
+
+# --------------------------------------------------------------------------- #
+# CLI integration — the human `get` surfaces (_meta_lines / _task_meta_lines)  #
+# --------------------------------------------------------------------------- #
+
+
+def _meta_value(output: str, key: str) -> str:
+    for line in output.splitlines():
+        if line.startswith(f"{key}: "):
+            return line.split(": ", 1)[1]
+    raise AssertionError(f"no `{key}:` line in:\n{output}")
+
+
+def test_note_get_human_timestamps_are_z_suffixed(shards_config: Path, vault: Path) -> None:
+    """Same field, one format: `note get` text must not drift from its own --json."""
+    new_result = _invoke(["--quiet", "note", "new", "Human Timestamp", "--body", "x"])
+    assert new_result.exit_code == 0, new_result.output
+
+    result = _invoke(["note", "get", new_result.stdout.strip()])
+    assert result.exit_code == 0, result.output
+    assert "+00:00" not in result.stdout
+    for key in ("created", "updated"):
+        assert _meta_value(result.stdout, key).endswith("Z")
+
+
+def test_task_get_human_timestamps_are_z_suffixed(shards_config: Path, vault: Path) -> None:
+    new_result = _invoke(["--quiet", "task", "new", "Human Timestamp"])
+    assert new_result.exit_code == 0, new_result.output
+
+    result = _invoke(["task", "get", new_result.stdout.strip()])
+    assert result.exit_code == 0, result.output
+    assert "+00:00" not in result.stdout
+    for key in ("created", "updated"):
+        assert _meta_value(result.stdout, key).endswith("Z")
+
+
+def test_note_get_text_and_json_agree_on_updated(shards_config: Path, vault: Path) -> None:
+    new_result = _invoke(["--quiet", "note", "new", "Cross Surface", "--body", "x"])
+    assert new_result.exit_code == 0, new_result.output
+    note_id = new_result.stdout.strip()
+
+    text = _invoke(["note", "get", note_id])
+    payload = json.loads(_invoke(["--json", "note", "get", note_id]).stdout)
+    assert _meta_value(text.stdout, "updated") == payload["updated"]
+
+
+def test_task_get_text_and_json_agree_on_updated(shards_config: Path, vault: Path) -> None:
+    new_result = _invoke(["--quiet", "task", "new", "Cross Surface"])
+    assert new_result.exit_code == 0, new_result.output
+    task_id = new_result.stdout.strip()
+
+    text = _invoke(["task", "get", task_id])
+    payload = json.loads(_invoke(["--json", "task", "get", task_id]).stdout)
+    assert _meta_value(text.stdout, "updated") == payload["updated"]

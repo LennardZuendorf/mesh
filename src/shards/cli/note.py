@@ -177,15 +177,20 @@ def update_command(
 
 
 def _meta_lines(note: Note) -> list[str]:
-    """Render a note's canonical frontmatter fields as terse ``key: value`` lines."""
+    """Render a note's canonical frontmatter fields as terse ``key: value`` lines.
+
+    Timestamps go through :func:`shards.cli._output._iso_z`, the same helper
+    ``emit_mutation`` and ``hit_dict`` use — one field must not render ``Z`` on
+    the JSON surfaces and ``+00:00`` here (core-hardening/4).
+    """
     return [
         f"id: {note.id}",
         f"type: {note.type}",
         f"title: {note.title}",
         f"tags: {', '.join(note.tags)}",
         f"owner: {note.owner or ''}",
-        f"created: {note.created.isoformat()}",
-        f"updated: {note.updated.isoformat()}",
+        f"created: {_output._iso_z(note.created)}",
+        f"updated: {_output._iso_z(note.updated)}",
         f"related: {', '.join(note.related)}",
     ]
 

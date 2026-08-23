@@ -208,7 +208,7 @@ def render_config_toml(
     collections: list[str],
     search_collection: str | None,
     hybrid: bool,
-    threshold: float,
+    threshold: float | None,
 ) -> str:
     """Render a complete, ``load_config``-parseable ``config.toml``.
 
@@ -216,6 +216,15 @@ def render_config_toml(
     than left to the schema's own defaults, so the file this writes is a
     legible reference by itself — mirroring the shape of the committed
     ``config.example.toml`` at the repo root.
+
+    ``threshold`` is the one deliberate exception: it is written **only** when
+    the caller passed ``--threshold`` (``None`` otherwise). The substring
+    fallback applies ``[search].threshold`` only when it is *explicit*
+    (:meth:`~shards.schemas.config.SearchConfig.threshold_explicit`), so
+    writing the schema default here would re-arm the very cutoff that rule
+    exists to lift: the fallback's tag tier (0.6) and body tier (0.4) both sit
+    below 0.65, and every generated config would silently kill body-only
+    recall.
     """
     lines = [
         "[core]",
@@ -224,8 +233,9 @@ def render_config_toml(
         "",
         "[search]",
         f"hybrid = {'true' if hybrid else 'false'}",
-        f"threshold = {threshold}",
     ]
+    if threshold is not None:
+        lines.append(f"threshold = {threshold}")
     if search_collection:
         lines.append(f"collection = {_toml_string(search_collection)}")
     roster = ", ".join(_toml_string(item) for item in collections)
@@ -263,10 +273,13 @@ def init_command(
         "--hybrid/--no-hybrid",
         help="Hybrid lexical+vector search via indexed ([search].hybrid). Default: on.",
     ),
-    threshold: float = typer.Option(
-        0.65,
+    threshold: float | None = typer.Option(
+        None,
         "--threshold",
-        help="Substring-fallback score floor ([search].threshold). Default: 0.65.",
+        help=(
+            "Substring-fallback score floor ([search].threshold). Default: unset — "
+            "the key is omitted so the fallback keeps its own floor."
+        ),
     ),
     force: bool = typer.Option(
         False, "--force", help="Overwrite an existing config. Default: refuse."
@@ -444,6 +457,14 @@ def status_command(ctx: typer.Context) -> None:
     with cli_errors():
         report = DaemonClient().vault_status(config)
         running = daemon_running(default_pid_path())
+        # Name the folder every count above was taken from, and whether it is
+        # actually there: a mistyped ``[core].vault_path`` otherwise reads as a
+        # healthy-but-empty vault (``notes: 0``, ``freshness: (no vault
+        # files)``, exit 0) right up until the next write lazily materialises a
+        # parallel vault at the typo. Reported, never fatal — lazy creation is
+        # ``shards init``'s documented behaviour.
+        vault_path = config.core.vault_path
+        report["vault"] = {"path": str(vault_path), "exists": vault_path.is_dir()}
         report["daemon"] = {"running": running is not None, "pid": running}
         report["agents"] = _agent_breakdown(DaemonClient().task_list(config, limit=None))
 
@@ -463,7 +484,10 @@ def _status_lines(report: dict[str, Any]) -> list[str]:
     dangling = report["dangling_links"]
     daemon = report["daemon"]
     daemon_line = f"running (pid {daemon['pid']})" if daemon["running"] else "stopped"
+    vault = report["vault"]
+    vault_line = vault["path"] + ("" if vault["exists"] else " (does not exist)")
     lines = [
+        f"vault: {vault_line}",
         f"notes: {report['notes']}",
         f"tasks: {task_line}",
         f"freshness: {freshness}",
