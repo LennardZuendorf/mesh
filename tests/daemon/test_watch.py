@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,9 @@ from pathlib import Path
 import frontmatter
 import pytest
 from watchdog.events import (
+    DirDeletedEvent,
+    DirModifiedEvent,
+    DirMovedEvent,
     FileCreatedEvent,
     FileDeletedEvent,
     FileModifiedEvent,
@@ -248,7 +252,7 @@ def test_reconcile_does_not_bump_updated_and_roundtrips_unknown_keys(
 def test_reconcile_leaves_correctly_placed_file(cfg: Config, vault: Path) -> None:
     path = _write_note(vault, note_id="n-ok", note_type="note")  # correct folder
     final = reconcile_path(cfg, path)
-    assert final == path.resolve()
+    assert final == path  # unchanged path space: the caller's path, not a realpath
     assert path.exists()
 
 
@@ -260,7 +264,7 @@ def test_reconcile_ignores_foreign_file(cfg: Config, vault: Path) -> None:
         encoding="utf-8",
     )
     final = reconcile_path(cfg, foreign)
-    assert final == foreign.resolve()
+    assert final == foreign
     assert foreign.exists()  # no shards id → never moved
 
 
@@ -279,10 +283,34 @@ def test_reconcile_returns_unmoved_when_source_races_away(
 
     monkeypatch.setattr("shards.index.reconcile.os.replace", _vanish)
     result = reconcile_path(cfg, path)  # must not raise
-    # Left in place (move failed); the resolved original path is returned so a
-    # later event can reconcile it.
-    assert result == safe_resolve(cfg.core.vault_path, path)
+    # Left in place (move failed); the caller's own path is returned so a later
+    # event can reconcile it — and so the index never changes path space.
+    assert result == path
     assert path.exists()
+
+
+def test_reconcile_keeps_the_caller_path_space_when_nothing_moves(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A correctly-placed file reached through a symlink comes back unresolved.
+
+    ``Watcher.warm`` seeds the index with paths exactly as walked, and every scope
+    predicate compares against the configured vault, so a no-move reconcile that
+    handed back ``safe_resolve``'s realpath dropped the row out of scope: with a
+    symlinked vault the whole index emptied one edit after daemon start.
+    """
+    link = tmp_path / "vault-link"
+    link.symlink_to(vault, target_is_directory=True)
+    cfg_path = tmp_path / "linked.toml"
+    cfg_path.write_text(f'[core]\nvault_path = "{link}"\nagent = "test-agent"\n', encoding="utf-8")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_path))
+    linked_cfg = load_config()
+
+    _write_note(vault, note_id="n-link", note_type="note")
+    walked = link / "notes" / "n-link.md"
+
+    assert reconcile_path(linked_cfg, walked) == walked
+    assert reconcile_path(linked_cfg, walked) != safe_resolve(linked_cfg.core.vault_path, walked)
 
 
 # --------------------------------------------------------------------------- #
@@ -334,6 +362,95 @@ def test_handle_event_reconciles_folder_mismatch(cfg: Config, vault: Path) -> No
     assert entry.path.resolve() == (vault / "tasks" / "done" / "t-rec.md").resolve()
     assert (vault / "tasks" / "done" / "t-rec.md").exists()
     assert not path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Directory events — watchdog reports a subtree rename as ONE event            #
+# --------------------------------------------------------------------------- #
+
+
+def test_directory_moved_out_of_the_vault_evicts_the_whole_subtree(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """``mv notes/decisions ../archive`` arrives as one ``DirMovedEvent``.
+
+    There are no per-file events behind it, so a handler that returned early on
+    ``is_directory`` served phantom rows for every file in that subtree for the
+    daemon's whole lifetime. (``rmtree`` is unaffected — it emits a delete per
+    file.)
+    """
+    inside = _write_note(vault, note_id="n-sub", note_type="decision")
+    index = VaultIndex()
+    index.reparse(inside)
+    watcher = Watcher(cfg, index)
+    seen: list[Path] = []
+    watcher.hooks.register(seen.append)
+
+    src = vault / "notes" / "decisions"
+    dest = tmp_path / "archive"
+    shutil.move(str(src), str(dest))
+    watcher.handle_event(DirMovedEvent(str(src), str(dest)))
+
+    assert len(index) == 0
+    assert index.get("n-sub") is None
+    assert [p.name for p in seen] == ["n-sub.md"]  # the hook heard about it too
+
+
+def test_directory_deleted_evicts_the_whole_subtree(cfg: Config, vault: Path) -> None:
+    """A directory delete reported without per-file events still empties the subtree."""
+    inside = _write_note(vault, note_id="n-rm", note_type="decision")
+    index = VaultIndex()
+    index.reparse(inside)
+    watcher = Watcher(cfg, index)
+
+    folder = vault / "notes" / "decisions"
+    shutil.rmtree(folder)
+    watcher.handle_event(DirDeletedEvent(str(folder)))
+
+    assert len(index) == 0
+
+
+def test_directory_moved_into_the_vault_indexes_the_whole_subtree(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """A folder moved *in* must be walked — nothing else will announce its files."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _write_note(staging, note_id="n-in", note_type="decision", folder=".")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+
+    dest = vault / "notes" / "decisions" / "arrived"
+    shutil.move(str(staging), str(dest))
+    watcher.handle_event(DirMovedEvent(str(staging), str(dest)))
+
+    assert index.get("n-in") is not None
+
+
+def test_directory_moved_outside_the_watched_tree_is_not_indexed(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """A destination outside ``notes/``/``tasks/`` is not a vault row source."""
+    staging = tmp_path / "elsewhere"
+    staging.mkdir()
+    _write_note(staging, note_id="n-out", folder=".")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+
+    dest = vault / "archive"
+    shutil.move(str(staging), str(dest))
+    watcher.handle_event(DirMovedEvent(str(staging), str(dest)))
+
+    assert len(index) == 0
+
+
+def test_directory_modified_events_are_ignored(cfg: Config, vault: Path) -> None:
+    """Every file write also modifies its parent dir — that must stay a no-op."""
+    _write_note(vault, note_id="n-dm", note_type="decision")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+    watcher.handle_event(DirModifiedEvent(str(vault / "notes" / "decisions")))
+    assert len(index) == 0
 
 
 def test_event_handler_routes_created(cfg: Config, vault: Path) -> None:

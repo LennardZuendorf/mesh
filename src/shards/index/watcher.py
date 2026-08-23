@@ -13,6 +13,9 @@ and folder reconcile, and fans each settled change out to subscribers:
   event drives reparse / evict / reconcile and then fires the watcher's
   :class:`ChangeHooks`, so other subsystems (search registers its
   ``indexed_client`` re-index here) subscribe without editing this file.
+  Directory events get their own branch: a subtree rename is reported as *one*
+  event with no per-file events behind it, so the folder is walked (see
+  :meth:`Watcher._handle_directory_event`).
 
 * **:class:`VaultEventHandler`** — the thin :class:`watchdog.events.FileSystemEventHandler`
   adapter that forwards each callback to :meth:`Watcher.handle_event`.
@@ -32,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from watchdog.events import (
+    EVENT_TYPE_CREATED,
     EVENT_TYPE_DELETED,
     EVENT_TYPE_MOVED,
     FileSystemEvent,
@@ -42,6 +46,7 @@ from watchdog.events import (
 from shards.index.reconcile import reconcile_path
 from shards.index.warm import VaultIndex, iter_vault_md
 from shards.schemas.config import Config
+from shards.storage.files import iter_md
 
 if TYPE_CHECKING:
     # The platform observer backend (fsevents/inotify/kqueue) is a heavy import;
@@ -51,6 +56,9 @@ if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver
 
 __all__ = ["ChangeHooks", "VaultEventHandler", "Watcher"]
+
+#: The vault subtrees the observer watches — the only place a row can come from.
+_WATCHED_SUBS = ("notes", "tasks")
 
 
 # --------------------------------------------------------------------------- #
@@ -152,7 +160,7 @@ class Watcher:
         vault = self._config.core.vault_path
         observer = Observer()
         self._watched = []
-        for sub in ("notes", "tasks"):
+        for sub in _WATCHED_SUBS:
             folder = vault / sub
             folder.mkdir(parents=True, exist_ok=True)
             observer.schedule(self._handler, str(folder), recursive=True)
@@ -176,6 +184,7 @@ class Watcher:
     def handle_event(self, event: FileSystemEvent) -> None:
         """Route one filesystem event through reparse / evict / reconcile + hook."""
         if event.is_directory:
+            self._handle_directory_event(event)
             return
         if event.event_type == EVENT_TYPE_DELETED:
             path = Path(os.fsdecode(event.src_path))
@@ -190,6 +199,52 @@ class Watcher:
             return
         final = self._process(Path(os.fsdecode(event.src_path)))
         self._hooks.fire(final)
+
+    def _handle_directory_event(self, event: FileSystemEvent) -> None:
+        """Apply a whole-subtree event — the one shape with no per-file events behind it.
+
+        Watchdog reports ``mv notes/decisions ../archive`` as a *single*
+        ``DirMovedEvent``: no file event ever announces the rows that just left (or
+        arrived), so dropping directory events left phantom rows served for the
+        daemon's whole lifetime and never indexed a folder moved *in*. The subtree
+        is therefore walked here — evict everything under the source, re-index
+        everything under a destination that lands inside the watched tree.
+
+        ``shutil.rmtree`` and a plain ``mkdir`` need nothing from this branch (the
+        first emits a delete per file, the second arrives empty), and directory
+        *modified* events — one per file write, by far the most common kind — are
+        deliberately ignored: walking on each would make every write O(folder).
+        """
+        src = Path(os.fsdecode(event.src_path))
+        if event.event_type == EVENT_TYPE_DELETED:
+            self._evict_subtree(src)
+            return
+        if event.event_type == EVENT_TYPE_MOVED and isinstance(event, FileSystemMovedEvent):
+            self._evict_subtree(src)
+            self._index_subtree(Path(os.fsdecode(event.dest_path)))
+            return
+        if event.event_type == EVENT_TYPE_CREATED:
+            # A folder moved in from outside the watch can surface as a creation
+            # (an unpaired ``IN_MOVED_TO``), with its files never announced.
+            self._index_subtree(src)
+
+    def _evict_subtree(self, root: Path) -> None:
+        """Drop every indexed row under ``root`` and tell the hooks about each one."""
+        for path in self._index.paths_under(root):
+            self._index.evict(path)
+            self._hooks.fire(path)
+
+    def _index_subtree(self, root: Path) -> None:
+        """Reconcile + index every ``*.md`` under ``root``, if it is inside the watch."""
+        if not self._inside_watched_tree(root):
+            return
+        for path in iter_md(root):
+            self._hooks.fire(self._process(path))
+
+    def _inside_watched_tree(self, path: Path) -> bool:
+        """Whether ``path`` is inside ``notes/`` or ``tasks/`` — the only row sources."""
+        vault = self._config.core.vault_path
+        return any(path.is_relative_to(vault / sub) for sub in _WATCHED_SUBS)
 
     def _process(self, path: Path) -> Path:
         """Reconcile then reparse ``path``; returns its final (possibly moved) path."""

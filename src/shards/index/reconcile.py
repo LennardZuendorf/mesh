@@ -46,7 +46,18 @@ def reconcile_path(config: Config, path: Path) -> Path:
     with a byte-preserving :func:`os.replace` — no frontmatter is reserialized, so
     ``updated`` is left untouched and unknown keys round-trip. Correctly placed,
     foreign (no shards id), malformed, or unknown-type files are left in place and
-    their (resolved) path returned.
+    the **caller's own path is returned unchanged** — never a realpath.
+
+    That last clause is load-bearing. The warm index is populated by a walk of the
+    configured vault (:meth:`shards.index.watcher.Watcher.warm`) and every scope
+    predicate (:func:`shards.core.notes.in_note_scope`,
+    :func:`shards.core.tasks.in_task_scope`) compares against that same configured
+    vault, so a row must stay in the path space it was walked in. Returning
+    ``safe_resolve``'s canonical path on the *no-move* branch silently moved every
+    edited file into a second path space: with the vault reached through a symlink
+    the row then matched no scope, and ``note list`` / ``task list`` went empty one
+    edit after daemon start while the on-disk path stayed correct. Only a real move
+    changes the answer, and only there is the sandbox-checked destination returned.
     """
     p = Path(path)
     if p.suffix != ".md":
@@ -67,7 +78,7 @@ def reconcile_path(config: Config, path: Path) -> Path:
     except ValueError:
         return p
     if src == dest:
-        return src
+        return p  # nothing moved — hand back the caller's path space, not a realpath
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.replace(src, dest)  # atomic rename; content (and `updated`) preserved verbatim
@@ -75,6 +86,7 @@ def reconcile_path(config: Config, path: Path) -> Path:
         # The source raced away (concurrent delete/move) between the checks above
         # and the rename. Swallow it and leave the file where it is — a later event
         # will reconcile. Letting it escape would kill the watchdog observer thread
-        # and freeze freshness for the daemon's whole lifetime.
-        return src
+        # and freeze freshness for the daemon's whole lifetime. Nothing moved, so
+        # the caller's path is returned here too.
+        return p
     return dest

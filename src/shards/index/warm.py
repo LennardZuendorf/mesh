@@ -22,14 +22,14 @@ it stays cheap on the CLI path:
 files carrying a shards id (``n-``/``t-``), but ``search`` (tag-pull and the
 substring fallback) deliberately covers *every* ``*.md`` under ``notes/`` and
 ``tasks/`` — coexisting foreign files (any writer sharing the folder) included,
-surfaced with ``id: None``. The index therefore holds both, split into two buckets: id-bearing
-entities keyed by shards id (:meth:`~VaultIndex.entries`, and everything
-``recent`` / ``get`` / ``len`` speak for) and id-less corpus files keyed by real
-path. Without the second bucket a warm ``search.tag_pull`` would silently drop
-foreign hits the disk path returns — a result-contract change, not an
-acceleration. Bodies stay off the index in both buckets: no list-shaped read
-needs them, and holding them would trade the daemon's whole memory budget for
-nothing.
+surfaced with ``id: None``. The index therefore holds both — id-bearing entities
+(:meth:`~VaultIndex.entries`, and everything ``recent`` / ``get`` / ``len`` speak
+for) and id-less foreign files — in one dict keyed by real path: one row per
+file, never one row per id. Without the foreign rows a warm ``search.tag_pull``
+would silently drop foreign hits the disk path returns — a result-contract
+change, not an acceleration. Bodies stay off the index either way: no
+list-shaped read needs them, and holding them would trade the daemon's whole
+memory budget for nothing.
 
 The watcher that drives ``reparse``/``evict`` on filesystem events lives in
 :mod:`shards.index.watcher`; folder reconcile lives in
@@ -43,7 +43,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from shards.schemas.config import Config
 from shards.storage.files import iter_md, read_post
@@ -52,7 +52,9 @@ DEFAULT_RECENT_LIMIT = 20
 _ID_PREFIXES = ("n-", "t-")
 
 
-def _is_shards_id(value: object) -> bool:
+def _is_shards_id(value: object) -> TypeGuard[str]:
+    """Whether ``value`` is a shards id (``n-``/``t-``) — narrowing, so callers can
+    keep the value without a follow-up ``assert isinstance``."""
     return isinstance(value, str) and value.startswith(_ID_PREFIXES)
 
 
@@ -109,18 +111,28 @@ class IndexEntry:
 
 
 class VaultIndex:
-    """Thread-safe in-process frontmatter index over the vault corpus.
+    """Thread-safe in-process frontmatter index over the vault corpus, keyed by path.
 
-    Shards entities are keyed by their shards id; coexisting foreign Markdown is
-    kept in a second bucket keyed by real path (see the module docstring for why
-    both are needed). ``len()``, :meth:`get` and :meth:`recent` speak only for the
-    shards bucket, exactly as before.
+    **One row per file, keyed by real path — never by shards id.** The id is a
+    *field* on the row, not its identity, because the folder cannot promise ids are
+    unique: a ``cp``, a git conflicted copy or a sync client's "(conflicted copy)"
+    puts two files carrying one id on disk, and the on-disk walks return both. An
+    id-keyed index kept only the last-parsed of such a pair — a row silently
+    missing from all four wired reads and an under-counted ``status`` — and could
+    orphan a row outright when a file's id changed in place: the old id stayed in
+    the index with no path left pointing at it, so ``note list`` advertised an id
+    ``note get`` could never resolve, for the daemon's whole lifetime. Path keying
+    removes both classes by construction: ``reparse`` replaces exactly the row for
+    the path it read, ``evict`` drops exactly the row for the path that vanished.
+
+    Shards entities (``n-``/``t-``) and coexisting foreign Markdown share the one
+    dict and are told apart by :attr:`IndexEntry.id` being ``None`` (the module
+    docstring covers why the corpus holds both). ``len()``, :meth:`entries` and
+    :meth:`recent` speak for the shards rows only; :meth:`corpus` returns every row.
     """
 
     def __init__(self) -> None:
-        self._entries: dict[str, IndexEntry] = {}
-        self._by_path: dict[str, str] = {}  # realpath -> id, for path-based eviction
-        self._foreign: dict[str, IndexEntry] = {}  # realpath -> row, for id-less files
+        self._rows: dict[str, IndexEntry] = {}  # realpath -> row (shards *and* foreign)
         self._lock = threading.RLock()
 
     @staticmethod
@@ -139,6 +151,9 @@ class VaultIndex:
         → skip. That preserves the original ``FileNotFoundError``/``IsADirectoryError``
         → evict, other ``OSError``/``yaml.YAMLError`` → skip behaviour at the cost
         of one extra ``stat`` on the failure path only. Never raises.
+
+        A file that gains, loses or *changes* its shards id needs no bookkeeping:
+        the row at this path is replaced wholesale, id field included.
         """
         p = Path(path)
         if p.suffix != ".md":
@@ -153,49 +168,54 @@ class VaultIndex:
         except OSError:
             return
         meta = dict(post.metadata)
-        entry_id = meta.get("id")
-        rp = self._rp(p)
-        if not _is_shards_id(entry_id):
-            entry = IndexEntry(id=None, path=p, mtime=mtime, meta=meta)
-            with self._lock:
-                prior_id = self._by_path.pop(rp, None)  # the file lost its shards id
-                if prior_id is not None:
-                    self._entries.pop(prior_id, None)
-                self._foreign[rp] = entry
-            return
-        assert isinstance(entry_id, str)
+        raw_id = meta.get("id")
+        entry_id: str | None = raw_id if _is_shards_id(raw_id) else None
         entry = IndexEntry(id=entry_id, path=p, mtime=mtime, meta=meta)
         with self._lock:
-            self._foreign.pop(rp, None)  # the file gained a shards id
-            prior = self._entries.get(entry_id)
-            if prior is not None:
-                self._by_path.pop(self._rp(prior.path), None)
-            self._entries[entry_id] = entry
-            self._by_path[rp] = entry_id
+            self._rows[self._rp(p)] = entry
 
     def evict(self, path: Path) -> None:
         """Drop the row whose path matches ``path`` — silent if none does."""
         rp = self._rp(Path(path))
         with self._lock:
-            self._foreign.pop(rp, None)
-            entry_id = self._by_path.pop(rp, None)
-            if entry_id is not None:
-                self._entries.pop(entry_id, None)
+            self._rows.pop(rp, None)
+
+    def paths_under(self, root: Path) -> list[Path]:
+        """Every indexed path inside the directory ``root``.
+
+        The subtree query behind the watcher's directory-event branch: watchdog
+        reports a folder rename or delete as a *single* event with no per-file
+        events behind it, so the rows under it have to be found by prefix rather
+        than announced one by one. Matching is done on real paths (the dict key),
+        so a subtree reached through a symlink still matches; the returned paths
+        are the ones the index holds, in the caller's own path space.
+        """
+        prefix = self._rp(Path(root)) + os.sep
+        with self._lock:
+            return [row.path for rp, row in self._rows.items() if rp.startswith(prefix)]
 
     def get(self, entry_id: str) -> IndexEntry | None:
+        """The row carrying ``entry_id``; the lowest path when the vault holds duplicates.
+
+        Path keying makes this a scan rather than a dict hit — deliberately. No
+        wired read resolves an id (a point read already knows its file), so this is
+        a convenience for a caller holding an id, with a stated tie-break instead of
+        a silent last-writer-wins.
+        """
         with self._lock:
-            return self._entries.get(entry_id)
+            matches = [row for row in self._rows.values() if row.id == entry_id]
+        return min(matches, key=lambda row: str(row.path)) if matches else None
 
     def entries(self) -> list[IndexEntry]:
         """Every indexed *shards* entity (id-bearing), as a snapshot list.
 
         The row source behind the warm ``note.list`` / ``task.list`` /
-        ``vault.status`` handlers. Order is unspecified — the shared selectors
-        impose a deterministic path order before sorting, so the warm and on-disk
-        row orders can never diverge.
+        ``vault.status`` handlers — one row per file, exactly like the walks.
+        Order is unspecified: the shared selectors impose a deterministic path
+        order before sorting, so the warm and on-disk row orders can never diverge.
         """
         with self._lock:
-            return list(self._entries.values())
+            return [row for row in self._rows.values() if row.id is not None]
 
     def corpus(self) -> list[IndexEntry]:
         """Every indexed vault file — shards entities *and* foreign ones.
@@ -204,12 +224,11 @@ class VaultIndex:
         twin walks the same wider corpus (foreign files surface with ``id: None``).
         """
         with self._lock:
-            return [*self._entries.values(), *self._foreign.values()]
+            return list(self._rows.values())
 
     def recent(self, limit: int = DEFAULT_RECENT_LIMIT) -> list[dict[str, Any]]:
         """Most-recently-modified shards rows, mtime-descending (id-ascending on ties)."""
-        with self._lock:
-            entries = list(self._entries.values())
+        entries = self.entries()
         entries.sort(key=lambda e: e.id or "")  # stable secondary key
         entries.sort(key=lambda e: e.mtime, reverse=True)
         if limit >= 0:
@@ -219,14 +238,11 @@ class VaultIndex:
     def clear(self) -> None:
         """Flush the whole index (called on a clean daemon stop)."""
         with self._lock:
-            self._entries.clear()
-            self._by_path.clear()
-            self._foreign.clear()
+            self._rows.clear()
 
     def __len__(self) -> int:
         """The number of indexed *shards* entities (foreign corpus rows excluded)."""
-        with self._lock:
-            return len(self._entries)
+        return len(self.entries())
 
 
 # --------------------------------------------------------------------------- #

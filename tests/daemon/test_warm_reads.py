@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -917,13 +919,22 @@ def test_reparse_evicts_when_a_directory_replaces_the_file(vault: Path) -> None:
 
 
 def test_index_moves_an_id_between_paths_without_leaking(vault: Path) -> None:
-    """Re-indexing an id at a new path drops the old path's row (no duplicates)."""
-    first = _note(vault, note_id="n-move", title="Move")
+    """A moved file ends up as exactly one row, at its new path.
+
+    The index no longer infers that a re-parsed id means the previous holder of
+    that id must be gone — that inference is precisely what collapsed two files
+    sharing an id. A move is instead driven the way the filesystem reports it, and
+    the way :meth:`~shards.index.watcher.Watcher.handle_event` drives it: evict the
+    source, re-parse the destination.
+    """
+    first = _note(vault, note_id="n-move", title="Move", note_type="decision")
     index = VaultIndex()
     index.reparse(first)
     moved = vault / "notes" / "decisions" / "n-move.md"
     moved.parent.mkdir(parents=True, exist_ok=True)
     first.replace(moved)
+
+    index.evict(first)
     index.reparse(moved)
 
     assert len(index) == 1
@@ -972,3 +983,176 @@ def test_warm_startup_registers_exactly_the_wired_reads(cfg: Config, socket_path
             "vault.status",
             "search.tag_pull",
         }
+
+
+# --------------------------------------------------------------------------- #
+# Parity under mutation — the vault changes *while* the daemon is up            #
+# --------------------------------------------------------------------------- #
+#
+# Everything above seeds the vault before the daemon starts and never touches it
+# again, so the whole warm path is only ever asserted against a frozen corpus.
+# Every divergence this section pins was invisible to that suite: each one needs
+# a write, a copy, a rename or a subtree move to land *after* the index is warm.
+
+
+@pytest.fixture
+def linked_vault_config(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+    """A config that reaches the vault through a symlink.
+
+    ``Watcher.warm`` inserts paths exactly as it walked them (through the link),
+    so any later event that rewrote its path to the realpath moved that row into a
+    second path space — where the scope predicates (``vault / "notes"``) no longer
+    match it and the row silently leaves every list.
+    """
+    link = tmp_path / "vault-link"
+    link.symlink_to(vault, target_is_directory=True)
+    cfg_path = tmp_path / "linked-config.toml"
+    cfg_path.write_text(
+        "\n".join(
+            (
+                "[core]",
+                f'vault_path = "{link}"',
+                f'agent = "{_AGENT}"',
+                "",
+                "[tasks]",
+                f'collections = ["{_AGENT}", "{_OTHER}"]',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_path))
+    return load_config()
+
+
+def _await_parity(
+    warm: DaemonClient, cold: DaemonClient, cfg: Config, timeout: float = 10.0
+) -> None:
+    """Poll until the warm matrix matches the cold one, then assert it key by key.
+
+    The warm index is only *eventually* consistent (a watchdog event has to land
+    and be processed), so a bare comparison would be a race. Every divergence
+    below is permanent, though, so a timeout here is a real failure — reported
+    per read key, not as a bare timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        cold_matrix = _read_matrix(cold, cfg)
+        warm_matrix = _read_matrix(warm, cfg)
+        if warm_matrix == cold_matrix or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
+    assert set(warm_matrix) == set(cold_matrix)
+    for key in sorted(cold_matrix):
+        assert warm_matrix[key] == cold_matrix[key], key
+
+
+@contextlib.contextmanager
+def _live_parity(cfg: Config, socket_path: Path, missing_socket: Path) -> Iterator[DaemonClient]:
+    """Run a warm daemon, assert parity before *and* after the body mutates the vault."""
+    warm = DaemonClient(socket_path=socket_path)
+    cold = DaemonClient(socket_path=missing_socket)
+    with running_daemon(socket_path, config=cfg):
+        _await_parity(warm, cold, cfg)  # baseline: the frozen vault already agrees
+        yield warm
+        _await_parity(warm, cold, cfg)
+
+
+def test_parity_survives_an_edit_when_the_vault_is_a_symlink(
+    linked_vault_config: Config, seeded_vault: Path, socket_path: Path, missing_socket: Path
+) -> None:
+    """One edit behind a symlinked vault path must not empty the warm index.
+
+    ``reconcile_path`` returned a realpath even when it moved nothing, so the row
+    for every edited file landed under a path the scope predicates reject: with
+    the vault reached through a link, ``note list`` / ``task list`` went empty
+    after a single write while the cold path stayed correct.
+    """
+    cfg = linked_vault_config
+    with _live_parity(cfg, socket_path, missing_socket):
+        note = seeded_vault / "notes" / "n-alpha.md"
+        note.write_text(note.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+
+
+def test_parity_survives_a_conflicted_copy_sharing_an_id(
+    cfg: Config, seeded_vault: Path, socket_path: Path, missing_socket: Path
+) -> None:
+    """Two files carrying one id are two rows on disk — and must be two warm rows.
+
+    An id-keyed index kept only the last-parsed of the pair, so a ``cp``, a git
+    conflicted copy or a sync client's "(conflicted copy)" made a row vanish from
+    every wired read and under-counted ``status``.
+    """
+    with _live_parity(cfg, socket_path, missing_socket):
+        original = seeded_vault / "notes" / "n-alpha.md"
+        shutil.copy(original, original.with_name("n-alpha (conflicted copy).md"))
+
+
+def test_parity_survives_an_in_place_id_change(
+    cfg: Config, seeded_vault: Path, socket_path: Path, missing_socket: Path
+) -> None:
+    """Rewriting a file's id in place must not leave the old id behind forever.
+
+    The id-keyed index evicted the prior holder of the *new* id but never the
+    prior id *of this path*, orphaning a row no later eviction could reach — so
+    ``note list`` advertised an id ``note get`` could not resolve.
+    """
+    with _live_parity(cfg, socket_path, missing_socket):
+        path = seeded_vault / "notes" / "n-alpha.md"
+        _write(path, _note_meta("n-renamed", "Alpha Renamed", tags=["a", "shared"]), "Note body.")
+
+
+def test_parity_survives_a_directory_moved_out_of_the_vault(
+    cfg: Config, seeded_vault: Path, tmp_path: Path, socket_path: Path, missing_socket: Path
+) -> None:
+    """``mv notes/decisions ../archive`` is ONE ``DirMovedEvent`` — not per-file deletes."""
+    with _live_parity(cfg, socket_path, missing_socket):
+        shutil.move(str(seeded_vault / "notes" / "decisions"), str(tmp_path / "archive"))
+
+
+def test_parity_survives_a_directory_moved_into_the_vault(
+    cfg: Config, seeded_vault: Path, tmp_path: Path, socket_path: Path, missing_socket: Path
+) -> None:
+    """A folder moved *in* arrives as one directory event too — and must be indexed."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _write(staging / "n-arrived.md", _note_meta("n-arrived", "Arrived"), "body")
+    with _live_parity(cfg, socket_path, missing_socket):
+        shutil.move(str(staging), str(seeded_vault / "notes" / "arrived"))
+
+
+# --------------------------------------------------------------------------- #
+# VaultIndex — one row per file, keyed by path                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_two_files_sharing_an_id_are_two_index_rows(vault: Path) -> None:
+    """The index is a view of *files*: duplicate ids never collapse into one row."""
+    first = _note(vault, note_id="n-dup", title="Dup")
+    second = first.with_name("n-dup (conflicted copy).md")
+    shutil.copy(first, second)
+
+    index = VaultIndex()
+    index.reparse(first)
+    index.reparse(second)
+
+    assert len(index) == 2
+    assert sorted(str(e.path) for e in index.entries()) == sorted([str(first), str(second)])
+    assert [e.id for e in index.entries()] == ["n-dup", "n-dup"]
+    assert len(index.corpus()) == 2
+    assert sorted(row["path"] for row in index.recent()) == sorted([str(first), str(second)])
+
+
+def test_an_in_place_id_change_leaves_no_ghost_row(vault: Path) -> None:
+    """Rewriting the id at one path replaces that path's row — it never orphans it."""
+    path = _note(vault, note_id="n-before", title="Before")
+    index = VaultIndex()
+    index.reparse(path)
+
+    _write(path, _note_meta("n-after", "After"), "body")
+    index.reparse(path)
+
+    assert [e.id for e in index.entries()] == ["n-after"]
+    assert len(index) == 1
+    assert index.get("n-before") is None  # the ghost `note get` could never resolve
+    assert index.get("n-after") is not None
