@@ -61,6 +61,7 @@ import asyncio
 import contextlib
 import json
 import os
+import socket
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -82,6 +83,9 @@ Handler = Callable[[dict[str, Any]], dict[str, Any]]
 
 _SOCKET_MODE = 0o600
 _RUN_DIR_MODE = 0o700
+# How long to wait for a leftover socket node to answer before calling it stale.
+# A live daemon accepts a unix connection immediately; anything slower is dead.
+_STALE_PROBE_TIMEOUT = 0.5
 
 
 class RpcError(Exception):
@@ -150,6 +154,9 @@ class DaemonServer:
         self._vault = vault_id(config) if config is not None else None
         self._handlers = handlers if handlers is not None else default_dispatch()
         self._server: asyncio.AbstractServer | None = None
+        # Live connection tasks, so shutdown can drain them instead of letting
+        # the loop garbage-collect them ("Task was destroyed but it is pending").
+        self._connections: set[asyncio.Task[None]] = set()
         self._index: VaultIndex | None = None
         self._watcher: Watcher | None = None
         self._hooks: ChangeHooks | None = None
@@ -178,8 +185,7 @@ class DaemonServer:
             # ``indexed`` never crashes the observer thread this hook runs on.
             self._hooks.register(lambda p: incremental_update(config, p))
             self._handlers = {**self._handlers, **self._warm_handlers()}
-        with contextlib.suppress(FileNotFoundError):
-            self.socket_path.unlink()  # clear a stale socket from a prior run
+        self._clear_stale_socket()
         # Bind under a restrictive umask so the socket node is created 0600 *at
         # bind time* — closing the TOCTOU window between bind and chmod. The chmod
         # below stays as defense-in-depth (and normalizes any inherited bits).
@@ -191,6 +197,30 @@ class DaemonServer:
         finally:
             os.umask(old_umask)
         os.chmod(self.socket_path, _SOCKET_MODE)
+
+    def _clear_stale_socket(self) -> None:
+        """Remove a leftover socket node, but never one a live daemon is serving.
+
+        Unlinking unconditionally means a second daemon silently takes the socket
+        while the first keeps running: two watchdog observers over one vault, two
+        ``indexed`` updates per edit, two reconcilers racing each other — and the
+        orphan is invisible to ``daemon status``, which reads the PID file. The
+        PID-file guard in ``cli/admin.py`` does not cover a daemon whose PID file
+        was lost. So probe first: if anything answers on that node, refuse to
+        start rather than strand the process already serving it.
+        """
+        if not self.socket_path.exists():
+            return
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(_STALE_PROBE_TIMEOUT)
+                probe.connect(str(self.socket_path))
+        except OSError:
+            # Nothing is listening (refused/absent/timed out) — the node is stale.
+            with contextlib.suppress(FileNotFoundError):
+                self.socket_path.unlink()
+            return
+        raise OSError(f"a daemon is already serving {self.socket_path}")
 
     def _warm_handlers(self) -> dict[str, Handler]:
         """Every read handler this server can serve from its warm index.
@@ -277,6 +307,7 @@ class DaemonServer:
             with contextlib.suppress(Exception):
                 await self._server.wait_closed()
             self._server = None
+        await self._drain_connections()
         if self._watcher is not None:
             self._watcher.stop()  # stop+join the observer thread, then clear the index
             self._watcher = None
@@ -287,10 +318,24 @@ class DaemonServer:
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()
 
+    async def _drain_connections(self) -> None:
+        """Cancel and await every in-flight connection task."""
+        pending = tuple(self._connections)
+        self._connections.clear()
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         """Serve NDJSON requests on one connection until EOF."""
+        current = asyncio.current_task()
+        if current is not None:
+            self._connections.add(current)
+            current.add_done_callback(self._connections.discard)
         try:
             while True:
                 line = await reader.readline()

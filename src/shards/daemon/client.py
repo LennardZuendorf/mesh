@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import socket
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -75,6 +76,9 @@ _SOCKET_PREFIX = "shards-"
 _VAULT_DIGEST_CHARS = 12
 _DEFAULT_TIMEOUT = 5.0
 _RECV_CHUNK = 4096
+# Ceiling on one RPC reply. Far above any real vault's list payload, low enough
+# that a wedged or hostile peer cannot grow the client's buffer without bound.
+_MAX_REPLY_BYTES = 64 * 1024 * 1024
 # RPC error codes eligible for the daemon-down fallback even on a *live* daemon:
 # ``503`` marks a method that is reserved but not yet wired to the daemon, so the
 # CLI degrades to the file-op fallback. Domain errors (2/3/4) are never in here.
@@ -86,7 +90,10 @@ _FALLBACK_CODES: frozenset[int] = frozenset({503})
 # which is precisely the condition the file-op fallback exists for; a read must
 # never fail because the accelerator did. Domain codes (2/3/4) stay out — these
 # handlers never raise one, and a genuine domain error must still propagate.
-_READ_FALLBACK_CODES: frozenset[int] = frozenset({404, 500, 503})
+# ``400`` (the daemon could not parse the request at all — a protocol skew
+# between a new client and an old daemon) belongs here by the same argument:
+# it is a statement about the accelerator, not about the vault.
+_READ_FALLBACK_CODES: frozenset[int] = frozenset({400, 404, 500, 503})
 
 Fallback = Callable[[], Any]
 
@@ -278,11 +285,25 @@ class DaemonClient:
             sock.settimeout(self._timeout)
             sock.connect(str(self._socket_path))
             sock.sendall(payload)
+            # ``settimeout`` bounds each individual ``recv``, not the exchange. A
+            # daemon that is alive but trickling bytes therefore resets the clock on
+            # every chunk and blocks the CLI forever — the "hung daemon" case the
+            # fallback exists for. Hold one monotonic deadline across the whole
+            # read, and cap the reply so a runaway daemon cannot exhaust memory
+            # either. Both failure modes raise ``OSError``, which every caller
+            # already treats as "the accelerator is unavailable".
+            deadline = time.monotonic() + self._timeout
             while b"\n" not in buf:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("daemon reply exceeded the read deadline")
+                sock.settimeout(remaining)
                 chunk = sock.recv(_RECV_CHUNK)
                 if not chunk:
                     break
                 buf.extend(chunk)
+                if len(buf) > _MAX_REPLY_BYTES:
+                    raise OSError("daemon reply exceeded the maximum size")
         line = bytes(buf).split(b"\n", 1)[0]
         response: dict[str, Any] = json.loads(line)
         self._check_vault(response)
@@ -354,15 +375,16 @@ class DaemonClient:
     def is_up(self) -> bool:
         """Whether the daemon answers a liveness ping (never raises).
 
-        A down/absent daemon (missing or refused socket, timeout, garbled reply)
-        yields ``False`` — the single liveness check both the ``search`` hybrid gate
+        A down/absent daemon (missing or refused socket, timeout, garbled reply,
+        or any ``ok: false`` answer — an older binary that does not know ``ping``
+        replies ``404`` rather than failing to connect) yields ``False`` — the single liveness check both the ``search`` hybrid gate
         and the ``recent-activity`` degradation notice share. Liveness is
         *per-vault*: a daemon answering for another vault is no accelerator for
         this one, so a :class:`VaultMismatch` reads as down too.
         """
         try:
             self.ping()
-        except (OSError, json.JSONDecodeError, VaultMismatch):
+        except (OSError, json.JSONDecodeError, VaultMismatch, DaemonError):
             return False
         return True
 
