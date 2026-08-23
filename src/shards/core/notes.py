@@ -263,6 +263,32 @@ def _validate_owner(config: Config, owner: str | None) -> None:
         raise ValueError(f"unknown owner: {owner!r}")
 
 
+def _notify(config: Config, path: Path) -> None:
+    """Announce a vault change to a running daemon, if there is one.
+
+    Imported lazily: ``daemon.client`` imports this module's filter types, so a
+    module-level import here would close a cycle. Lazy import is also what keeps
+    the CLI's cold start honest (invariant 6) — a write pays for the client only
+    when it actually writes.
+    """
+    from shards.daemon.client import notify_change
+
+    notify_change(config, path)
+
+
+def _persist(config: Config, path: Path, post: frontmatter.Post) -> None:
+    """Write the note atomically, then tell any running daemon it changed.
+
+    The notification is best-effort and post-durability: the file is already on
+    disk when it is sent, and :func:`notify_change` swallows every failure. It
+    exists so an agent that writes and immediately lists sees its own change,
+    instead of racing the watcher's event delivery and concluding the write was
+    lost.
+    """
+    atomic_write(path, dump_post(post))
+    _notify(config, path)
+
+
 def create_note(
     config: Config,
     title: str,
@@ -321,7 +347,7 @@ def create_note(
         # Serialize the frontmatter from the validated model — the schema is the
         # one on-disk contract, never a parallel hand-built dict that can drift.
         post.metadata = note.model_dump(mode="python")
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
     return note
 
 
@@ -395,7 +421,7 @@ def append_note(
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         note = _validated_note(post.metadata, id_or_slug)
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
     return note
 
 
@@ -525,12 +551,14 @@ def update_note(
         post.metadata["updated"] = _now()
         note = _validated_note(post.metadata, id_or_slug)
 
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
         if new_type is not None:
             dest = safe_resolve(vault, note_folder(new_type, vault) / path.name)
             if dest != path:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(path, dest)
+                _notify(config, path)  # the old path is gone
+                _notify(config, dest)  # the new one must be indexed
     return note
 
 
@@ -557,7 +585,9 @@ def delete_note(config: Config, id_or_slug: str) -> str:
     """
     note_id = _lock_id(config, id_or_slug)
     with hold(_lock_path(config, note_id)):
-        _resolve_path(config, note_id).unlink()
+        removed = _resolve_path(config, note_id)
+        removed.unlink()
+        _notify(config, removed)  # evict the row before the next read
     return note_id
 
 

@@ -974,6 +974,14 @@ def test_deleted_methods_have_no_client_verb_and_no_handler(cfg: Config) -> None
 
 
 def test_warm_startup_registers_exactly_the_wired_reads(cfg: Config, socket_path: Path) -> None:
+    """The four wired reads, plus ping, plus the one write-side notification.
+
+    ``vault.touch`` is deliberately not a read: it is how a writer tells the
+    daemon what it just changed, so the agent's very next list sees its own write
+    instead of racing inotify delivery. It lives with the warm handlers because it
+    needs the same index closure, and it is enumerated here so a *fifth* read can
+    never be added to the socket without this test being updated on purpose.
+    """
     with running_daemon(socket_path, config=cfg) as server:
         assert set(server._handlers) == {
             "ping",
@@ -982,6 +990,7 @@ def test_warm_startup_registers_exactly_the_wired_reads(cfg: Config, socket_path
             "task.list",
             "vault.status",
             "search.tag_pull",
+            "vault.touch",
         }
 
 

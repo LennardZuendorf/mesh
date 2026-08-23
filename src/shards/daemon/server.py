@@ -281,12 +281,42 @@ class DaemonServer:
             hits = select_tagpull(rows, TagPullFilter.from_params(params))
             return {"results": [msgspec.to_builtins(hit) for hit in hits]}
 
+        def vault_touch(params: dict[str, Any]) -> dict[str, Any]:
+            """Re-read one path into the warm index, synchronously.
+
+            The freshness of the warm index otherwise depends on an inotify event
+            being delivered *and* processed, which is always more than zero time
+            after the write returns. That gap lands on the commonest agent
+            sequence there is — create then list — where the agent sees an empty
+            list and concludes its own write failed. A writer therefore tells the
+            daemon what it just changed, and this reparses (or evicts, if the path
+            is gone) before answering. Writes are already durable on disk before
+            the notification is sent and every failure of it is swallowed by the
+            caller, so the daemon still never gates a write.
+            """
+            raw = params.get("path")
+            if not isinstance(raw, str):
+                return {"touched": False}
+            path = Path(raw)
+            try:
+                inside = path.resolve().is_relative_to(vault)
+            except (OSError, ValueError):
+                return {"touched": False}
+            if not inside:
+                return {"touched": False}  # never index outside the served vault
+            if path.exists():
+                index.reparse(path)
+            else:
+                index.evict(path)
+            return {"touched": True}
+
         return {
             "activity.recent": activity_recent,
             "note.list": note_list,
             "task.list": task_list,
             "vault.status": vault_status,
             "search.tag_pull": tag_pull,
+            "vault.touch": vault_touch,
         }
 
     async def serve_forever(self) -> None:

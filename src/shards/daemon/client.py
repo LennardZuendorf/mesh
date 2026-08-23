@@ -75,6 +75,9 @@ _SOCKET_NAME = "shards.sock"
 _SOCKET_PREFIX = "shards-"
 _VAULT_DIGEST_CHARS = 12
 _DEFAULT_TIMEOUT = 5.0
+# A change notification is a courtesy, not a dependency: keep it short enough
+# that a wedged daemon can never become a write-latency problem.
+_NOTIFY_TIMEOUT = 1.0
 _RECV_CHUNK = 4096
 # Ceiling on one RPC reply. Far above any real vault's list payload, low enough
 # that a wedged or hostile peer cannot grow the client's buffer without bound.
@@ -141,6 +144,29 @@ def _socket_name(vault: str | None) -> str:
         return _SOCKET_NAME
     digest = hashlib.sha256(vault.encode("utf-8")).hexdigest()[:_VAULT_DIGEST_CHARS]
     return f"{_SOCKET_PREFIX}{digest}.sock"
+
+
+def notify_change(config: Config, path: Path) -> None:
+    """Tell a running daemon that ``path`` just changed. Best effort, never raises.
+
+    The daemon's warm index is refreshed by the filesystem watcher, but delivery
+    and processing of an inotify event always lag the write that caused it. That
+    lag falls on the commonest agent sequence there is — create then immediately
+    list — where the agent sees a list without its own new entity and concludes
+    the write failed. A one-line poke closes it deterministically.
+
+    This does **not** make the daemon a gatekeeper: the write is already durable
+    on disk before this is called, every failure here is swallowed, and with no
+    daemon running the connect fails immediately (``ENOENT`` on a missing socket
+    node) and costs nothing measurable. The invariant is "the daemon never gates a
+    write", and it still holds — a poke that fails changes nothing but freshness,
+    which the watcher then repairs on its own.
+    """
+    try:
+        client = DaemonClient(config=config, timeout=_NOTIFY_TIMEOUT)
+        client._request("vault.touch", {"path": str(path)})
+    except Exception:  # noqa: BLE001 - freshness is best-effort, writes are not
+        return
 
 
 def default_socket_path(config: Config | None = None) -> Path:

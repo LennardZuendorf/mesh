@@ -229,6 +229,32 @@ def _priority_rank(priority: str | None) -> int:
     return _PRIORITY_RANK.get(priority, _PRIORITY_UNRANKED)
 
 
+def _notify(config: Config, path: Path) -> None:
+    """Announce a vault change to a running daemon, if there is one.
+
+    Imported lazily: ``daemon.client`` imports this module's filter types, so a
+    module-level import here would close a cycle. Lazy import is also what keeps
+    the CLI's cold start honest (invariant 6) — a write pays for the client only
+    when it actually writes.
+    """
+    from shards.daemon.client import notify_change
+
+    notify_change(config, path)
+
+
+def _persist(config: Config, path: Path, post: frontmatter.Post) -> None:
+    """Write the task atomically, then tell any running daemon it changed.
+
+    The notification is best-effort and post-durability: the file is already on
+    disk when it is sent, and :func:`notify_change` swallows every failure. It
+    exists so an agent that writes and immediately lists sees its own change,
+    instead of racing the watcher's event delivery and concluding the write was
+    lost.
+    """
+    atomic_write(path, dump_post(post))
+    _notify(config, path)
+
+
 def create_task(
     config: Config,
     title: str,
@@ -302,7 +328,7 @@ def create_task(
         post = frontmatter.Post(body)
         # Serialize the frontmatter from the validated model — one on-disk contract.
         post.metadata = task.model_dump(mode="python")
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
     return task
 
 
@@ -391,7 +417,7 @@ def update_task(
             post.metadata["blocked_by"] = list(blocked_by)
         post.metadata["updated"] = _now()
         task = _validated_task(post.metadata, task_id)
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
     return task
 
 
@@ -453,7 +479,7 @@ def append_task(
         post.metadata["related"] = related
         post.metadata["updated"] = _now()
         task = _validated_task(post.metadata, task_id)
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
     return task
 
 
@@ -508,7 +534,7 @@ def claim_task(config: Config, task_id: str, claimer: str) -> Task:
         post.metadata["status"] = "claimed"
         post.metadata["updated"] = _now()
         task = _validated_task(post.metadata, task_id)
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
     return task
 
 
@@ -573,15 +599,22 @@ def release_task(config: Config, task_id: str, releaser: str, *, force: bool = F
         post.metadata["status"] = "open"
         post.metadata["updated"] = _now()
         task = _validated_task(post.metadata, task_id)
-        atomic_write(path, dump_post(post))
+        _persist(config, path, post)
     return task
 
 
-def _move_if_needed(src: Path, dest: Path) -> None:
-    """Atomically rename ``src`` → ``dest`` when they differ (open → done)."""
+def _move_if_needed(config: Config, src: Path, dest: Path) -> None:
+    """Atomically rename ``src`` → ``dest`` when they differ (open → done).
+
+    Both paths are announced to any running daemon: the source row must be
+    evicted and the destination indexed, or a warm ``task list`` keeps serving a
+    finished task at a path that no longer exists.
+    """
     if dest != src:
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.replace(src, dest)
+        _notify(config, src)
+        _notify(config, dest)
 
 
 def _terminate_task(
@@ -628,7 +661,7 @@ def _terminate_task(
         if post is None:
             raise TaskNotFoundError(task_id)
         if post.metadata.get("status") in _TERMINAL_STATUSES:
-            _move_if_needed(path, done_path)  # heal a crash-stranded terminal file
+            _move_if_needed(config, path, done_path)  # heal a crash-stranded file
             return _validated_task(post.metadata, task_id)
 
         now = _now()
@@ -644,8 +677,8 @@ def _terminate_task(
         post.metadata["updated"] = now
         task = _validated_task(post.metadata, task_id)
 
-        atomic_write(path, dump_post(post))
-        _move_if_needed(path, done_path)
+        _persist(config, path, post)
+        _move_if_needed(config, path, done_path)
     return task
 
 
@@ -712,6 +745,7 @@ def delete_task(config: Config, task_id: str) -> str:
     with hold(_lock_path(config, task_id)):
         path = _resolve_task_path(config, task_id)
         path.unlink()
+        _notify(config, path)  # evict the row before the next read
     return task_id
 
 
