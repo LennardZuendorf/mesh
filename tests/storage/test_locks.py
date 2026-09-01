@@ -42,17 +42,17 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import shards.storage.locks as locks_mod
-from shards.core.tasks import create_task
-from shards.schemas.config import Config, load_config
-from shards.storage.locks import LockError, acquire
+import mesh.storage.locks as locks_mod
+from mesh.core.tasks import create_task
+from mesh.schemas.config import Config, load_config
+from mesh.storage.locks import LockError, acquire
 
 _QUEUE_TIMEOUT = 20.0
 _EVENT_TIMEOUT = 30.0
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -75,10 +75,10 @@ def _claim_worker(
     """Run in a spawned child process: invoke the real CLI ``task claim``."""
     import os as _os
 
-    _os.environ["SHARDS_CONFIG_PATH"] = config_path
-    _os.environ.pop("SHARDS_AGENT", None)
+    _os.environ["MESH_CONFIG_PATH"] = config_path
+    _os.environ.pop("MESH_AGENT", None)
 
-    from shards.cli.__main__ import app
+    from mesh.cli.__main__ import app
 
     barrier.wait()
     result = CliRunner().invoke(app, ["--owner", owner, "task", "claim", task_id])
@@ -192,7 +192,7 @@ def _slow_paused_reclaimer(
     go_evt: MpEvent,
     queue: multiprocessing.Queue[tuple[str, Any]],
 ) -> None:
-    import shards.storage.locks as _locks
+    import mesh.storage.locks as _locks
 
     target = Path(lock_path_str)
     real_is_stale = _locks._is_stale
@@ -222,7 +222,7 @@ def _fast_full_cycle(
     go_evt: MpEvent,
     queue: multiprocessing.Queue[tuple[str, Any]],
 ) -> None:
-    import shards.storage.locks as _locks
+    import mesh.storage.locks as _locks
 
     lock_path = Path(lock_path_str)
     ready_evt.wait(timeout=_EVENT_TIMEOUT)
@@ -291,7 +291,7 @@ def _barrier_synced_reclaimer(
         return fd
 
     _os.open = patched_open  # ty: ignore[invalid-assignment]
-    import shards.storage.locks as _locks
+    import mesh.storage.locks as _locks
 
     try:
         # hold() (bounded wait-and-retry), not the bare 3-attempt acquire(): the
@@ -348,7 +348,7 @@ def _slow_paused_reclaimer_vs_live(
     done_evt: MpEvent,
     queue: multiprocessing.Queue[tuple[str, Any]],
 ) -> None:
-    import shards.storage.locks as _locks
+    import mesh.storage.locks as _locks
 
     target = Path(lock_path_str)
     real_is_stale = _locks._is_stale
@@ -386,7 +386,7 @@ def _fast_holds_a_live_lock(
     done_evt: MpEvent,
     queue: multiprocessing.Queue[tuple[str, Any]],
 ) -> None:
-    import shards.storage.locks as _locks
+    import mesh.storage.locks as _locks
 
     lock_path = Path(lock_path_str)
     # Do not even attempt the reclaim until slow has genuinely observed the

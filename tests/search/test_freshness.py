@@ -2,22 +2,22 @@
 
 This unit wires the ``indexed`` client's re-index calls to the vault's lifecycle:
 
-* :func:`~shards.index.indexed_client.incremental_update` shells ``indexed index
+* :func:`~mesh.index.indexed_client.incremental_update` shells ``indexed index
   update <path> --collection <c>`` for a single changed file, and — crucially —
   **swallows every failure** so a missing binary or a non-zero exit can never
   crash the watchdog observer thread that calls it.
-* :func:`~shards.index.indexed_client.full_rebuild` shells ``indexed index create
-  <vault> --collection <c>``; :func:`~shards.index.indexed_client.reindex` is its
-  alias and the delegate ``shards reindex`` calls.
-* :class:`~shards.daemon.server.DaemonServer`, when started with a vault config,
-  registers ``incremental_update`` on its owned :class:`~shards.index.watcher.ChangeHooks`
+* :func:`~mesh.index.indexed_client.full_rebuild` shells ``indexed index create
+  <vault> --collection <c>``; :func:`~mesh.index.indexed_client.reindex` is its
+  alias and the delegate ``mesh reindex`` calls.
+* :class:`~mesh.daemon.server.DaemonServer`, when started with a vault config,
+  registers ``incremental_update`` on its owned :class:`~mesh.index.watcher.ChangeHooks`
   registry so *every* create/modify/move/delete re-indexes just that file.
   Registration is explicit and config-bound — never a module-import side-effect.
 
 The real ``indexed`` binary is **never** shelled here: every subprocess is faked
 at ``indexed_client.subprocess.run`` (or the ``incremental_update`` name in the
 daemon namespace). The change-hook registry is a daemon-owned object, so each test
-constructs its own :class:`~shards.index.watcher.ChangeHooks` rather than sharing
+constructs its own :class:`~mesh.index.watcher.ChangeHooks` rather than sharing
 module state.
 """
 
@@ -33,11 +33,11 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.daemon import server as server_mod
-from shards.index import indexed_client
-from shards.index.watcher import ChangeHooks
-from shards.schemas.config import Config, load_config
+from mesh.cli.__main__ import app
+from mesh.daemon import server as server_mod
+from mesh.index import indexed_client
+from mesh.index.watcher import ChangeHooks
+from mesh.schemas.config import Config, load_config
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                     #
@@ -45,7 +45,7 @@ from shards.schemas.config import Config, load_config
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -181,7 +181,7 @@ def test_daemon_start_registers_incremental_update_hook(
 ) -> None:
     """A config-ful ``DaemonServer.start`` wires ``incremental_update`` to its hooks.
 
-    The lambda resolves ``incremental_update`` in the ``shards.daemon.server``
+    The lambda resolves ``incremental_update`` in the ``mesh.daemon.server``
     namespace, so patch it there. Firing the server's owned ``ChangeHooks`` then
     reaches the recorder with the startup config, proving every watcher event
     re-indexes that path.
@@ -222,14 +222,14 @@ def test_daemon_without_config_registers_no_hook(
 
 
 # --------------------------------------------------------------------------- #
-# shards reindex — delegates to indexed_client.reindex == full_rebuild          #
+# mesh reindex — delegates to indexed_client.reindex == full_rebuild          #
 # --------------------------------------------------------------------------- #
 
 
-def test_shards_reindex_cli_calls_full_rebuild(
-    shards_config: Path, monkeypatch: pytest.MonkeyPatch
+def test_mesh_reindex_cli_calls_full_rebuild(
+    mesh_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``shards reindex`` reaches ``indexed_client.reindex`` → ``full_rebuild``."""
+    """``mesh reindex`` reaches ``indexed_client.reindex`` → ``full_rebuild``."""
     calls: list[Config] = []
     monkeypatch.setattr(indexed_client, "full_rebuild", lambda config: calls.append(config))
     result = CliRunner().invoke(app, ["reindex"])

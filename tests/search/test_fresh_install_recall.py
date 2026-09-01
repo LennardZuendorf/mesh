@@ -1,13 +1,13 @@
-"""A fresh `shards init` install must still recall on body and tag text.
+"""A fresh `mesh init` install must still recall on body and tag text.
 
 Regression for the round-2 review finding: the substring fallback was changed
 to apply `[search].threshold` only when a caller set it explicitly, but
-`shards init` wrote `threshold = 0.65` into every config it generated — which
+`mesh init` wrote `threshold = 0.65` into every config it generated — which
 made it explicit again and restored the pre-fix cutoff. The fallback's body
 tier scores 0.4 and its tag tier 0.6, both below 0.65, so body-only and
 tag-only matches were unreachable on every fresh install.
 
-Everything here goes through `shards init` deliberately: a hand-written config
+Everything here goes through `mesh init` deliberately: a hand-written config
 fixture cannot catch a defect that lives in the generator itself.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
+from mesh.cli.__main__ import app
 
 # A nonsense token, so a hit can only come from the tier under test — never
 # from the title-exact (1.0) or title-substring (0.8) tiers above the cutoff.
@@ -32,9 +32,9 @@ def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
 
 @pytest.fixture
 def fresh_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """No config at all -> `shards init` -> a working vault. Returns the vault."""
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(tmp_path / "config.toml"))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    """No config at all -> `mesh init` -> a working vault. Returns the vault."""
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(tmp_path / "config.toml"))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     vault = tmp_path / "vault"
     result = _invoke(["init", "--path", str(vault), "--agent", "fresh-agent"])
     assert result.exit_code == 0, result.output

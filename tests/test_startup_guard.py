@@ -3,11 +3,11 @@
 The "instant CLI" mandate (root ``tech.md`` § Performance, Invariant 6) rests on
 the note/task import path pulling only what it uses. This guard is a
 *deterministic import-membership* check, not a flaky wall-clock threshold: it
-asserts that exercising the ``shards note`` / ``shards task`` fast path never
+asserts that exercising the ``mesh note`` / ``mesh task`` fast path never
 imports the heavy modules —
 
 * ``watchdog`` — daemon-only; its fsevents C-extension must stay lazy;
-* ``fastmcp`` — lives behind the separate ``shards-mcp`` console script;
+* ``fastmcp`` — lives behind the separate ``mesh-mcp`` console script;
 * ``rich`` — pulled only to render ``--help`` / error output;
 * ``pydantic`` — removed from the schema layer this unit (swapped to msgspec);
   a regression that reintroduces it on the CLI path is exactly what this catches.
@@ -27,9 +27,9 @@ import sys
 # ``sys.modules`` check would be meaningless.
 _PROBE = """
 import sys
-import shards.cli.__main__   # the entry point every `shards <verb>` invocation loads
-import shards.cli.note       # `shards note ...`
-import shards.cli.task       # `shards task ...`
+import mesh.cli.__main__   # the entry point every `mesh <verb>` invocation loads
+import mesh.cli.note       # `mesh note ...`
+import mesh.cli.task       # `mesh task ...`
 heavy = ("watchdog", "fastmcp", "rich", "pydantic")
 leaked = sorted(name for name in heavy if name in sys.modules)
 sys.stdout.write(",".join(leaked))

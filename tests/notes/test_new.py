@@ -1,14 +1,14 @@
 """notes/2 — ``note new``: create verb (R1).
 
-Exercises R1 (Create): :func:`shards.core.notes.create_note` and the
-``shards note new`` CLI surface. Create generates a hash ``n-`` id, routes the
+Exercises R1 (Create): :func:`mesh.core.notes.create_note` and the
+``mesh note new`` CLI surface. Create generates a hash ``n-`` id, routes the
 file into the folder matching its ``type`` (``notes/`` for ``note``;
 ``notes/{logs,decisions,references}/`` for the typed variants), validates the
-frontmatter against :class:`shards.schemas.note.Note`, and writes atomically with
+frontmatter against :class:`mesh.schemas.note.Note`, and writes atomically with
 ``created == updated`` at birth. Body source precedence is ``--body`` → ``--file``
 → ``$EDITOR`` (TTY only); a headless path (``--json``/MCP or non-TTY) with neither
 ``--body`` nor ``--file`` refuses (exit 2) rather than launching ``$EDITOR``. The
-default owner is the resolved config agent (``$SHARDS_AGENT`` override applied);
+default owner is the resolved config agent (``$MESH_AGENT`` override applied);
 an explicit ``--owner`` outside ``[tasks].collections`` is rejected (exit 2).
 """
 
@@ -22,17 +22,17 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.core.notes import create_note, find_duplicate_title, get_note
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder
+from mesh.cli.__main__ import app
+from mesh.core.notes import create_note, find_duplicate_title, get_note
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder
 
 # n- prefix + one-or-more Crockford base-32 digits (no I, L, O, U), 4+ long.
 _ID_RE = re.compile(r"^n-[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{4,}$")
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -82,7 +82,7 @@ def test_create_note_created_equals_updated(cfg: Config, vault: Path) -> None:
 
 
 def test_create_note_default_owner_from_config(cfg: Config, vault: Path) -> None:
-    # shards_config sets [core].agent = "test-agent".
+    # mesh_config sets [core].agent = "test-agent".
     note = create_note(cfg, "Owned", body="x")
     assert note.owner == "test-agent"
 
@@ -148,7 +148,7 @@ def test_create_note_resolves_wikilinks_into_related(cfg: Config, vault: Path) -
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards note new                                                        #
+# CLI — mesh note new                                                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -181,11 +181,11 @@ def test_cli_new_non_tty_no_body_exits_2(cfg: Config, vault: Path) -> None:
     assert result.exit_code == 2, result.output
 
 
-def test_cli_new_shards_agent_default_owner(
+def test_cli_new_mesh_agent_default_owner(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """$SHARDS_AGENT overrides [core].agent as the default owner."""
-    monkeypatch.setenv("SHARDS_AGENT", "flights-agent")
+    """$MESH_AGENT overrides [core].agent as the default owner."""
+    monkeypatch.setenv("MESH_AGENT", "flights-agent")
     result = _invoke(["--quiet", "note", "new", "Agent Owned", "--body", "x"])
     assert result.exit_code == 0, result.output
     note_id = result.output.strip()
@@ -285,7 +285,7 @@ def test_find_duplicate_title_case_and_whitespace_collide(cfg: Config, vault: Pa
 
 def test_find_duplicate_title_ignores_tasks(cfg: Config, vault: Path) -> None:
     """Same-kind only: a task with the same title is invisible to the note check."""
-    from shards.core.tasks import create_task
+    from mesh.core.tasks import create_task
 
     create_task(cfg, "Shared Title")
     assert find_duplicate_title(cfg, "Shared Title") is None

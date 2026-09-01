@@ -1,6 +1,6 @@
 """agent-usability/3 — Tag mutation contract.
 
-Acceptance coverage (brief: ``.superpowers/sdd/shards-3track/agent-usability-3-brief.md``):
+Acceptance coverage (brief: ``.superpowers/sdd/mesh-3track/agent-usability-3-brief.md``):
 
 * **The silent-wipe regression, locked** — a note tagged ``["infra", "urgent", "q3"]``
   updated with ``tags="urgent"`` retains all three, driven end to end through the
@@ -12,7 +12,7 @@ Acceptance coverage (brief: ``.superpowers/sdd/shards-3track/agent-usability-3-b
 * **Explicit replace, and only that path replaces** — ``=x,y`` replaces the whole list;
   neither the additive bare-list form nor the delta form ever does.
 * **One sentence, three surfaces, asserted identical** — the same
-  :data:`shards.core.notes.TAG_SPEC_SEMANTICS` sentence appears verbatim in the MCP
+  :data:`mesh.core.notes.TAG_SPEC_SEMANTICS` sentence appears verbatim in the MCP
   ``tags`` parameter description (``note_update``/``task_update``), the server-level
   ``instructions`` block, and the CLI ``--tags`` help (``note update``/``task update``) —
   so the four call sites cannot drift from each other.
@@ -29,11 +29,11 @@ import typer
 from fastmcp.tools.base import ToolResult
 from typer.core import TyperGroup, TyperOption
 
-import shards.mcp.server as server
-from shards.core.notes import TAG_SPEC_SEMANTICS
-from shards.core.tasks import create_task as core_create_task
-from shards.mcp.instructions import build_instructions
-from shards.schemas.config import Config, load_config
+import mesh.mcp.server as server
+from mesh.core.notes import TAG_SPEC_SEMANTICS
+from mesh.core.tasks import create_task as core_create_task
+from mesh.mcp.instructions import build_instructions
+from mesh.schemas.config import Config, load_config
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                     #
@@ -41,7 +41,7 @@ from shards.schemas.config import Config, load_config
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -79,12 +79,12 @@ def _cli_tags_help(sub_app: typer.Typer, command: str) -> str:
 
 
 def test_semantics_sentence_identical_in_mcp_schema_note_update() -> None:
-    props = _registered()["shards_note_update"].parameters["properties"]
+    props = _registered()["mesh_note_update"].parameters["properties"]
     assert props["tags"]["description"] == TAG_SPEC_SEMANTICS
 
 
 def test_semantics_sentence_identical_in_mcp_schema_task_update() -> None:
-    props = _registered()["shards_task_update"].parameters["properties"]
+    props = _registered()["mesh_task_update"].parameters["properties"]
     assert props["tags"]["description"] == TAG_SPEC_SEMANTICS
 
 
@@ -94,13 +94,13 @@ def test_semantics_sentence_identical_in_instructions_block(cfg: Config) -> None
 
 
 def test_semantics_sentence_identical_in_cli_note_update_help() -> None:
-    from shards.cli.note import note_app
+    from mesh.cli.note import note_app
 
     assert _cli_tags_help(note_app, "update") == TAG_SPEC_SEMANTICS
 
 
 def test_semantics_sentence_identical_in_cli_task_update_help() -> None:
-    from shards.cli.task import task_app
+    from mesh.cli.task import task_app
 
     assert _cli_tags_help(task_app, "update") == TAG_SPEC_SEMANTICS
 
@@ -113,14 +113,14 @@ def test_semantics_sentence_identical_in_cli_task_update_help() -> None:
 def test_mcp_note_update_bare_tags_is_additive_not_replace(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
         server.app.call_tool(
-            "shards_note_new",
+            "mesh_note_new",
             {"title": "Silent Wipe Regression", "tags": ["infra", "urgent", "q3"]},
         )
     )
     note_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "urgent"})
+        server.app.call_tool("mesh_note_update", {"target": note_id, "tags": "urgent"})
     )
 
     assert _content(dispatched)["tags"] == ["infra", "urgent", "q3"]
@@ -132,13 +132,13 @@ def test_mcp_task_update_bare_tags_is_additive_not_replace(cfg: Config, vault: P
     # this test exercises only the update path's semantics.
     dispatched = asyncio.run(
         server.app.call_tool(
-            "shards_task_new", {"title": "Silent Wipe Twin", "tags": ["infra", "urgent", "q3"]}
+            "mesh_task_new", {"title": "Silent Wipe Twin", "tags": ["infra", "urgent", "q3"]}
         )
     )
     task_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
-        server.app.call_tool("shards_task_update", {"task_id": task_id, "tags": "urgent"})
+        server.app.call_tool("mesh_task_update", {"task_id": task_id, "tags": "urgent"})
     )
 
     assert _content(dispatched)["tags"] == ["infra", "urgent", "q3"]
@@ -152,43 +152,43 @@ def test_mcp_task_update_bare_tags_is_additive_not_replace(cfg: Config, vault: P
 
 def test_mcp_note_update_delta_adds_and_removes(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_new", {"title": "Delta Note", "tags": ["ndc", "stale"]})
+        server.app.call_tool("mesh_note_new", {"title": "Delta Note", "tags": ["ndc", "stale"]})
     )
     note_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "+flights,-stale"})
+        server.app.call_tool("mesh_note_update", {"target": note_id, "tags": "+flights,-stale"})
     )
     assert _content(dispatched)["tags"] == ["ndc", "flights"]
 
 
 def test_mcp_note_update_delta_remove_absent_is_noop(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_new", {"title": "Delta Noop Note", "tags": ["ndc"]})
+        server.app.call_tool("mesh_note_new", {"title": "Delta Noop Note", "tags": ["ndc"]})
     )
     note_id = _content(dispatched)["id"]
 
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "-nope"})
+        server.app.call_tool("mesh_note_update", {"target": note_id, "tags": "-nope"})
     )
     assert _content(dispatched)["tags"] == ["ndc"]
 
 
 def test_mcp_note_update_explicit_replace_only_path_that_replaces(cfg: Config, vault: Path) -> None:
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_new", {"title": "Replace Note", "tags": ["ndc", "stale"]})
+        server.app.call_tool("mesh_note_new", {"title": "Replace Note", "tags": ["ndc", "stale"]})
     )
     note_id = _content(dispatched)["id"]
 
     # Bare list: additive, does not replace.
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "x"})
+        server.app.call_tool("mesh_note_update", {"target": note_id, "tags": "x"})
     )
     assert _content(dispatched)["tags"] == ["ndc", "stale", "x"]
 
     # Explicit "=" prefix: the only path that replaces.
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_update", {"target": note_id, "tags": "=y,z"})
+        server.app.call_tool("mesh_note_update", {"target": note_id, "tags": "=y,z"})
     )
     assert _content(dispatched)["tags"] == ["y", "z"]
 
@@ -204,17 +204,17 @@ def test_mcp_note_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, va
     from fastmcp.exceptions import ToolError
 
     dispatched = asyncio.run(
-        server.app.call_tool("shards_note_new", {"title": "Mixed Spec Note", "tags": ["ndc"]})
+        server.app.call_tool("mesh_note_new", {"title": "Mixed Spec Note", "tags": ["ndc"]})
     )
     note_id = _content(dispatched)["id"]
 
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(server.app.call_tool("shards_note_update", {"target": note_id, "tags": "+x,y"}))
+        asyncio.run(server.app.call_tool("mesh_note_update", {"target": note_id, "tags": "+x,y"}))
     assert "ambiguous tag spec" in str(exc_info.value)
     assert "Traceback" not in str(exc_info.value)
 
     # Rejected before any write — the tag list is untouched.
-    dispatched = asyncio.run(server.app.call_tool("shards_note_get", {"id": note_id}))
+    dispatched = asyncio.run(server.app.call_tool("mesh_note_get", {"id": note_id}))
     assert _content(dispatched)["tags"] == ["ndc"]
 
 
@@ -222,22 +222,20 @@ def test_mcp_task_update_mixed_spec_surfaces_as_clean_tool_error(cfg: Config, va
     from fastmcp.exceptions import ToolError
 
     dispatched = asyncio.run(
-        server.app.call_tool("shards_task_new", {"title": "Mixed Spec Task", "tags": ["ndc"]})
+        server.app.call_tool("mesh_task_new", {"title": "Mixed Spec Task", "tags": ["ndc"]})
     )
     task_id = _content(dispatched)["id"]
 
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(
-            server.app.call_tool("shards_task_update", {"task_id": task_id, "tags": "+x,y"})
-        )
+        asyncio.run(server.app.call_tool("mesh_task_update", {"task_id": task_id, "tags": "+x,y"}))
     assert "ambiguous tag spec" in str(exc_info.value)
 
 
 def test_cli_note_update_mixed_spec_exits_2_and_writes_nothing(cfg: Config, vault: Path) -> None:
     from typer.testing import CliRunner
 
-    from shards.cli.__main__ import app as cli_app
-    from shards.core.notes import create_note
+    from mesh.cli.__main__ import app as cli_app
+    from mesh.core.notes import create_note
 
     note = create_note(cfg, "Mixed Spec CLI Note", tags=["ndc"], body="x")
     result = CliRunner().invoke(cli_app, ["note", "update", note.id, "--tags", "+x,y"])
@@ -245,6 +243,6 @@ def test_cli_note_update_mixed_spec_exits_2_and_writes_nothing(cfg: Config, vaul
     assert result.exit_code == 2
     assert "ambiguous tag spec" in result.output
 
-    from shards.core.notes import get_note
+    from mesh.core.notes import get_note
 
     assert get_note(cfg, note.id).note.tags == ["ndc"]

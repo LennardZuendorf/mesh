@@ -1,9 +1,9 @@
 """Gating spike (cli-toolset-rework/2) — unknown-frontmatter-key round-trip.
 
 The pydantic v2 -> msgspec swap is *gated* on this test. Root ``tech.md``
-Invariant 3 ("unknown frontmatter keys round-trip") is load-bearing: shards
+Invariant 3 ("unknown frontmatter keys round-trip") is load-bearing: mesh
 coexists with other tools, which write their own frontmatter keys, and those
-foreign keys must survive a shards load/dump cycle byte-for-byte. pydantic's
+foreign keys must survive a mesh load/dump cycle byte-for-byte. pydantic's
 ``extra="allow"`` gave this for free; a msgspec ``Struct`` drops unknown fields
 unless a mechanism preserves them.
 
@@ -20,10 +20,10 @@ from datetime import UTC, date, datetime
 
 import frontmatter
 
-from shards.schemas.note import Note
-from shards.schemas.task import Task
+from mesh.schemas.note import Note
+from mesh.schemas.task import Task
 
-# Foreign keys shards does not own — including a scalar, a string, a bool, a
+# Foreign keys mesh does not own — including a scalar, a string, a bool, a
 # nested mapping, a list, and the adversarial case of a key *literally* named
 # ``extra`` (which a naive stash field would clobber).
 _FOREIGN = {
@@ -42,7 +42,7 @@ def _now() -> datetime:
 
 # Foreign temporal keys — the make-or-break case for the pydantic -> msgspec
 # swap (cli-toolset-rework polish): a bare YAML ``date`` value and a ``datetime``
-# value on keys shards does not own. ``model_validate`` never runs the known-field
+# value on keys mesh does not own. ``model_validate`` never runs the known-field
 # bare-date-to-datetime promotion on these (they land straight in ``extra``), so
 # they must reach ``model_dump`` — and the disk round-trip — as the exact objects
 # frontmatter parsed.

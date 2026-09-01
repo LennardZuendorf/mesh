@@ -1,10 +1,10 @@
-"""agent-usability/7 — `shards init`, example config, README.
+"""agent-usability/7 — `mesh init`, example config, README.
 
-Brief: `.superpowers/sdd/shards-3track/agent-usability-7-brief.md`. Locks the
+Brief: `.superpowers/sdd/mesh-3track/agent-usability-7-brief.md`. Locks the
 onboarding contract (`.spec/features/agent-usability/tech.md` § Onboarding):
 
 * `init` writes a config `load_config` accepts, with every `Config` field
-  populated or defaulted, honouring `$SHARDS_CONFIG_PATH`, and prints the
+  populated or defaulted, honouring `$MESH_CONFIG_PATH`, and prints the
   path it wrote.
 * Idempotent / non-destructive: re-running without `--force` leaves the file
   byte-identical and exits non-zero with a message naming `--force`;
@@ -17,12 +17,12 @@ onboarding contract (`.spec/features/agent-usability/tech.md` § Onboarding):
   three-verb thesis; `init` is admin, beside `daemon`/`status`/`reindex`.
 * `load_config`'s missing-config message names the resolved path and the one
   required key, still at exit 2 — agent-usability/5's tool-error wording
-  depends on `shards init` being nameable here.
+  depends on `mesh init` being nameable here.
 
 None of these tests write outside ``tmp_path``: the ``cfg_path`` fixture
-always exports ``SHARDS_CONFIG_PATH``, and every ``init`` invocation is given
+always exports ``MESH_CONFIG_PATH``, and every ``init`` invocation is given
 an explicit ``--path`` (or monkeypatches ``admin._DEFAULT_VAULT_PATH``) so the
-true ``~/.shards/vault`` default is exercised without ever touching the real
+true ``~/.mesh/vault`` default is exercised without ever touching the real
 host home directory.
 """
 
@@ -36,10 +36,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-import shards.cli.admin as admin
-import shards.mcp.server as mcp_server
-from shards.cli.__main__ import app
-from shards.schemas.config import load_config
+import mesh.cli.admin as admin
+import mesh.mcp.server as mcp_server
+from mesh.cli.__main__ import app
+from mesh.schemas.config import load_config
 
 
 def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
@@ -48,10 +48,10 @@ def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
 
 @pytest.fixture
 def cfg_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point $SHARDS_CONFIG_PATH at a not-yet-existing file under tmp_path."""
+    """Point $MESH_CONFIG_PATH at a not-yet-existing file under tmp_path."""
     path = tmp_path / "config.toml"
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(path))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(path))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     return path
 
 
@@ -106,10 +106,10 @@ def test_init_no_flags_still_populates_every_field(
     assert cfg.tasks.collections == []
 
 
-def test_init_honours_shards_agent_env_as_default(
+def test_init_honours_mesh_agent_env_as_default(
     tmp_path: Path, cfg_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SHARDS_AGENT", "env-agent")
+    monkeypatch.setenv("MESH_AGENT", "env-agent")
     result = _invoke(["init", "--path", str(tmp_path / "vault")])
     assert result.exit_code == 0, result.output
     cfg = load_config(cfg_path)
@@ -226,14 +226,14 @@ def test_missing_config_message_names_path_and_requirement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     missing = tmp_path / "nope" / "config.toml"
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(missing))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(missing))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
 
     result = _invoke(["note", "list"])
 
     assert result.exit_code == 2
     assert str(missing) in result.output
-    assert "shards init" in result.output
+    assert "mesh init" in result.output
     assert "vault_path" in result.output
 
 
@@ -263,7 +263,7 @@ def test_example_config_loads_and_documents_every_key() -> None:
 def test_init_absent_from_mcp_tool_table() -> None:
     tools = asyncio.run(mcp_server.app.list_tools())
     names = {tool.name for tool in tools}
-    assert "shards_init" not in names
+    assert "mesh_init" not in names
     assert not any("init" in name for name in names)
 
 

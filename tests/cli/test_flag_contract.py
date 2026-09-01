@@ -1,6 +1,6 @@
 """agent-usability/6 — CLI flag contract and help truthfulness.
 
-Brief: ``.superpowers/sdd/shards-3track/agent-usability-6-brief.md``. Locks the
+Brief: ``.superpowers/sdd/mesh-3track/agent-usability-6-brief.md``. Locks the
 R6/R7 contract stated in ``.spec/features/agent-usability/tech.md`` § Surface C:
 
 * **R6, ``--json``/``--quiet``** — accepted **before and after** the command
@@ -52,18 +52,18 @@ import typer
 from typer.core import TyperGroup, TyperOption
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.cli.note import _NOTE_TYPES, note_app
-from shards.cli.task import _TASK_STATUSES, task_app
-from shards.core.notes import create_note
-from shards.core.tasks import create_task
-from shards.schemas.config import Config, load_config
-from shards.schemas.note import NoteType
-from shards.schemas.task import TaskStatus
+from mesh.cli.__main__ import app
+from mesh.cli.note import _NOTE_TYPES, note_app
+from mesh.cli.task import _TASK_STATUSES, task_app
+from mesh.core.notes import create_note
+from mesh.core.tasks import create_task
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.note import NoteType
+from mesh.schemas.task import TaskStatus
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -196,7 +196,7 @@ def test_json_and_quiet_accepted_before_and_after_every_command(cfg: Config, vau
 def test_command_table_covers_the_actual_tree() -> None:
     """The table above is a manual mirror of ``cli/__main__``'s wiring — assert it
     hasn't silently gone stale against a newly-added command."""
-    from shards.cli.__main__ import _LEAVES, _SUBAPPS
+    from mesh.cli.__main__ import _LEAVES, _SUBAPPS
 
     admin_leaves = {"init", "status", "reindex"}
     admin_subapps = {"daemon"}
@@ -347,7 +347,7 @@ def test_task_cancel_idempotent_noop_identical_before_and_after(cfg: Config, vau
 
 
 def test_global_owner_honoured_on_note_new(cfg: Config, vault: Path) -> None:
-    """The defect this unit fixes: ``shards --owner X note new`` used to silently
+    """The defect this unit fixes: ``mesh --owner X note new`` used to silently
     write the configured agent's owner instead of ``X``."""
     result = _invoke(
         ["--owner", "other-agent", "note", "new", "Owned By Other", "--body", "x", "--json"]

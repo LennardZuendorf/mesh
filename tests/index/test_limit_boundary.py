@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from shards.core.notes import create_note
-from shards.index.fallback import search_fallback
-from shards.index.tagpull import tagpull
-from shards.schemas.config import Config
+from mesh.core.notes import create_note
+from mesh.index.fallback import search_fallback
+from mesh.index.tagpull import tagpull
+from mesh.schemas.config import Config
 
 
 def _seed(cfg: Config) -> None:
@@ -47,8 +47,8 @@ def test_a_negative_limit_stays_unbounded(cfg: Config, vault: Path) -> None:
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     """The loaded config for the tmp vault the shared fixture just wrote."""
-    from shards.schemas.config import load_config
+    from mesh.schemas.config import load_config
 
     return load_config()

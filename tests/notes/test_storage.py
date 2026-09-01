@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from shards.storage.files import atomic_write, note_folder
-from shards.storage.locks import LockError, acquire
-from shards.storage.sandbox import safe_resolve
+from mesh.storage.files import atomic_write, note_folder
+from mesh.storage.locks import LockError, acquire
+from mesh.storage.sandbox import safe_resolve
 
 # --------------------------------------------------------------------------- #
 # atomic_write                                                                  #

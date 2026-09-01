@@ -1,7 +1,7 @@
-"""Shared pytest fixtures for the shards test suite.
+"""Shared pytest fixtures for the mesh test suite.
 
 The keystone fixtures land with notes/1: a sandboxed temp vault plus a config
-pointed at it via ``SHARDS_CONFIG_PATH``. Every later feature inherits these, so
+pointed at it via ``MESH_CONFIG_PATH``. Every later feature inherits these, so
 they stay deliberately dependency-free (pure filesystem + env) and rely on
 pytest's ``tmp_path`` / ``monkeypatch`` for automatic per-test cleanup.
 """
@@ -34,9 +34,9 @@ def isolate_daemon_socket(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Point the default daemon socket at a private dir for every test.
 
     ``DaemonClient()`` with no explicit socket resolves ``$XDG_RUNTIME_DIR`` (else
-    ``$HOME/.shards/run/``). Without this fixture any daemon listening on the real
+    ``$HOME/.mesh/run/``). Without this fixture any daemon listening on the real
     user socket answers the suite's reads — a developer who ran the documented
-    ``shards daemon start``, or a CI runner with a leftover daemon, gets a cascade
+    ``mesh daemon start``, or a CI runner with a leftover daemon, gets a cascade
     of failures whose rows come from *another vault entirely*. Worse, the tests
     most affected are the ones asserting the daemon-down fallback: they would be
     cold only by accident of the environment. Autouse so the guarantee is the
@@ -47,7 +47,7 @@ def isolate_daemon_socket(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     short ``/tmp`` prefix also keeps the socket path clear of the 108-byte
     ``AF_UNIX`` limit.
     """
-    run_dir = tempfile.mkdtemp(prefix="shards-rt-")
+    run_dir = tempfile.mkdtemp(prefix="mesh-rt-")
     monkeypatch.setenv("XDG_RUNTIME_DIR", run_dir)
     try:
         yield
@@ -75,15 +75,15 @@ def config_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def shards_config(
+def mesh_config(
     vault: Path,
     config_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path:
-    """Write a minimal config pointing at ``vault`` and export SHARDS_CONFIG_PATH.
+    """Write a minimal config pointing at ``vault`` and export MESH_CONFIG_PATH.
 
     ``monkeypatch.setenv`` is undone automatically after the test, isolating the
-    suite from any real ``~/.shards/config.toml``.
+    suite from any real ``~/.mesh/config.toml``.
     """
     config_path.write_text(
         "\n".join(
@@ -104,7 +104,7 @@ def shards_config(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(config_path))
     # Ensure a stray real agent identity never leaks into config tests.
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     return config_path

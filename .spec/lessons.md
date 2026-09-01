@@ -12,7 +12,7 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 -->
 
 ### A green gate is not a complete feature
-**Pattern:** pytest + mypy + ruff all passed while `shards daemon start` (admin unit) and the MCP server were entirely unbuilt, and while `search --status` was silently dropped on the hybrid path — because no test exercised the missing behaviour. A green gate only proves the tests that exist pass.
+**Pattern:** pytest + mypy + ruff all passed while `mesh daemon start` (admin unit) and the MCP server were entirely unbuilt, and while `search --status` was silently dropped on the hybrid path — because no test exercised the missing behaviour. A green gate only proves the tests that exist pass.
 **Rule:** Verify features against the spec's requirement list and by running the assembled binary end-to-end, not just by gate colour. Cross-check units-built vs required surface before declaring done; a missing verb/flag has no failing test to turn the gate red.
 **Tags:** verification, testing, cli, done-definition
 **Date:** 2026-07-04
@@ -48,13 +48,13 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Date:** 2026-07-04
 
 ### Resolve user paths — expanduser() every config path
-**Pattern:** `SHARDS_CONFIG_PATH` was `expanduser()`'d but `[core].tolaria_path` was not, and `realpath` does not expand `~`. A natural `path = "~/vault"` became a literal `./~/vault` under the process CWD — silently writing the whole vault to the wrong place and rooting the sandbox there.
+**Pattern:** `MESH_CONFIG_PATH` was `expanduser()`'d but `[core].tolaria_path` was not, and `realpath` does not expand `~`. A natural `path = "~/vault"` became a literal `./~/vault` under the process CWD — silently writing the whole vault to the wrong place and rooting the sandbox there.
 **Rule:** Every path that comes from a human-authored config or env var gets `expanduser()` at the parse boundary (a pydantic field validator), consistently across *all* path fields. `realpath`/`resolve` is not a substitute for `~` expansion.
 **Tags:** config, paths, sandbox
 **Date:** 2026-07-04
 
 ### Instant CLI: import heavy and daemon-only deps lazily
-**Pattern:** `index/watch.py` imported `watchdog.observers` at module top, and the CLI entrypoint pulled `watch` in transitively — so every `shards note new` / `task claim` loaded watchdog and its fsevents C-extension though only the daemon process ever instantiates an `Observer`, taxing the "instant CLI, heavy work in the daemon" mandate on every invocation.
+**Pattern:** `index/watch.py` imported `watchdog.observers` at module top, and the CLI entrypoint pulled `watch` in transitively — so every `mesh note new` / `task claim` loaded watchdog and its fsevents C-extension though only the daemon process ever instantiates an `Observer`, taxing the "instant CLI, heavy work in the daemon" mandate on every invocation.
 **Rule:** Keep daemon-only / heavy imports out of any module on the CLI import path. Import them lazily inside the function that needs them (`Watcher.start()`), so command startup pays only for what it uses.
 **Tags:** cli, startup, performance, imports
 **Date:** 2026-07-04
@@ -72,7 +72,7 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Date:** 2026-07-05
 
 ### A scope claim must cover the process boundary, not just in-process walks
-**Pattern:** an analysis enumerated five in-process vault walks, concluded "shards only ever touches `notes/` and `tasks/`", and shipped that claim in `config.example.toml`. It missed `src/shards/index/indexed_client.py:309`, where `full_rebuild()` hands the *whole configured root* to the external `indexed` binary — a traversal that happens outside the process the walks were enumerated in.
+**Pattern:** an analysis enumerated five in-process vault walks, concluded "mesh only ever touches `notes/` and `tasks/`", and shipped that claim in `config.example.toml`. It missed `src/mesh/index/indexed_client.py:309`, where `full_rebuild()` hands the *whole configured root* to the external `indexed` binary — a traversal that happens outside the process the walks were enumerated in.
 **Rule:** When claiming what a tool traverses, enumerate every path that escapes the process — subprocess arguments, external indexers, watchers — not only the in-process iterators.
 **Tags:** scope, spec-accuracy, subprocess, vault, indexed
 **Date:** 2026-08-20
@@ -96,7 +96,7 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Date:** 2026-08-23
 
 ### A default written into a config file is not the same as a default in code
-**Pattern:** the substring fallback was fixed to apply `[search].threshold` only when a caller set it explicitly — then `shards init` wrote `threshold = 0.65` into every config it generated, which made it explicit and restored the exact behaviour the fix removed. Body search returned `[]` on every fresh install. The unit's own test passed because its fixture hand-wrote a config shape `init` cannot produce.
+**Pattern:** the substring fallback was fixed to apply `[search].threshold` only when a caller set it explicitly — then `mesh init` wrote `threshold = 0.65` into every config it generated, which made it explicit and restored the exact behaviour the fix removed. Body search returned `[]` on every fresh install. The unit's own test passed because its fixture hand-wrote a config shape `init` cannot produce.
 **Rule:** when behaviour keys off "did the user set this?", the tool's own scaffolding must not answer yes on the user's behalf. Omit defaulted keys from generated config, and write the regression test *through* the generator rather than against a hand-built fixture.
 **Tags:** config, defaults, init, search, test-fixtures
 **Date:** 2026-08-23
@@ -114,7 +114,19 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Date:** 2026-08-23
 
 ### Serialisation defaults leak into files other tools have to read
-**Pattern:** binding one `datetime` object to both `created` and `updated` made PyYAML emit an anchor/alias pair (`created: &id001 …` / `updated: *id001`) in every file shards created. Valid YAML, and shards round-tripped it fine — but a restricted frontmatter parser reads `updated` as the literal string `*id001`, so the breakage landed entirely on the coexisting tool the spec promises to be safe with. `atomic_write` had the same shape of bug: `mkstemp` creates 0600 and `os.replace` carried that onto a file another tool had checked in at 0644.
+**Pattern:** binding one `datetime` object to both `created` and `updated` made PyYAML emit an anchor/alias pair (`created: &id001 …` / `updated: *id001`) in every file mesh created. Valid YAML, and mesh round-tripped it fine — but a restricted frontmatter parser reads `updated` as the literal string `*id001`, so the breakage landed entirely on the coexisting tool the spec promises to be safe with. `atomic_write` had the same shape of bug: `mkstemp` creates 0600 and `os.replace` carried that onto a file another tool had checked in at 0644.
 **Rule:** "the Markdown stays clean" is a claim about what *other* programs can read, so audit the bytes on disk, not the round-trip through your own reader. Enforce it at the single serialisation boundary — a dumper that cannot emit anchors, a write that preserves the destination's mode — so no caller can reintroduce it.
 **Tags:** markdown, yaml, interop, permissions, atomicity
 **Date:** 2026-08-23
+
+### A word-boundary regex misses underscore-glued identifiers
+**Pattern:** renaming the project's identifier prefix (`shards` → `mesh`) needed to hit `shards_note_get`, `SHARDS_AGENT`, and `mcp__shards__shards_note_get` alike. A `\bshards\b` regex looks like the obviously-safe choice, but `\b` does not treat `_` as a word boundary — Python (and most regex flavors') `\w` includes `_` — so it silently fails to match "shards" inside any snake_case or dunder-joined identifier, exactly the places a rename matters most.
+**Rule:** when renaming an identifier used as a prefix/component of snake_case or double-underscore-joined names, use a plain substring replace instead of `\b`-bounded regex — but verify first that the old token never occurs as a substring of an unrelated word, or the plain replace becomes its own hazard.
+**Tags:** rename, regex, tooling, refactor
+**Date:** 2026-09-01
+
+### A rename can produce a self-referential redundant phrase
+**Pattern:** the product's own description already used "mesh" as a generic noun ("a mesh for multi-agent collaboration"), so renaming the product identifier `shards` → `mesh` turned "the shards mesh" (plugin/marketplace descriptions) into "the mesh mesh" — a blind, token-correct substitution that broke prose fluency it never touched syntactically.
+**Rule:** after any bulk rename where the new token can also occur as an ordinary word, grep for the doubled token ("`<new> <new>`", case-insensitive) across every touched file and hand-fix the hits — don't trust the substitution pass alone to leave prose readable.
+**Tags:** rename, prose, review, tooling
+**Date:** 2026-09-01

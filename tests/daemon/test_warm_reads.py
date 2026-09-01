@@ -3,7 +3,7 @@
 Before this unit the daemon accelerated almost nothing: eight of nine dispatch
 slots were permanent ``503`` stubs, so every ``note list`` / ``task list`` /
 ``status`` / tag pull silently walked and YAML-parsed the whole vault while the
-warm :class:`~shards.index.warm.VaultIndex` held that exact frontmatter in RAM.
+warm :class:`~mesh.index.warm.VaultIndex` held that exact frontmatter in RAM.
 Four list-shaped reads are now bound to that index — ``note.list``, ``task.list``,
 ``vault.status``, ``search.tag_pull`` — and the point reads and ``indexed``
 passthroughs are gone.
@@ -41,17 +41,17 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.core.notes import _iter_note_files, in_note_scope
-from shards.core.search import hit_dict
-from shards.core.tasks import _iter_task_files, in_task_scope
-from shards.daemon.client import DaemonClient
-from shards.index.warm import VaultIndex, iter_vault_md
-from shards.schemas.config import Config, load_config
-from shards.schemas.note import Note
+from mesh.cli.__main__ import app
+from mesh.core.notes import _iter_note_files, in_note_scope
+from mesh.core.search import hit_dict
+from mesh.core.tasks import _iter_task_files, in_task_scope
+from mesh.daemon.client import DaemonClient
+from mesh.index.warm import VaultIndex, iter_vault_md
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.note import Note
 from tests.daemon.conftest import running_daemon
 
-_AGENT = "test-agent"  # matches the ``shards_config`` fixture's [core].agent
+_AGENT = "test-agent"  # matches the ``mesh_config`` fixture's [core].agent
 _OTHER = "other-agent"
 
 
@@ -61,7 +61,7 @@ _OTHER = "other-agent"
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -227,7 +227,7 @@ def seeded_vault(vault: Path) -> Path:
         "body",
     )
 
-    # Coexisting othertool markdown: no shards id, so it is invisible to note/task
+    # Coexisting othertool markdown: no mesh id, so it is invisible to note/task
     # list but part of the search corpus.
     _write(
         vault / "notes" / "othertool.md", {"title": "Foreign", "tags": ["shared"]}, "foreign body"
@@ -374,7 +374,7 @@ def test_activity_recent_rows_carry_owner_and_claimed_by(reads: DaemonClient, cf
         assert set(row.keys()) == {"id", "type", "title", "path", "mtime", "owner", "claimed_by"}
 
 
-def test_note_list_surfaces_only_shards_notes(reads: DaemonClient, cfg: Config) -> None:
+def test_note_list_surfaces_only_mesh_notes(reads: DaemonClient, cfg: Config) -> None:
     """Foreign and malformed files are skipped identically on both paths."""
     assert set(_ids(reads.note_list(cfg, limit=None), "note")) == {"n-alpha", "n-beta", "n-proj"}
 
@@ -444,7 +444,7 @@ def test_tag_pull_includes_foreign_files(reads: DaemonClient, cfg: Config) -> No
     """A tag pull covers the *whole* corpus — coexisting othertool files included.
 
     This is the property that forced the warm index to hold id-less rows too: a
-    warm tag pull that saw only shards entities would silently drop foreign hits
+    warm tag pull that saw only mesh entities would silently drop foreign hits
     the disk scan returns, which is a contract change rather than an acceleration.
     """
     hits = reads.tag_pull(cfg, tags=["shared"], limit=-1)
@@ -491,9 +491,9 @@ def _explode(*_args: object, **_kwargs: object) -> Any:
 
 
 _WALKERS: dict[str, str] = {
-    "task.list": "shards.core.tasks._iter_task_files",
-    "note.list": "shards.core.notes._iter_note_files",
-    "search.tag_pull": "shards.index.tagpull.iter_corpus",
+    "task.list": "mesh.core.tasks._iter_task_files",
+    "note.list": "mesh.core.notes._iter_note_files",
+    "search.tag_pull": "mesh.index.tagpull.iter_corpus",
 }
 
 
@@ -705,14 +705,14 @@ def test_vault_status_handler_does_no_disk_scan(
 
     ``DaemonServer._dispatch`` runs handlers synchronously on the event loop, so a
     whole-vault ``find_dangling`` there would block every other agent's warm read
-    behind one ``shards status``. The handler is dispatched directly here with the
+    behind one ``mesh status``. The handler is dispatched directly here with the
     disk halves patched to raise: it must still answer.
     """
     with running_daemon(socket_path, config=cfg) as server:
-        monkeypatch.setattr("shards.core.lenses.find_dangling", _explode)
-        monkeypatch.setattr("shards.core.lenses.scan_stale_locks", _explode)
-        monkeypatch.setattr("shards.core.notes._iter_note_files", _explode)
-        monkeypatch.setattr("shards.core.tasks._iter_task_files", _explode)
+        monkeypatch.setattr("mesh.core.lenses.find_dangling", _explode)
+        monkeypatch.setattr("mesh.core.lenses.scan_stale_locks", _explode)
+        monkeypatch.setattr("mesh.core.notes._iter_note_files", _explode)
+        monkeypatch.setattr("mesh.core.tasks._iter_task_files", _explode)
         line = (json.dumps({"id": "s", "method": "vault.status", "params": {}}) + "\n").encode()
         reply = server._dispatch(line)
 
@@ -732,8 +732,8 @@ def test_warm_vault_status_never_walks_the_entity_folders(
     """
     with running_daemon(socket_path, config=cfg):
         client = DaemonClient(socket_path=socket_path)
-        monkeypatch.setattr("shards.core.notes._iter_note_files", _explode)
-        monkeypatch.setattr("shards.core.tasks._iter_task_files", _explode)
+        monkeypatch.setattr("mesh.core.notes._iter_note_files", _explode)
+        monkeypatch.setattr("mesh.core.tasks._iter_task_files", _explode)
         report = client.vault_status(cfg)
 
     assert report["notes"] == 3
@@ -837,7 +837,7 @@ def test_cli_read_output_is_identical_warm_and_cold(
     empty.mkdir()
     cold_out = _cli_outputs(empty, monkeypatch)
 
-    with running_daemon(sock_dir / "shards.sock", config=cfg):
+    with running_daemon(sock_dir / "mesh.sock", config=cfg):
         warm_out = _cli_outputs(sock_dir, monkeypatch)
 
     for args, cold_text, warm_text in zip(_CLI_READS, cold_out, warm_out, strict=True):
@@ -857,7 +857,7 @@ def test_writes_still_work_with_the_daemon_up(
     """Writes bypass the socket entirely — the daemon is never in a write path."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(sock_dir))
     runner = CliRunner()
-    with running_daemon(sock_dir / "shards.sock", config=cfg):
+    with running_daemon(sock_dir / "mesh.sock", config=cfg):
         created = runner.invoke(app, ["--quiet", "task", "new", "Fresh Work"])
         assert created.exit_code == 0, created.output
         claimed = runner.invoke(app, ["--quiet", "task", "claim", created.stdout.strip()])
@@ -876,7 +876,7 @@ def test_index_holds_foreign_rows_in_the_corpus_only(seeded_vault: Path) -> None
     index.reparse(foreign)
     index.reparse(seeded_vault / "notes" / "n-alpha.md")
 
-    assert len(index) == 1  # shards entities only
+    assert len(index) == 1  # mesh entities only
     assert [e.id for e in index.entries()] == ["n-alpha"]
     assert {str(e.path) for e in index.corpus()} == {
         str(foreign),
@@ -924,7 +924,7 @@ def test_index_moves_an_id_between_paths_without_leaking(vault: Path) -> None:
     The index no longer infers that a re-parsed id means the previous holder of
     that id must be gone — that inference is precisely what collapsed two files
     sharing an id. A move is instead driven the way the filesystem reports it, and
-    the way :meth:`~shards.index.watcher.Watcher.handle_event` drives it: evict the
+    the way :meth:`~mesh.index.watcher.Watcher.handle_event` drives it: evict the
     source, re-parse the destination.
     """
     first = _note(vault, note_id="n-move", title="Move", note_type="decision")
@@ -941,7 +941,7 @@ def test_index_moves_an_id_between_paths_without_leaking(vault: Path) -> None:
     assert [str(e.path) for e in index.corpus()] == [str(moved)]
 
 
-def test_a_file_that_loses_its_shards_id_moves_to_the_corpus_bucket(vault: Path) -> None:
+def test_a_file_that_loses_its_mesh_id_moves_to_the_corpus_bucket(vault: Path) -> None:
     path = _note(vault, note_id="n-drop", title="Drop")
     index = VaultIndex()
     index.reparse(path)
@@ -965,7 +965,7 @@ def test_deleted_methods_have_no_client_verb_and_no_handler(cfg: Config) -> None
     and rebuilding live in the ``indexed`` subprocess — none of them gets faster
     for crossing a socket, and all four client methods had zero callers.
     """
-    from shards.daemon.server import DaemonServer, default_dispatch
+    from mesh.daemon.server import DaemonServer, default_dispatch
 
     server = DaemonServer(Path("/tmp/unused.sock"), config=None)
     assert set(default_dispatch()) == {"ping"}
@@ -1030,7 +1030,7 @@ def linked_vault_config(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyP
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_path))
     return load_config()
 
 

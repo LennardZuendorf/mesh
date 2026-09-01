@@ -25,20 +25,20 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import shards.cli.__main__ as main
-import shards.cli.task as task_cli
-import shards.core.tasks as tasks_core
-import shards.storage.locks as locks_mod
-from shards.cli.__main__ import app
-from shards.core.tasks import (
+import mesh.cli.__main__ as main
+import mesh.cli.task as task_cli
+import mesh.core.tasks as tasks_core
+import mesh.storage.locks as locks_mod
+from mesh.cli.__main__ import app
+from mesh.core.tasks import (
     TaskNotFoundError,
     create_task,
     find_duplicate_title,
     update_task,
 )
-from shards.schemas.config import Config, load_config
-from shards.schemas.task import Task
-from shards.storage.files import task_folder
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.task import Task
+from mesh.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 # t- prefix + one-or-more Crockford base-32 digits (no I, L, O, U), 4+ long.
@@ -46,7 +46,7 @@ _CROCKFORD = set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -75,7 +75,7 @@ def _seed_task(
     blocked_by: list[str] | None = None,
     extra: dict[str, object] | None = None,
 ) -> Path:
-    """Write a shards task straight to disk in the folder matching its status."""
+    """Write a mesh task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -132,7 +132,7 @@ def test_create_task_created_equals_updated(cfg: Config, vault: Path) -> None:
 
 
 def test_create_task_default_owner_from_config(cfg: Config, vault: Path) -> None:
-    # shards_config sets [core].agent = "test-agent".
+    # mesh_config sets [core].agent = "test-agent".
     task = create_task(cfg, "Owned")
     assert task.owner == "test-agent"
 
@@ -545,7 +545,7 @@ def test_update_task_resolves_inside_lock(
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task new                                                          #
+# CLI — mesh task new                                                          #
 # --------------------------------------------------------------------------- #
 
 
@@ -624,7 +624,7 @@ def test_cli_task_new_blocks_blocked_by_stored(cfg: Config, vault: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task update                                                       #
+# CLI — mesh task update                                                       #
 # --------------------------------------------------------------------------- #
 
 
@@ -764,7 +764,7 @@ def test_find_duplicate_title_case_and_whitespace_collide(cfg: Config, vault: Pa
 
 def test_find_duplicate_title_ignores_notes(cfg: Config, vault: Path) -> None:
     """Same-kind only: a note with the same title is invisible to the task check."""
-    from shards.core.notes import create_note
+    from mesh.core.notes import create_note
 
     create_note(cfg, "Shared Title", body="x")
     assert find_duplicate_title(cfg, "Shared Title") is None

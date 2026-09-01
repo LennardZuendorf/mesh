@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from shards.daemon.client import DaemonClient
+from mesh.daemon.client import DaemonClient
 
 
 @contextmanager
@@ -59,7 +59,7 @@ def test_is_up_is_false_against_a_peer_that_rejects_ping(socket_path: Path) -> N
 
     `is_up` documents "never raises" and gates both the search hybrid path and the
     recent-activity notice. An older daemon that does not know `ping` answers 404;
-    that used to escape as an unmapped DaemonError and kill `shards search`.
+    that used to escape as an unmapped DaemonError and kill `mesh search`.
     """
 
     def reject(conn: socket.socket) -> None:
@@ -110,7 +110,7 @@ def test_an_oversized_reply_is_abandoned(
     socket_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A runaway reply must not grow the client's buffer without bound."""
-    from shards.daemon import client as client_module
+    from mesh.daemon import client as client_module
 
     monkeypatch.setattr(client_module, "_MAX_REPLY_BYTES", 4096)
 
@@ -177,7 +177,7 @@ def _sync_start(path: Path) -> Callable[[], None]:
     """Return a callable that starts a second DaemonServer on `path` synchronously."""
     import asyncio as _asyncio
 
-    from shards.daemon.server import DaemonServer
+    from mesh.daemon.server import DaemonServer
 
     def start() -> None:
         loop = _asyncio.new_event_loop()
@@ -194,7 +194,7 @@ def _sync_start(path: Path) -> Callable[[], None]:
 # --------------------------------------------------------------------------- #
 
 
-def test_a_boolean_limit_falls_back_to_the_default(shards_config: Path, socket_path: Path) -> None:
+def test_a_boolean_limit_falls_back_to_the_default(mesh_config: Path, socket_path: Path) -> None:
     """`bool` is an `int` subclass, so `"limit": true` must not mean "limit 1".
 
     The daemon protocol is JSON and the MCP surface is typed by a client, so a
@@ -203,8 +203,8 @@ def test_a_boolean_limit_falls_back_to_the_default(shards_config: Path, socket_p
     """
     import json as _json
 
-    from shards.core.notes import create_note
-    from shards.schemas.config import load_config
+    from mesh.core.notes import create_note
+    from mesh.schemas.config import load_config
     from tests.daemon.conftest import running_daemon
 
     config = load_config()

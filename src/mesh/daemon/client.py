@@ -1,0 +1,655 @@
+"""Synchronous NDJSON client for the mesh daemon, with file-op fallback.
+
+The daemon is an *accelerator, never a gate*: every read has a daemon-down
+fallback and every write bypasses the socket entirely (writes go straight through
+``core``/``storage``, so no write method lives here). The client is deliberately
+synchronous and ``asyncio``-free — a CLI invocation must feel instant, and the
+warm work lives in the daemon, not at client startup.
+
+:meth:`DaemonClient.call` connects to the unix socket, sends one NDJSON request
+(``{"id","method","params"}``), and returns the ``result`` of the reply. Any
+transport failure — a missing socket, a refused/stale socket, a hung daemon
+(timeout), a mid-response crash, or a truncated/garbled reply — is swallowed and
+the caller's fallback is run instead; the failure is never re-raised. A *live*
+daemon that answers ``ok: false`` surfaces as :class:`DaemonError`, except for the
+fallback-eligible codes, which also run the fallback. :meth:`ping` is the one
+exception: it is a liveness probe with no fallback, so a down daemon propagates.
+
+**One vault, one socket.** :func:`default_socket_path` keys the socket file on a
+digest of the resolved vault root, so a daemon warmed on one vault is not even
+reachable from a CLI configured for another. As a second layer, a config-ful
+daemon names its vault in every reply and :meth:`DaemonClient._check_vault`
+refuses a mismatch — degrading to the file-op fallback, exactly like a daemon-down
+error — which covers the stale daemon still holding the socket the config named
+before an edit. Neither layer can make a read *fail*: the daemon accelerates, it
+never gates.
+
+**The wired read verbs.** :meth:`~DaemonClient.note_list`,
+:meth:`~DaemonClient.task_list`, :meth:`~DaemonClient.vault_status` and
+:meth:`~DaemonClient.tag_pull` are the list-shaped reads the daemon can actually
+accelerate: each is an O(vault) walk plus a YAML parse per file over metadata the
+warm :class:`~mesh.index.warm.VaultIndex` already holds in RAM. Each ships a
+*normalized filter spec* (built and validated on this side, so a bad ``--sort`` or
+``--since`` fails identically with the daemon down) and each binds the identical
+on-disk selector as its fallback — the same predicate the daemon applies to index
+rows, never a second copy. Point reads (``note.get`` / ``task.get``) are
+deliberately **not** here: the id already determines the path, so a point read is
+one ``open()``, and since the index holds no bodies a warm ``get`` would hit disk
+anyway — the socket round-trip would buy nothing.
+
+**List rows carry no body.** The index holds frontmatter only, so the views these
+verbs return have ``body=""`` on *both* the warm and the fallback path (parity is
+the point). No list consumer reads a list row's body; a caller that needs one
+reads it per id, which is what ``session-start`` does for its live queue.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+import time
+import uuid
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import msgspec
+
+from mesh.core.errors import MeshError
+from mesh.core.notes import NoteFilter, NoteView, list_notes
+from mesh.core.tasks import TaskFilter, TaskView, list_tasks
+from mesh.index.tagpull import TagPullFilter, tagpull
+from mesh.index.warm import DEFAULT_RECENT_LIMIT, scan_recent
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.note import Note
+from mesh.schemas.search import SearchResult
+from mesh.schemas.task import Task
+
+# The socket file is keyed on the vault it serves — ``mesh-<digest>.sock`` — so
+# two vaults on one machine can never meet on one socket. ``mesh.sock`` (no
+# digest) is the vault-unknown name: a process with no resolvable config has no
+# vault to key on, and a path helper must still answer.
+_SOCKET_NAME = "mesh.sock"
+_SOCKET_PREFIX = "mesh-"
+_VAULT_DIGEST_CHARS = 12
+_DEFAULT_TIMEOUT = 5.0
+# A change notification is a courtesy, not a dependency: keep it short enough
+# that a wedged daemon can never become a write-latency problem.
+_NOTIFY_TIMEOUT = 1.0
+_RECV_CHUNK = 4096
+# Ceiling on one RPC reply. Far above any real vault's list payload, low enough
+# that a wedged or hostile peer cannot grow the client's buffer without bound.
+_MAX_REPLY_BYTES = 64 * 1024 * 1024
+# RPC error codes eligible for the daemon-down fallback even on a *live* daemon:
+# ``503`` marks a method that is reserved but not yet wired to the daemon, so the
+# CLI degrades to the file-op fallback. Domain errors (2/3/4) are never in here.
+_FALLBACK_CODES: frozenset[int] = frozenset({503})
+# The wired read verbs widen the fallback set to every *server-state* code:
+# ``404`` (the daemon does not know this method — an older binary still running
+# after an upgrade, or a config-less server with no warm index), ``500`` (its
+# handler failed) and ``503``. All three mean "the daemon cannot serve this",
+# which is precisely the condition the file-op fallback exists for; a read must
+# never fail because the accelerator did. Domain codes (2/3/4) stay out — these
+# handlers never raise one, and a genuine domain error must still propagate.
+# ``400`` (the daemon could not parse the request at all — a protocol skew
+# between a new client and an old daemon) belongs here by the same argument:
+# it is a statement about the accelerator, not about the vault.
+_READ_FALLBACK_CODES: frozenset[int] = frozenset({400, 404, 500, 503})
+
+Fallback = Callable[[], Any]
+
+# Returned by the wired read verbs' inner fallback to mean "the daemon could not
+# serve this" — a sentinel rather than ``None`` so it can never be confused with a
+# legitimate ``null`` result off the wire.
+_UNSERVED: Any = object()
+
+
+def vault_id(config: Config) -> str:
+    """The vault identity both ends compare — the ``realpath`` of the vault root.
+
+    ``realpath`` (not the configured spelling) so two configs naming the same
+    folder through a symlink, a ``~`` or a trailing slash resolve to one identity —
+    the same canonicalization :func:`mesh.storage.sandbox.safe_resolve` uses.
+    """
+    return os.path.realpath(config.core.vault_path)
+
+
+def _ambient_vault(config: Config | None) -> str | None:
+    """The vault this process reads: ``config``'s, else the ambient config's.
+
+    ``None`` when no config resolves at all (no file, or a malformed one). A path
+    helper must never raise — a broken config is the CLI boundary's problem to
+    report, not a reason for socket resolution to explode — so the vault-unknown
+    name is the answer here.
+    """
+    if config is not None:
+        return vault_id(config)
+    try:
+        return vault_id(load_config())
+    except (MeshError, OSError, ValueError, msgspec.ValidationError):
+        return None
+
+
+def _socket_dir() -> Path:
+    """``$XDG_RUNTIME_DIR`` when set (an empty value counts as unset), else ``~/.mesh/run``."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    return Path(runtime) if runtime else Path.home() / ".mesh" / "run"
+
+
+def _socket_name(vault: str | None) -> str:
+    """``mesh-<sha256(vault)[:12]>.sock``, or the legacy name when the vault is unknown."""
+    if vault is None:
+        return _SOCKET_NAME
+    digest = hashlib.sha256(vault.encode("utf-8")).hexdigest()[:_VAULT_DIGEST_CHARS]
+    return f"{_SOCKET_PREFIX}{digest}.sock"
+
+
+def notify_change(config: Config, path: Path) -> None:
+    """Tell a running daemon that ``path`` just changed. Best effort, never raises.
+
+    The daemon's warm index is refreshed by the filesystem watcher, but delivery
+    and processing of an inotify event always lag the write that caused it. That
+    lag falls on the commonest agent sequence there is — create then immediately
+    list — where the agent sees a list without its own new entity and concludes
+    the write failed. A one-line poke closes it deterministically.
+
+    This does **not** make the daemon a gatekeeper: the write is already durable
+    on disk before this is called, every failure here is swallowed, and with no
+    daemon running the connect fails immediately (``ENOENT`` on a missing socket
+    node) and costs nothing measurable. The invariant is "the daemon never gates a
+    write", and it still holds — a poke that fails changes nothing but freshness,
+    which the watcher then repairs on its own.
+    """
+    try:
+        client = DaemonClient(config=config, timeout=_NOTIFY_TIMEOUT)
+        client._request("vault.touch", {"path": str(path)})
+    except Exception:  # noqa: BLE001 - freshness is best-effort, writes are not
+        return
+
+
+def default_socket_path(config: Config | None = None) -> Path:
+    """Resolve the daemon socket path for ``config``'s vault.
+
+    ``$XDG_RUNTIME_DIR/mesh-<digest>.sock`` when the runtime dir is set, else
+    ``~/.mesh/run/mesh-<digest>.sock``, where ``<digest>`` is a stable digest
+    of the resolved vault root: **one socket per vault**, so a daemon warmed on
+    one vault is unreachable from a CLI configured for another rather than
+    silently serving it foreign rows.
+
+    ``config`` defaults to the ambient one (``$MESH_CONFIG_PATH``, else
+    ``~/.mesh/config.toml``), which keeps every existing zero-argument caller
+    vault-correct without passing a config down. With no resolvable config the
+    name degrades to the undigested ``mesh.sock``.
+    """
+    return _socket_dir() / _socket_name(_ambient_vault(config))
+
+
+class VaultMismatch(Exception):
+    """The daemon on this socket serves a *different* vault than the caller's.
+
+    Belt to the vault-keyed socket name's braces: it catches the case a socket
+    name cannot — a daemon still running on the vault the config named *before*
+    an edit, holding a socket path that is no longer this vault's. Treated by
+    :meth:`DaemonClient.call` exactly like a transport failure (run the file-op
+    fallback), never surfaced: a read must never fail because the accelerator
+    was pointed at the wrong folder.
+    """
+
+    def __init__(self, expected: str, served: str) -> None:
+        super().__init__(f"daemon serves {served!r}, caller reads {expected!r}")
+        self.expected = expected
+        self.served = served
+
+
+class DaemonError(Exception):
+    """A non-connection error the daemon reported (``ok: false`` envelope).
+
+    Carries the RPC ``code`` and ``message`` so callers can map them to CLI exit
+    codes. Distinct from ``ConnectionRefusedError`` / ``FileNotFoundError``, which
+    signal the daemon is *down* and therefore trigger the fallback path instead.
+    """
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(f"[{code}] {message}")
+        self.code = code
+        self.message = message
+
+
+# --------------------------------------------------------------------------- #
+# Wire codec for list rows                                                     #
+# --------------------------------------------------------------------------- #
+#
+# A list row is ``{"meta": <frontmatter dict>, "path": <str>}``. The frontmatter
+# is kept *nested* rather than merged with ``path`` because ``Note``/``Task``
+# round-trip unknown frontmatter keys through an ``extra`` stash — a merged
+# ``path`` key would be stashed as a foreign frontmatter key and then reappear in
+# every ``--json`` payload. The daemon server imports :func:`entity_row` so the
+# two ends of the codec are written once, in the module that owns the protocol.
+
+
+def entity_row(model: Note, path: Path) -> dict[str, Any]:
+    """Encode one list row for the wire: frontmatter under ``meta``, location under ``path``."""
+    return {"meta": model.model_dump(mode="json"), "path": str(path)}
+
+
+def _wire_list(result: Any, key: str) -> list[Any] | None:
+    """The row list under ``key`` in a reply, or ``None`` for any unexpected shape."""
+    if not isinstance(result, dict):
+        return None
+    rows = result.get(key)
+    return rows if isinstance(rows, list) else None
+
+
+def _decode_rows(result: Any, model: type[Note] | type[Task]) -> list[tuple[Any, Path]] | None:
+    """Decode ``{"entries": [...]}`` into ``(model, path)`` pairs — all or nothing.
+
+    ``None`` means *this reply cannot be trusted*, and the caller must run its
+    file-op fallback rather than hand back what it managed to parse. A single
+    undecodable row is enough: on disk a malformed file is **data** and skipping
+    it is the documented tolerance, but on the wire it is **protocol skew** — an
+    older daemon still running after a schema change answers ``ok: true`` with
+    rows that no longer validate, and silently returning a short (or empty) list
+    would show the user "no notes" while the vault is full of them. That is the
+    accelerator gating the read, which invariant 1 forbids.
+    """
+    rows = _wire_list(result, "entries")
+    if rows is None:
+        return None
+    decoded: list[tuple[Any, Path]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        meta = row.get("meta")
+        path = row.get("path")
+        if not isinstance(meta, dict) or not isinstance(path, str):
+            return None
+        try:
+            decoded.append((model.model_validate(meta), Path(path)))
+        except (msgspec.ValidationError, TypeError):
+            return None
+    return decoded
+
+
+class DaemonClient:
+    """A thin, synchronous NDJSON client over the daemon's unix socket."""
+
+    def __init__(
+        self,
+        socket_path: Path | None = None,
+        *,
+        config: Config | None = None,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> None:
+        # The vault this client reads. Resolved once, from ``config`` when given
+        # and from the ambient config otherwise, and used for both halves of the
+        # vault guard: which socket to dial, and which vault a reply must name.
+        self._vault = _ambient_vault(config)
+        self._socket_path = (
+            Path(socket_path)
+            if socket_path is not None
+            else _socket_dir() / _socket_name(self._vault)
+        )
+        self._timeout = timeout
+
+    # -- transport --------------------------------------------------------- #
+
+    def _request(self, method: str, params: dict[str, Any]) -> Any:
+        """Send one NDJSON request and return the reply's ``result``.
+
+        Raises an ``OSError`` (missing/refused socket, timeout, broken pipe) when
+        the exchange fails and ``json.JSONDecodeError`` on a truncated reply — both
+        caught by :meth:`call` — :class:`VaultMismatch` when the reply names a
+        vault other than this client's, and :class:`DaemonError` when the daemon
+        answers with an ``ok: false`` envelope.
+        """
+        request = {"id": str(uuid.uuid4()), "method": method, "params": params}
+        payload = (json.dumps(request) + "\n").encode("utf-8")
+        buf = bytearray()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(self._timeout)
+            sock.connect(str(self._socket_path))
+            sock.sendall(payload)
+            # ``settimeout`` bounds each individual ``recv``, not the exchange. A
+            # daemon that is alive but trickling bytes therefore resets the clock on
+            # every chunk and blocks the CLI forever — the "hung daemon" case the
+            # fallback exists for. Hold one monotonic deadline across the whole
+            # read, and cap the reply so a runaway daemon cannot exhaust memory
+            # either. Both failure modes raise ``OSError``, which every caller
+            # already treats as "the accelerator is unavailable".
+            deadline = time.monotonic() + self._timeout
+            while b"\n" not in buf:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("daemon reply exceeded the read deadline")
+                sock.settimeout(remaining)
+                chunk = sock.recv(_RECV_CHUNK)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > _MAX_REPLY_BYTES:
+                    raise OSError("daemon reply exceeded the maximum size")
+        line = bytes(buf).split(b"\n", 1)[0]
+        response: dict[str, Any] = json.loads(line)
+        self._check_vault(response)
+        if not response.get("ok", False):
+            error = response.get("error") or {}
+            raise DaemonError(int(error.get("code", 1)), str(error.get("message", "error")))
+        return response.get("result")
+
+    def _check_vault(self, response: dict[str, Any]) -> None:
+        """Raise :class:`VaultMismatch` if the reply came from another vault.
+
+        Checked *before* the ``ok`` flag, so a foreign daemon's error envelope
+        degrades on the same path its success envelope would. A reply carrying no
+        ``vault`` is unverifiable and therefore allowed: only a config-ful server
+        stamps one, and a config-less server has no vault rows to leak — it serves
+        ``ping`` and answers ``404`` for every read.
+        """
+        served = response.get("vault")
+        if self._vault is not None and isinstance(served, str) and served != self._vault:
+            raise VaultMismatch(self._vault, served)
+
+    def call(
+        self,
+        method: str,
+        params: dict[str, Any],
+        fallback: Fallback,
+        *,
+        fallback_codes: frozenset[int] = _FALLBACK_CODES,
+    ) -> Any:
+        """Call ``method`` over the socket; run ``fallback`` if the daemon is down.
+
+        Any transport failure — a missing/refused socket (``OSError``), a hung
+        daemon (``TimeoutError``), a mid-response crash
+        (``BrokenPipeError`` / ``ConnectionResetError``), or a truncated reply
+        (``json.JSONDecodeError``) — is swallowed and the fallback's result
+        returned; it is never re-raised. A *live* daemon's ``ok: false`` reply
+        surfaces as :class:`DaemonError`, except for ``fallback_codes``, which also
+        run the fallback. Every other code (domain errors 2/3/4) propagates.
+
+        A :class:`VaultMismatch` — the daemon on this socket serves a different
+        vault — falls back *unconditionally*, whatever ``fallback_codes`` says:
+        there is no read for which another vault's answer is better than this
+        vault's own disk.
+        """
+        try:
+            return self._request(method, params)
+        except (OSError, json.JSONDecodeError, VaultMismatch):
+            return fallback()
+        except DaemonError as exc:
+            if exc.code in fallback_codes:
+                return fallback()
+            raise
+
+    def _warm(self, method: str, params: dict[str, Any]) -> Any:
+        """Ask the daemon for a wired read; :data:`_UNSERVED` when it cannot answer.
+
+        Wraps :meth:`call` with the read verbs' wider fallback-code set and a
+        sentinel fallback, so each verb decides *how* to compute its own on-disk
+        result instead of building it eagerly for a call that will usually succeed.
+        """
+        return self.call(method, params, lambda: _UNSERVED, fallback_codes=_READ_FALLBACK_CODES)
+
+    # -- verbs ------------------------------------------------------------- #
+
+    def ping(self) -> Any:
+        """Liveness probe — no fallback; a down daemon propagates the error."""
+        return self._request("ping", {})
+
+    def is_up(self) -> bool:
+        """Whether the daemon answers a liveness ping (never raises).
+
+        A down/absent daemon (missing or refused socket, timeout, garbled reply,
+        or any ``ok: false`` answer — an older binary that does not know ``ping``
+        replies ``404`` rather than failing to connect) yields ``False`` — the single liveness check both the ``search`` hybrid gate
+        and the ``recent-activity`` degradation notice share. Liveness is
+        *per-vault*: a daemon answering for another vault is no accelerator for
+        this one, so a :class:`VaultMismatch` reads as down too.
+        """
+        try:
+            self.ping()
+        except (OSError, json.JSONDecodeError, VaultMismatch, DaemonError):
+            return False
+        return True
+
+    def note_list(
+        self,
+        config: Config,
+        *,
+        tags: list[str] | None = None,
+        any_tag: bool = False,
+        owner: str | None = None,
+        note_type: str | None = None,
+        since: str | None = None,
+        sort: str = "updated",
+        limit: int | None = None,
+    ) -> list[NoteView]:
+        """List notes — warm-index served when the daemon is up, disk-walked when down.
+
+        The spec is built (and validated) here, so an invalid ``sort``/``since``
+        raises ``ValueError`` on both paths before any socket call. The fallback
+        is :func:`~mesh.core.notes.list_notes` — the same
+        :func:`~mesh.core.notes.select_notes` predicate the daemon applies to
+        index rows, over the on-disk walk instead — so the two results are
+        identical. Returned views carry ``body=""`` (see the module docstring).
+        """
+        spec = NoteFilter.build(
+            tags=tags,
+            any_tag=any_tag,
+            owner=owner,
+            note_type=note_type,
+            since=since,
+            sort=sort,
+            limit=limit,
+        )
+        decoded = _decode_rows(self._warm("note.list", spec.to_params()), Note)
+        if decoded is None:
+            return list_notes(
+                config,
+                tags=tags,
+                any_tag=any_tag,
+                owner=owner,
+                note_type=note_type,
+                since=since,
+                sort=sort,
+                limit=limit,
+            )
+        return [NoteView(note=note, body="", path=path) for note, path in decoded]
+
+    def task_list(
+        self,
+        config: Config,
+        *,
+        status: str | None = None,
+        owner: str | None = None,
+        mine: bool = False,
+        tags: list[str] | None = None,
+        any_tag: bool = False,
+        project: str | None = None,
+        since: str | None = None,
+        stale: str | None = None,
+        available: bool = False,
+        sort: str = "updated",
+        limit: int | None = None,
+    ) -> list[TaskView]:
+        """List tasks — warm-index served when the daemon is up, disk-walked when down.
+
+        Mirrors :meth:`note_list`; ``mine`` is resolved against ``config.agent``
+        here and travels with the request, because the daemon's own configured
+        identity is not the calling agent's. ``status`` accepts a comma-separated
+        set (team-awareness/4); ``stale`` is the inverse of ``since`` over the
+        same ``updated`` field; ``available`` is the single takeable-work filter
+        and ``sort`` accepts ``"priority"`` (team-awareness/5) — see
+        :class:`~mesh.core.tasks.TaskFilter` for the exact semantics, built once
+        here so both the warm request and the on-disk fallback validate
+        identically before any socket call.
+        """
+        spec = TaskFilter.build(
+            config,
+            status=status,
+            owner=owner,
+            mine=mine,
+            tags=tags,
+            any_tag=any_tag,
+            project=project,
+            since=since,
+            stale=stale,
+            available=available,
+            sort=sort,
+            limit=limit,
+        )
+        decoded = _decode_rows(self._warm("task.list", spec.to_params()), Task)
+        if decoded is None:
+            return list_tasks(
+                config,
+                status=status,
+                owner=owner,
+                mine=mine,
+                tags=tags,
+                any_tag=any_tag,
+                project=project,
+                since=since,
+                stale=stale,
+                available=available,
+                sort=sort,
+                limit=limit,
+            )
+        return [TaskView(task=task, body="", path=path) for task, path in decoded]
+
+    def tag_pull(
+        self,
+        config: Config,
+        *,
+        tags: list[str] | None = None,
+        type_filter: str | None = None,
+        owner: str | None = None,
+        status: str | None = None,
+        limit: int = 10,
+    ) -> list[SearchResult]:
+        """Frontmatter tag pull — warm-index served when up, corpus-walked when down.
+
+        The tag pull is a pure metadata filter over the *whole* corpus (foreign
+        files included, surfacing with ``id=None``), which is exactly what the
+        index holds — so the warm answer is exact, not approximate.
+        """
+        spec = TagPullFilter.build(
+            tags=tags,
+            type_filter=type_filter,
+            owner=owner,
+            status=status,
+            limit=limit,
+        )
+        hits = _decode_results(self._warm("search.tag_pull", spec.to_params()))
+        if hits is None:
+            return tagpull(
+                config,
+                tags=tags,
+                type_filter=type_filter,
+                owner=owner,
+                status=status,
+                limit=limit,
+            )
+        return hits
+
+    def vault_status(self, config: Config) -> dict[str, Any]:
+        """Vault health — warm counts when the daemon is up, a direct scan when down.
+
+        Same payload either way: note count, tasks-by-status, freshness, dangling
+        links, stale locks.
+
+        The daemon ships only the half its index can derive — note count, task
+        statuses, the freshness row — and *this* side finishes the report through
+        :func:`mesh.core.lenses.status_report`. The remainder reads note/task
+        bodies (dangling links) and lists lock files off disk, and the daemon
+        dispatches handlers synchronously on its event loop, so computing it there
+        would block every other agent's warm read behind one ``mesh status``.
+        Here it blocks only this invocation. A reply that is missing or ill-typed
+        is treated as unserved: the two primitives are then computed from the same
+        :func:`mesh.core.lenses.status_inputs` over the on-disk lenses, so the
+        report is never returned half-built.
+        """
+        # Imported lazily: ``core.lenses`` imports this module (for the project
+        # lens's task list), so a module-level import here would be circular.
+        from mesh.core.lenses import status_inputs, status_report
+
+        served: dict[str, Any] | None = _decode_status(self._warm("vault.status", {}))
+        if served is None:
+            served = {
+                **status_inputs(list_notes(config, limit=None), list_tasks(config, limit=None)),
+                "newest": scan_recent(config, 1),
+            }
+        return status_report(
+            config,
+            note_count=served["note_count"],
+            task_statuses=served["task_statuses"],
+            newest=served["newest"],
+        )
+
+    def activity_recent(self, config: Config, limit: int = DEFAULT_RECENT_LIMIT) -> Any:
+        """Most-recently-modified entries; falls back to a dir scan when down.
+
+        A live daemon answers from its warm in-process index; when the socket is
+        unreachable the fallback runs :func:`mesh.index.warm.scan_recent`, an
+        mtime-sorted scan of ``notes/`` and ``tasks/``. Both return the same
+        ``{"entries": [...]}`` shape.
+
+        ``fallback_codes`` is empty here: a config-less daemon does not register
+        ``activity.recent`` at all and answers ``404``, which must *propagate* (it
+        is a server-state signal the ``recent-activity`` lens reports on), so only
+        a genuine socket-down error triggers the scan fallback.
+        """
+        return self.call(
+            "activity.recent",
+            {"limit": limit},
+            lambda: {"entries": scan_recent(config, limit)},
+            fallback_codes=frozenset(),
+        )
+
+
+def _decode_results(result: Any) -> list[SearchResult] | None:
+    """Decode ``{"results": [...]}`` into hits — all or nothing (see :func:`_decode_rows`)."""
+    rows = _wire_list(result, "results")
+    if rows is None:
+        return None
+    hits: list[SearchResult] = []
+    for row in rows:
+        try:
+            hits.append(msgspec.convert(row, SearchResult))
+        except (msgspec.ValidationError, TypeError):
+            return None
+    return hits
+
+
+def _decode_status(result: Any) -> dict[str, Any] | None:
+    """Decode the ``vault.status`` half-report, or ``None`` if it is not usable.
+
+    The daemon ships only what its index can derive — ``note_count``,
+    ``task_statuses`` and the one-row ``newest`` window; anything missing or
+    ill-typed means the client computes the whole report itself. ``newest``'s
+    element shape is validated too (a dict carrying a numeric ``mtime``), all or
+    nothing — matching the sibling decoders (:func:`_decode_rows`,
+    :func:`_decode_results`): a version-skewed daemon answering ``ok: true`` with
+    a ``newest`` row missing ``mtime`` must fall back to the on-disk scan rather
+    than let :func:`mesh.core.lenses.status_report`'s ``newest[0]["mtime"]``
+    raise a bare ``KeyError`` past the CLI boundary mapper.
+    """
+    if not isinstance(result, dict):
+        return None
+    note_count = result.get("note_count")
+    statuses = result.get("task_statuses")
+    newest = result.get("newest")
+    if isinstance(note_count, bool) or not isinstance(note_count, int):
+        return None
+    if not isinstance(statuses, list) or not all(isinstance(s, str) for s in statuses):
+        return None
+    if not isinstance(newest, list):
+        return None
+    for row in newest:
+        if not isinstance(row, dict):
+            return None
+        mtime = row.get("mtime")
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)):
+            return None
+    return {"note_count": note_count, "task_statuses": statuses, "newest": newest}

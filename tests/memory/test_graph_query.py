@@ -1,4 +1,4 @@
-"""cli-toolset-rework/3 — graph-query lens: ``core/context.py`` + ``shards graph``.
+"""cli-toolset-rework/3 — graph-query lens: ``core/context.py`` + ``mesh graph``.
 
 ``graph_query`` promotes ``build_context``'s BFS-over-``related`` traversal to a
 first-class, directly queryable surface (root ``.spec/tech.md`` § Implemented
@@ -21,11 +21,11 @@ Acceptance coverage mirrors ``tests/memory/test_build_context.py``:
   a single already-fetched :class:`GraphResult`; resolving get_note/get_task a
   second time for either output would be a bug this suite catches.
 * **no hybrid-search dependency** — ``core/context.py`` imports neither
-  ``shards.index`` nor ``shards.core.search``.
-* **CLI** — ``shards graph`` is a leaf command; ``--json`` emits ``{seed, nodes,
+  ``mesh.index`` nor ``mesh.core.search``.
+* **CLI** — ``mesh graph`` is a leaf command; ``--json`` emits ``{seed, nodes,
   edges}``; default text is the readable tree; ``--quiet`` is ids only; unknown
   seed exits 3.
-* **MCP** — ``shards_graph`` is registered read-only and delegates to
+* **MCP** — ``mesh_graph`` is registered read-only and delegates to
   ``core.context.graph_query``.
 
 ``--direction`` (team-awareness/1) adds backlink traversal on top of the same
@@ -48,11 +48,11 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import shards.core.context as context_module
-from shards.cli.__main__ import app
-from shards.core.context import GraphResult, SeedNotFoundError, graph_query
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder, task_folder
+import mesh.core.context as context_module
+from mesh.cli.__main__ import app
+from mesh.core.context import GraphResult, SeedNotFoundError, graph_query
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder, task_folder
 
 # --------------------------------------------------------------------------- #
 # Fixtures & seeding helpers (mirrors test_build_context.py)                   #
@@ -60,7 +60,7 @@ from shards.storage.files import note_folder, task_folder
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -74,7 +74,7 @@ def _seed_note(
     owner: str = "test-agent",
     body: str = "Body line.",
 ) -> Path:
-    """Write a shards note with an explicit ``related`` frontmatter list."""
+    """Write a mesh note with an explicit ``related`` frontmatter list."""
     when = datetime.now(UTC)
     meta: dict[str, Any] = {
         "id": note_id,
@@ -105,7 +105,7 @@ def _seed_task(
     owner: str = "test-agent",
     body: str = "Task body.",
 ) -> Path:
-    """Write a shards task with an explicit ``related`` frontmatter list."""
+    """Write a mesh task with an explicit ``related`` frontmatter list."""
     when = datetime.now(UTC)
     meta: dict[str, Any] = {
         "id": task_id,
@@ -473,7 +473,7 @@ def test_json_and_tree_are_pure_presentations_no_second_traversal(
 
 def test_build_context_and_graph_query_agree_on_ids(cfg: Config, vault: Path) -> None:
     """graph_query is additive: build_context keeps returning the same entries."""
-    from shards.core.context import build_context
+    from mesh.core.context import build_context
 
     _seed_note(vault, note_id="n-d", title="Dee")
     _seed_note(vault, note_id="n-b", title="Bee", related=["n-d"])
@@ -502,12 +502,12 @@ def test_context_module_has_no_hybrid_search_dependency() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
 
-    assert not any(name.startswith("shards.index") for name in imported)
-    assert not any(name.startswith("shards.core.search") for name in imported)
+    assert not any(name.startswith("mesh.index") for name in imported)
+    assert not any(name.startswith("mesh.core.search") for name in imported)
 
 
 # --------------------------------------------------------------------------- #
-# CLI: shards graph                                                            #
+# CLI: mesh graph                                                            #
 # --------------------------------------------------------------------------- #
 
 
@@ -643,21 +643,21 @@ def test_direction_in_identical_daemon_up_and_down(
 
 
 # --------------------------------------------------------------------------- #
-# MCP: shards_graph                                                            #
+# MCP: mesh_graph                                                            #
 # --------------------------------------------------------------------------- #
 
 
 def test_mcp_tool_registered_read_only(cfg: Config) -> None:
-    import shards.mcp.server as server
+    import mesh.mcp.server as server
 
     tools = {tool.name: tool for tool in asyncio.run(server.app.list_tools())}
-    assert "shards_graph" in tools
-    assert tools["shards_graph"].annotations is not None
-    assert tools["shards_graph"].annotations.readOnlyHint is True
+    assert "mesh_graph" in tools
+    assert tools["mesh_graph"].annotations is not None
+    assert tools["mesh_graph"].annotations.readOnlyHint is True
 
 
 def test_mcp_tool_delegates_to_graph_query(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    import shards.mcp.server as server
+    import mesh.mcp.server as server
 
     sentinel = GraphResult(
         entries=[{"id": "n-seed", "type": "note", "title": "Seed", "path": "/p"}],
@@ -672,20 +672,20 @@ def test_mcp_tool_delegates_to_graph_query(cfg: Config, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(server, "graph_query", _spy)
 
-    out = server.shards_graph(seed_id="n-seed", depth=2)
+    out = server.mesh_graph(seed_id="n-seed", depth=2)
 
     assert out == sentinel.to_dict()
     assert seen == {"seed_id": "n-seed", "depth": 2, "direction": "out"}
 
 
 def test_mcp_tool_direction_passthrough(cfg: Config, vault: Path) -> None:
-    """End-to-end (unmocked): ``shards_graph(direction="in")`` finds a backlink."""
-    import shards.mcp.server as server
+    """End-to-end (unmocked): ``mesh_graph(direction="in")`` finds a backlink."""
+    import mesh.mcp.server as server
 
     _seed_note(vault, note_id="n-b", title="Bee")
     _seed_note(vault, note_id="n-a", title="Ay", related=["n-b"])
 
-    payload = server.shards_graph(seed_id="n-b", depth=1, direction="in")
+    payload = server.mesh_graph(seed_id="n-b", depth=1, direction="in")
 
     assert [n["id"] for n in payload["nodes"]] == ["n-b", "n-a"]
     assert payload["edges"] == [["n-a", "n-b"]]

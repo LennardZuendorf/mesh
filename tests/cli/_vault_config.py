@@ -20,11 +20,11 @@ def point_at(
     *,
     collection: str | None = None,
 ) -> None:
-    """Write a config for ``vault`` at ``cfg_path`` and export $SHARDS_CONFIG_PATH."""
+    """Write a config for ``vault`` at ``cfg_path`` and export $MESH_CONFIG_PATH."""
     lines = ["[core]", f'vault_path = "{vault}"', 'agent = "test-agent"', "", "[search]"]
     if collection is not None:
         lines.append(f'collection = "{collection}"')
     lines.append("hybrid = true")
     cfg_path.write_text("\n".join([*lines, ""]), encoding="utf-8")
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_path))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_path))
+    monkeypatch.delenv("MESH_AGENT", raising=False)

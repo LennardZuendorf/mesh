@@ -5,7 +5,7 @@ Two layers, both proven here:
 * **The socket is vault-scoped.** ``default_socket_path`` keys the socket file on
   a digest of the *resolved vault root*, so two vaults on one machine can never
   meet on one socket. A process with no resolvable config keeps the legacy
-  ``shards.sock`` name rather than failing.
+  ``mesh.sock`` name rather than failing.
 * **Every reply names the vault it came from.** A config-ful server stamps
   ``vault`` into its envelope and the client treats a mismatch exactly like a
   daemon-down transport failure: run the file-op fallback, never raise, never
@@ -27,8 +27,8 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from shards.daemon.client import DaemonClient, default_socket_path, vault_id
-from shards.schemas.config import Config, load_config
+from mesh.daemon.client import DaemonClient, default_socket_path, vault_id
+from mesh.schemas.config import Config, load_config
 from tests.daemon.conftest import running_daemon
 
 _VAULT_SUBDIRS = (
@@ -48,8 +48,8 @@ _VAULT_SUBDIRS = (
 
 
 @pytest.fixture
-def cfg_b(shards_config: Path) -> Config:
-    """The *ambient* config (``$SHARDS_CONFIG_PATH``) — vault B, the caller's."""
+def cfg_b(mesh_config: Path) -> Config:
+    """The *ambient* config (``$MESH_CONFIG_PATH``) — vault B, the caller's."""
     return load_config()
 
 
@@ -139,7 +139,7 @@ def test_socket_name_is_stable_for_one_vault(
 def test_socket_name_follows_the_ambient_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cfg_b: Config
 ) -> None:
-    """The zero-arg call resolves ``$SHARDS_CONFIG_PATH`` — same answer, no arg."""
+    """The zero-arg call resolves ``$MESH_CONFIG_PATH`` — same answer, no arg."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     assert default_socket_path() == default_socket_path(cfg_b)
 
@@ -149,8 +149,8 @@ def test_socket_name_degrades_when_no_config_is_resolvable(
 ) -> None:
     """No config → the legacy name, never an exception out of a path helper."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(tmp_path / "absent.toml"))
-    assert default_socket_path() == tmp_path / "shards.sock"
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(tmp_path / "absent.toml"))
+    assert default_socket_path() == tmp_path / "mesh.sock"
 
 
 def test_socket_name_is_a_digest_of_the_resolved_vault(

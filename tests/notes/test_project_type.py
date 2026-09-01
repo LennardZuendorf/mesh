@@ -23,16 +23,16 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.core.notes import create_note, get_note
-from shards.index.reconcile import reconcile_path
-from shards.schemas.config import Config, load_config
-from shards.schemas.note import Note, NoteType
-from shards.storage.files import note_folder
+from mesh.cli.__main__ import app
+from mesh.core.notes import create_note, get_note
+from mesh.index.reconcile import reconcile_path
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.note import Note, NoteType
+from mesh.storage.files import note_folder
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 

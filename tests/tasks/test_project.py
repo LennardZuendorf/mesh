@@ -2,7 +2,7 @@
 
 A task may carry an optional ``project: <note-id>`` — a *soft* link to a
 ``type: project`` note (no strict validation, like a wikilink). It is a DECLARED
-optional on the :class:`~shards.schemas.task.Task` schema, so it serializes like
+optional on the :class:`~mesh.schemas.task.Task` schema, so it serializes like
 any other known optional (``priority``/``claimed_by``): a task created without a
 project writes ``project: null`` exactly as it writes ``priority: null`` today,
 and a legacy/foreign task file that carries *no* ``project`` key round-trips
@@ -22,17 +22,17 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.core.tasks import create_task, list_tasks, update_task
-from shards.schemas.config import Config, load_config
-from shards.schemas.task import Task
-from shards.storage.files import task_folder
+from mesh.cli.__main__ import app
+from mesh.core.tasks import create_task, list_tasks, update_task
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.task import Task
+from mesh.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -58,7 +58,7 @@ def _seed_task(
     body: str = "Task body.",
     extra: dict[str, object] | None = None,
 ) -> Path:
-    """Write a shards task straight to disk. ``project`` is only added when given."""
+    """Write a mesh task straight to disk. ``project`` is only added when given."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",

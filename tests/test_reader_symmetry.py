@@ -22,14 +22,14 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.schemas.config import Config, load_config
+from mesh.cli.__main__ import app
+from mesh.schemas.config import Config, load_config
 
-pytestmark = pytest.mark.usefixtures("shards_config")
+pytestmark = pytest.mark.usefixtures("mesh_config")
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 

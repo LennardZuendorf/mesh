@@ -1,1 +1,0 @@
-{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"shards session-start --meta-only --json"}]}]}}

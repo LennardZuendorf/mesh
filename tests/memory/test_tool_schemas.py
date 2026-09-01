@@ -2,7 +2,7 @@
 
 Acceptance coverage (``.spec/features/agent-usability/plan.md`` unit 2):
 
-* Every parameter of every registered ``shards_*`` tool carries a non-empty
+* Every parameter of every registered ``mesh_*`` tool carries a non-empty
   ``description`` in the *generated* JSON Schema (not just the Python
   annotation) — the shape a calling agent actually sees via ``tools/list``.
 * ``note_type``/``status`` enum-typed parameters present the full domain
@@ -10,7 +10,7 @@ Acceptance coverage (``.spec/features/agent-usability/plan.md`` unit 2):
   ``typing.get_args(NoteType)``/``get_args(TaskStatus)`` exactly — a schema
   drift (a literal added to or removed from ``schemas/`` without the tool
   catching up) fails this test rather than silently going stale.
-* ``shards_task_list.status`` stays a plain ``str`` (a comma-separated union,
+* ``mesh_task_list.status`` stays a plain ``str`` (a comma-separated union,
   not a single value) — pinned so it is never mistakenly narrowed to a
   single-value enum that would reject valid CSV input.
 * Tool count and per-tool MCP annotation class (read-only / idempotent /
@@ -25,11 +25,11 @@ from typing import Any, get_args
 
 import pytest
 
-import shards.mcp.server as server
-from shards.core.context import _DIRECTIONS
-from shards.core.tasks import _PRIORITY_VALUES
-from shards.schemas.note import NoteType
-from shards.schemas.task import TaskStatus
+import mesh.mcp.server as server
+from mesh.core.context import _DIRECTIONS
+from mesh.core.tasks import _PRIORITY_VALUES
+from mesh.schemas.note import NoteType
+from mesh.schemas.task import TaskStatus
 
 
 def _registered() -> dict[str, Any]:
@@ -80,13 +80,13 @@ def test_every_parameter_of_every_tool_has_a_nonempty_description() -> None:
 def test_no_tool_is_exempt() -> None:
     """Every registered tool has at least one parameter — none silently skips
     the sweep above by having an empty ``properties`` object — except
-    ``shards_health`` (agent-usability/4), which is genuinely parameterless:
+    ``mesh_health`` (agent-usability/4), which is genuinely parameterless:
     its answer depends only on live config/environment state, never on
     anything a caller could supply."""
     registered = _registered()
     assert len(registered) >= 19
     for name, tool in registered.items():
-        if name == "shards_health":
+        if name == "mesh_health":
             continue
         props = tool.parameters.get("properties", {})
         assert props, f"{name} has no parameters at all — nothing to describe"
@@ -100,9 +100,9 @@ def test_no_tool_is_exempt() -> None:
 @pytest.mark.parametrize(
     ("tool_name", "param_name"),
     [
-        ("shards_note_new", "note_type"),
-        ("shards_note_list", "note_type"),
-        ("shards_note_update", "new_type"),
+        ("mesh_note_new", "note_type"),
+        ("mesh_note_list", "note_type"),
+        ("mesh_note_update", "new_type"),
     ],
 )
 def test_note_type_schema_enum_matches_domain(tool_name: str, param_name: str) -> None:
@@ -117,13 +117,13 @@ def test_note_type_schema_enum_matches_domain(tool_name: str, param_name: str) -
 
 
 def test_search_status_schema_enum_matches_task_status_domain() -> None:
-    """``shards_search.status`` is an *exact*-match single-value filter (see
+    """``mesh_search.status`` is an *exact*-match single-value filter (see
     ``index/tagpull.py::matches_filters``), so — unlike ``task_list.status``
     below — it can be typed as a single ``TaskStatus`` literal without
     rejecting any input the core layer would have accepted anyway."""
-    schema = _registered()["shards_search"].parameters["properties"]["status"]
+    schema = _registered()["mesh_search"].parameters["properties"]["status"]
     enum = _schema_enum(schema)
-    assert enum is not None, "shards_search.status carries no enum"
+    assert enum is not None, "mesh_search.status carries no enum"
     assert set(enum) == set(get_args(TaskStatus))
 
 
@@ -140,7 +140,7 @@ def test_task_priority_schema_enum_matches_domain() -> None:
     that already enforces the same values, rather than re-derived
     independently — the same anti-drift shape ``get_args(...)`` gives the
     schema-owned enums above."""
-    for tool_name in ("shards_task_new", "shards_task_update"):
+    for tool_name in ("mesh_task_new", "mesh_task_update"):
         schema = _registered()[tool_name].parameters["properties"]["priority"]
         enum = _schema_enum(schema)
         assert enum is not None, f"{tool_name}.priority carries no enum"
@@ -152,20 +152,20 @@ def test_graph_direction_schema_enum_matches_domain() -> None:
     unambiguous 3-value private tuple (``core/context.py::_DIRECTIONS``) used
     only by ``graph_query`` — unlike ``sort``, which differs in arity between
     notes (3 values) and tasks (4 values) and stays untyped for that reason."""
-    schema = _registered()["shards_graph"].parameters["properties"]["direction"]
+    schema = _registered()["mesh_graph"].parameters["properties"]["direction"]
     enum = _schema_enum(schema)
-    assert enum is not None, "shards_graph.direction carries no enum"
+    assert enum is not None, "mesh_graph.direction carries no enum"
     assert set(enum) == set(_DIRECTIONS)
 
 
 def test_task_list_status_stays_a_csv_string_not_a_single_literal() -> None:
-    """``shards_task_list.status`` accepts a comma-separated union
+    """``mesh_task_list.status`` accepts a comma-separated union
     (``"open,claimed"`` — team-awareness/4's ``_parse_status_csv``), so typing
     it as a single-value ``TaskStatus`` literal would reject valid multi-value
     input — a real behaviour change this unit must not make. It stays ``str``
     with a description naming the vocabulary instead; pinned here so a future
     edit does not silently narrow it and break CSV filtering."""
-    schema = _registered()["shards_task_list"].parameters["properties"]["status"]
+    schema = _registered()["mesh_task_list"].parameters["properties"]["status"]
     assert _schema_enum(schema) is None
     assert schema.get("description")
 
@@ -178,7 +178,7 @@ def test_task_list_status_stays_a_csv_string_not_a_single_literal() -> None:
 def test_tool_count_unchanged() -> None:
     """21 tools at this point in the plan (memory/1's 17, plus team-awareness/10's
     ``session_start``/``task_append``/``task_release`` parity additions, plus
-    agent-usability/4's ``shards_health``) — the brief's stale "17"/"19" reflect
+    agent-usability/4's ``mesh_health``) — the brief's stale "17"/"19" reflect
     the spec as originally written, before those later units shipped; this pins
     the actual current count instead."""
     assert len(_registered()) == 21
@@ -187,16 +187,16 @@ def test_tool_count_unchanged() -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        "shards_note_get",
-        "shards_note_list",
-        "shards_task_get",
-        "shards_task_list",
-        "shards_search",
-        "shards_recent_activity",
-        "shards_build_context",
-        "shards_graph",
-        "shards_project",
-        "shards_session_start",
+        "mesh_note_get",
+        "mesh_note_list",
+        "mesh_task_get",
+        "mesh_task_list",
+        "mesh_search",
+        "mesh_recent_activity",
+        "mesh_build_context",
+        "mesh_graph",
+        "mesh_project",
+        "mesh_session_start",
     ],
 )
 def test_read_only_annotation_unchanged(name: str) -> None:
@@ -208,11 +208,11 @@ def test_read_only_annotation_unchanged(name: str) -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        "shards_note_update",
-        "shards_task_claim",
-        "shards_task_release",
-        "shards_task_finish",
-        "shards_task_update",
+        "mesh_note_update",
+        "mesh_task_claim",
+        "mesh_task_release",
+        "mesh_task_finish",
+        "mesh_task_update",
     ],
 )
 def test_idempotent_annotation_unchanged(name: str) -> None:
@@ -223,13 +223,13 @@ def test_idempotent_annotation_unchanged(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["shards_note_new", "shards_note_append", "shards_task_new", "shards_task_append"],
+    ["mesh_note_new", "mesh_note_append", "mesh_task_new", "mesh_task_append"],
 )
 def test_write_annotation_unchanged(name: str) -> None:
     assert _registered()[name].annotations is None
 
 
 def test_destructive_annotation_unchanged() -> None:
-    tool = _registered()["shards_task_cancel"]
+    tool = _registered()["mesh_task_cancel"]
     assert tool.annotations is not None
     assert tool.annotations.destructiveHint is True

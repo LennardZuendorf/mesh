@@ -1,4 +1,4 @@
-"""memory/2 — recent-activity lens: ``core/activity.py`` + ``shards recent-activity``.
+"""memory/2 — recent-activity lens: ``core/activity.py`` + ``mesh recent-activity``.
 
 Acceptance coverage:
 
@@ -6,19 +6,19 @@ Acceptance coverage:
   :meth:`DaemonClient.activity_recent` (mocked here) and passes its entries
   through untouched (no filter → no frontmatter re-read).
 * **Daemon-down fallback** — with no daemon reachable, the same call degrades to
-  :func:`shards.index.warm.scan_recent` (asserted both behaviourally over a seeded
+  :func:`mesh.index.warm.scan_recent` (asserted both behaviourally over a seeded
   vault and by spying on the fallback seam).
 * **``--since`` window** — applied as an *mtime* cutoff on the returned entries;
   an unparseable value raises ``ValueError`` (mapped to CLI exit 2).
 * **``--mine`` / ``--owner``** — require re-reading frontmatter per entry (the
   activity row carries no ``owner``); ``--mine`` = ``owner`` **or** ``claimed_by``
   equals the configured agent. Filters run *before* the ``--limit`` display cap.
-* **CLI** — ``shards recent-activity`` is a leaf command: ``--json`` emits a clean
+* **CLI** — ``mesh recent-activity`` is a leaf command: ``--json`` emits a clean
   array of ``{id, type, title, path, mtime}``; infra notices stay on stderr and
   ``--quiet`` suppresses them.
 
 Every test pins ``$XDG_RUNTIME_DIR`` into ``tmp_path`` (autouse) so the client's
-socket path can never collide with a real shards daemon on the dev machine — the
+socket path can never collide with a real mesh daemon on the dev machine — the
 "daemon-down" assertions depend on there being no reachable socket.
 """
 
@@ -33,13 +33,13 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner, Result
 
-import shards.daemon.client as daemon_client
-from shards.cli.__main__ import app
-from shards.core.activity import recent_activity
-from shards.daemon.client import DaemonClient, DaemonError
-from shards.index.warm import DEFAULT_RECENT_LIMIT
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder, task_folder
+import mesh.daemon.client as daemon_client
+from mesh.cli.__main__ import app
+from mesh.core.activity import recent_activity
+from mesh.daemon.client import DaemonClient, DaemonError
+from mesh.index.warm import DEFAULT_RECENT_LIMIT
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder, task_folder
 
 _NOW = datetime.now(UTC).timestamp()
 _DAY = 86_400.0
@@ -64,7 +64,7 @@ def _runtime_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -190,7 +190,7 @@ def test_recent_activity_scans_when_daemon_down(cfg: Config, vault: Path) -> Non
 def test_recent_activity_fallback_is_scan_recent(
     cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The daemon-down path routes through ``shards.index.warm.scan_recent``."""
+    """The daemon-down path routes through ``mesh.index.warm.scan_recent``."""
     sentinel: list[dict[str, object]] = [
         {"id": "n-z", "type": "note", "title": "Z", "path": "/z.md", "mtime": _NOW}
     ]
@@ -302,7 +302,7 @@ def test_filters_apply_before_limit_cap(cfg: Config, vault: Path) -> None:
 def test_row_carries_peers_identity_not_callers(cfg: Config, vault: Path) -> None:
     """A peer's row carries *their* owner/claimed_by, not the calling agent's.
 
-    ``cfg.agent`` is ``test-agent`` (the ``shards_config`` fixture); the row for a
+    ``cfg.agent`` is ``test-agent`` (the ``mesh_config`` fixture); the row for a
     note owned by someone else must say so, not silently inherit the caller.
     """
     _seed_note(vault, note_id="n-peer", title="Peer's Note", owner="other-agent")
@@ -342,7 +342,7 @@ def test_mine_filter_reads_the_row_not_disk_when_owner_key_present(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--mine`` costs no per-row disk read once the row already carries ``owner``."""
-    import shards.core.activity as activity_mod
+    import mesh.core.activity as activity_mod
 
     _seed_note(vault, note_id="n-mine", title="Mine", owner="test-agent")
     _seed_note(vault, note_id="n-other", title="Theirs", owner="other-agent")
@@ -389,7 +389,7 @@ def test_legacy_row_missing_owner_key_falls_back_to_disk(
 
 
 # --------------------------------------------------------------------------- #
-# CLI: shards recent-activity                                                   #
+# CLI: mesh recent-activity                                                   #
 # --------------------------------------------------------------------------- #
 
 
@@ -462,7 +462,7 @@ def test_cli_no_notice_when_daemon_up(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed_note(vault, note_id="n-a", title="Alpha")
-    monkeypatch.setattr("shards.cli.session._daemon_up", lambda: True)
+    monkeypatch.setattr("mesh.cli.session._daemon_up", lambda: True)
 
     result = _invoke(["recent-activity", "--json"])
     assert result.exit_code == 0, result.output

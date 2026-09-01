@@ -5,11 +5,11 @@ Acceptance coverage (``.spec/features/agent-usability/plan.md`` unit 1):
 * **Config-driven, not static** — two different configs render different identity/
   roster/vault text (a constant string would pass a weaker test).
 * **Degradation** — no config, no agent, and an empty roster each still render, with
-  a named ``shards init`` statement, and never raise.
+  a named ``mesh init`` statement, and never raise.
 * **Cooperative phrasing** — no permission/authorization language, checked against a
   denylist, across a config, a no-agent config, and no config at all.
 * **Budget** — every rendered variant (including a large roster) stays <= 2048 bytes.
-* **The server receives it** — ``shards.mcp.server``'s constructed ``app.instructions``
+* **The server receives it** — ``mesh.mcp.server``'s constructed ``app.instructions``
   matches ``build_instructions`` for the same config, in a fresh interpreter (so the
   guarded import-time load is exercised for real, not mocked), both with a real
   config file and with none.
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from shards.mcp.instructions import BUDGET_BYTES, build_instructions
-from shards.schemas.config import Config, CoreConfig, SearchConfig, TasksConfig
+from mesh.mcp.instructions import BUDGET_BYTES, build_instructions
+from mesh.schemas.config import Config, CoreConfig, SearchConfig, TasksConfig
 
 # Terms that would imply owner/claimed_by is a verified, enforced authorization
 # boundary rather than the cooperative convention it actually is (root AGENTS.md
@@ -54,7 +54,7 @@ def _config(
     collections: list[str] | None = None,
     vault_path: str = "/home/agent/vault",
     hybrid: bool = True,
-    collection: str | None = "shards-vault",
+    collection: str | None = "mesh-vault",
 ) -> Config:
     return Config(
         core=CoreConfig(vault_path=Path(vault_path), agent=agent),
@@ -116,11 +116,11 @@ def test_recall_section_does_not_promise_hybrid_when_disabled() -> None:
     recall_on = hybrid_on.split("## Recall", 1)[1].split("##", 1)[0]
     # Even when hybrid *is* configured, the block must not promise it actually
     # ran — indexed/the daemon can still be down at call time. As of
-    # agent-usability/4 a caller *can* check (shards_health, or a hit's mode
+    # agent-usability/4 a caller *can* check (mesh_health, or a hit's mode
     # field) — the block must point there rather than re-claim the old "no way
     # to tell" gap.
     assert "degrades" in recall_on.lower() or "silently" in recall_on.lower()
-    assert "shards_health" in recall_on
+    assert "mesh_health" in recall_on
 
 
 # --------------------------------------------------------------------------- #
@@ -128,17 +128,17 @@ def test_recall_section_does_not_promise_hybrid_when_disabled() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_no_config_renders_degraded_block_and_names_shards_init() -> None:
+def test_no_config_renders_degraded_block_and_names_mesh_init() -> None:
     block = build_instructions(None)
     assert block  # renders, does not raise
-    assert "shards init" in block
+    assert "mesh init" in block
     assert "flights-agent" not in block
 
 
 def test_no_agent_identity_renders_degraded_statement() -> None:
     config = _config(agent=None)
     block = build_instructions(config)
-    assert "shards init" in block
+    assert "mesh init" in block
     assert "## Your identity" in block
 
 
@@ -165,8 +165,8 @@ def test_degraded_variants_still_orient_an_agent(config: Config | None) -> None:
     text = build_instructions(config)
 
     assert text.strip(), "a degraded instructions block must not be empty"
-    assert "shards" in text.lower()
-    assert "shards init" in text, "a config-less agent must be told how to fix it"
+    assert "mesh" in text.lower()
+    assert "mesh init" in text, "a config-less agent must be told how to fix it"
 
 
 # --------------------------------------------------------------------------- #
@@ -230,7 +230,7 @@ def test_rendered_block_stays_under_budget(config: Config | None) -> None:
 
 _PROBE = (
     "import sys\n"
-    "import shards.mcp.server as server\n"
+    "import mesh.mcp.server as server\n"
     "sys.stdout.write(server.app.instructions or '')\n"
 )
 
@@ -247,14 +247,14 @@ def _run_probe(env: dict[str, str]) -> str:
 
 
 def test_server_app_instructions_matches_build_instructions_with_real_config(
-    shards_config: Path,
+    mesh_config: Path,
 ) -> None:
-    from shards.schemas.config import load_config
+    from mesh.schemas.config import load_config
 
     env = dict(os.environ)
-    env["SHARDS_CONFIG_PATH"] = str(shards_config)
+    env["MESH_CONFIG_PATH"] = str(mesh_config)
     stdout = _run_probe(env)
-    expected = build_instructions(load_config(shards_config))
+    expected = build_instructions(load_config(mesh_config))
     assert stdout == expected
     assert "test-agent" in stdout
 
@@ -267,8 +267,8 @@ def test_server_app_instructions_degrades_and_still_starts_without_config(
     both matter here."""
     missing = tmp_path / "does-not-exist" / "config.toml"
     env = dict(os.environ)
-    env["SHARDS_CONFIG_PATH"] = str(missing)
-    env.pop("SHARDS_AGENT", None)
+    env["MESH_CONFIG_PATH"] = str(missing)
+    env.pop("MESH_AGENT", None)
     stdout = _run_probe(env)
     assert stdout == build_instructions(None)
-    assert "shards init" in stdout
+    assert "mesh init" in stdout

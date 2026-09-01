@@ -43,25 +43,25 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import shards.cli.task as task_cli
-import shards.core.tasks as tasks_core
-import shards.storage.locks as locks_mod
-from shards.cli.__main__ import app
-from shards.core.tasks import (
+import mesh.cli.task as task_cli
+import mesh.core.tasks as tasks_core
+import mesh.storage.locks as locks_mod
+from mesh.cli.__main__ import app
+from mesh.core.tasks import (
     ClaimConflictError,
     TaskNotFoundError,
     claim_task,
     release_task,
 )
-from shards.schemas.config import Config, load_config
-from shards.storage.files import task_folder
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 _ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -85,7 +85,7 @@ def _seed_task(
     created: datetime = _OLD,
     updated: datetime = _OLD,
 ) -> Path:
-    """Write a shards task straight to disk in the folder matching its status."""
+    """Write a mesh task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -636,7 +636,7 @@ def test_release_by_holder_then_claim_by_second_agent_succeeds(cfg: Config, vaul
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task release                                                      #
+# CLI — mesh task release                                                      #
 # --------------------------------------------------------------------------- #
 
 
@@ -752,8 +752,8 @@ def test_cli_release_agentless_config_exits_2(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     result = _invoke(["task", "release", "t-noagent"])
     assert result.exit_code == 2, result.output
 
@@ -764,7 +764,7 @@ def test_release_command_registered() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task claim                                                        #
+# CLI — mesh task claim                                                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -840,8 +840,8 @@ def test_cli_claim_agentless_config_exits_2(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     result = _invoke(["task", "claim", "t-noagent"])
     assert result.exit_code == 2, result.output
 
