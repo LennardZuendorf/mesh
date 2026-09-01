@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 import pytest
+from watchdog.events import FileSystemEvent
 
 from shards.index.reconcile import reconcile_path
 from shards.index.warm import VaultIndex
@@ -155,11 +156,9 @@ def test_an_exception_from_handle_event_never_escapes(
     watcher.handler.on_deleted(_FakeEvent(str(vault / "notes" / "x.md")))
 
 
-class _FakeEvent:
+class _FakeEvent(FileSystemEvent):
     """Minimal stand-in for a watchdog file event."""
 
-    is_directory = False
-
     def __init__(self, src_path: str, event_type: str = "modified") -> None:
-        self.src_path = src_path
+        super().__init__(src_path)
         self.event_type = event_type

@@ -89,7 +89,7 @@ class _Interleave:
 
         return widened
 
-    def run(self, racer: Callable[[], None], mover: Callable[[], None]) -> None:
+    def run(self, racer: Callable[[], object], mover: Callable[[], object]) -> None:
         """Run ``racer`` on its own thread, interleaved with ``mover`` here."""
 
         def guarded() -> None:
