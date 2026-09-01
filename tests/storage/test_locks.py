@@ -632,7 +632,17 @@ def test_acquire_exhausts_retry_budget_raises_lock_error(
 
     monkeypatch.setattr(locks_mod, "_reclaim_if_stale", lambda _p: True)
 
-    def always_exists(path: object, flags: int, *a: object, **kw: object) -> int:
+    real_open = os.open
+
+    def always_exists(
+        path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        # ``locks_mod.os`` *is* the real ``os`` module, so this patch is
+        # process-wide, not scoped to lock code — pass through anything that
+        # isn't our own lock path (e.g. the autouse ``isolate_daemon_socket``
+        # fixture's own teardown cleanup) to the real ``os.open``.
+        if path not in (lock, str(lock)):
+            return real_open(path, flags, mode, dir_fd=dir_fd)
         if flags & os.O_CREAT:
             raise FileExistsError
         raise AssertionError("should not need a real open: _reclaim_if_stale is mocked")
