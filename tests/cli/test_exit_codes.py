@@ -1,13 +1,13 @@
 """core-hardening/3 — the CLI boundary mapper: exit codes on exceptions.
 
-Exercises R3/R4: domain exceptions (``shards.core.errors.ShardsError`` and its
+Exercises R3/R4: domain exceptions (``mesh.core.errors.MeshError`` and its
 subclasses, plus ``storage.locks.LockError``) carry their own ``code``; the one
-boundary mapper (:func:`shards.cli._errors.cli_errors`) reads it and maps a bare
+boundary mapper (:func:`mesh.cli._errors.cli_errors`) reads it and maps a bare
 ``ValueError``/``OSError`` to 2/1 — instead of every CLI handler hardcoding a
 ``typer.Exit(N)`` literal. Two scenarios are new behaviour (the defects this unit
 fixes):
 
-* a live, fresh, contended lock (:class:`~shards.storage.locks.LockError`) now
+* a live, fresh, contended lock (:class:`~mesh.storage.locks.LockError`) now
   exits 4 with a stderr line naming the entity, instead of hanging out the wait
   budget and printing a traceback;
 * an ``OSError`` at the write boundary (ENOSPC, a read-only vault, ...) now exits
@@ -17,7 +17,7 @@ The rest of the file is the exit-code matrix — one row per exception class ×
 CLI surface — proving the mapper is behaviour-preserving for the cases that were
 already handled (2 validation, 3 not found, 4 claim conflict), plus the two
 binary verification gates from the brief: no hardcoded ``typer.Exit(2|3|4)``
-literal survives in ``src/shards/cli/``, and none of these failure paths ever
+literal survives in ``src/mesh/cli/``, and none of these failure paths ever
 print a Python traceback.
 
 Root-cause note on the read-only-vault scenario: this sandbox runs as root,
@@ -41,19 +41,19 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import shards.core.notes as notes_core
-import shards.core.tasks as tasks_core
-import shards.storage.locks as locks_mod
-from shards.cli.__main__ import app
-from shards.core.notes import create_note
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder, task_folder
+import mesh.core.notes as notes_core
+import mesh.core.tasks as tasks_core
+import mesh.storage.locks as locks_mod
+from mesh.cli.__main__ import app
+from mesh.core.notes import create_note
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder, task_folder
 
 _NOW = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -97,7 +97,7 @@ def _write_live_lock(lock_path: Path) -> None:
 
     Matches the pattern ``tests/notes/test_storage.py`` uses for
     ``test_held_lock_by_live_pid_raises``: the PID is this very process (always
-    alive) and the mtime is fresh (just written), so :func:`~shards.storage.locks._is_stale`
+    alive) and the mtime is fresh (just written), so :func:`~mesh.storage.locks._is_stale`
     genuinely judges it non-stale — this is the real contended path, not a mock.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,14 +195,14 @@ def test_cli_task_claim_write_oserror_exits_1_no_traceback(
 def test_cli_status_scan_oserror_exits_1_no_traceback(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Admin surface coverage: ``shards status`` maps an unexpected OSError too."""
+    """Admin surface coverage: ``mesh status`` maps an unexpected OSError too."""
 
     def boom(*_args: object, **_kwargs: object) -> None:
         raise OSError(13, "Permission denied")
 
     # ``status`` now runs through the daemon client, whose file-op fallback is the
     # same ``list_notes`` scan the direct call used to make.
-    monkeypatch.setattr("shards.daemon.client.list_notes", boom)
+    monkeypatch.setattr("mesh.daemon.client.list_notes", boom)
 
     result = _invoke(["status"])
 
@@ -331,8 +331,8 @@ def test_cli_task_claim_no_agent_identity_exits_2(
         "\n".join(("[core]", f'vault_path = "{vault}"', "", "[tasks]", "collections = []", "")),
         encoding="utf-8",
     )
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     result = _invoke(["task", "claim", "t-noagent"])
     assert result.exit_code == 2, result.output
     assert "Traceback" not in result.output
@@ -352,7 +352,7 @@ def test_cli_note_delete_refuses_non_interactive_exits_2(cfg: Config, vault: Pat
 
 
 def test_no_hardcoded_exit_codes_in_cli_handlers() -> None:
-    """``git grep -nE "typer.Exit\\((2|3|4)\\)" src/shards/cli/`` must return nothing.
+    """``git grep -nE "typer.Exit\\((2|3|4)\\)" src/mesh/cli/`` must return nothing.
 
     Codes live on the domain exceptions; the one mapper (``cli_errors``) reads
     ``.code`` — a handler that hardcodes ``typer.Exit(2|3|4)`` again would be a
@@ -360,7 +360,7 @@ def test_no_hardcoded_exit_codes_in_cli_handlers() -> None:
     """
     repo_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
-        ["git", "grep", "-nE", r"typer\.Exit\((2|3|4)\)", "src/shards/cli/"],
+        ["git", "grep", "-nE", r"typer\.Exit\((2|3|4)\)", "src/mesh/cli/"],
         cwd=repo_root,
         capture_output=True,
         text=True,

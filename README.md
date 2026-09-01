@@ -1,14 +1,15 @@
-# shards
+# mesh
 
 A mesh for multi-agent collaboration over a single Markdown folder. Three verbs — `note`, `task`, `search` — give a fleet of agents and their human operator a shared substrate through low-level tools: a CLI and an MCP server.
 
 - Notes + search = shared memory.
 - Tasks = coordination + handoff (`claim` / `release` / `finish` / `cancel`; dependency graph deferred).
-- Markdown is the source of truth; shards owns the interface (and writes), not the data.
+- Markdown is the source of truth; mesh owns the interface (and writes), not the data.
 
-Search delegates to the first-party [`indexed`](https://github.com/LennardZuendorf/indexed) engine; shards coexists with whatever else writes to the folder — Obsidian, git, another MCP server — and needs no database to run.
+Search delegates to the first-party [`indexed`](https://github.com/LennardZuendorf/indexed) engine; mesh coexists with whatever else writes to the folder — Obsidian, git, another MCP server — and needs no database to run.
 
 The spec is the source of truth: see [`.spec/`](.spec/). Working in here? Read [`AGENTS.md`](AGENTS.md) first.
+For deeper architecture Q&A — memory vs. notes, custom schemas, atomicity, vault/config resolution — see [`docs/concepts.md`](docs/concepts.md).
 
 ## Install
 
@@ -16,28 +17,28 @@ Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync --all-groups
-uv run shards --help
+uv run mesh --help
 ```
 
-This installs two console scripts: `shards` (the CLI) and `shards-mcp` (the MCP server entry point), both wired in `pyproject.toml`.
+This installs two console scripts: `mesh` (the CLI) and `mesh-mcp` (the MCP server entry point), both wired in `pyproject.toml`.
 
 ## First run
 
 ```bash
-uv run shards init
+uv run mesh init
 ```
 
-`init` writes `~/.shards/config.toml` (or `$SHARDS_CONFIG_PATH` when set), creates the vault
+`init` writes `~/.mesh/config.toml` (or `$MESH_CONFIG_PATH` when set), creates the vault
 directory, and prints the path it wrote. Re-running it is always safe: with an existing config
 and no `--force`, it refuses and leaves the file untouched; `--force` rewrites it.
 
 ```bash
-uv run shards init --help
+uv run mesh init --help
 ```
 
 ```
---path             TEXT     Vault folder ([core].vault_path). Defaults to ~/.shards/vault.
---agent            TEXT     This agent's identity ([core].agent). Defaults to $SHARDS_AGENT, else 'agent'.
+--path             TEXT     Vault folder ([core].vault_path). Defaults to ~/.mesh/vault.
+--agent            TEXT     This agent's identity ([core].agent). Defaults to $MESH_AGENT, else 'agent'.
 --collections      TEXT     Comma-separated roster of valid --owner identities ([tasks].collections).
                              Default: empty — an open roster, any owner string accepted.
 --search-collection TEXT    indexed collection name ([search].collection). Default: unset.
@@ -54,14 +55,14 @@ triggering it remotely would never be agent-safe.
 Once a config exists:
 
 ```bash
-uv run shards note new "hello" --body "first note" --type note
-uv run shards task new "do something" --body "details"
-uv run shards task list
+uv run mesh note new "hello" --body "first note" --type note
+uv run mesh task new "do something" --body "details"
+uv run mesh task list
 ```
 
 ## Config
 
-Config lives at `~/.shards/config.toml`, overridable via `$SHARDS_CONFIG_PATH` (the test/
+Config lives at `~/.mesh/config.toml`, overridable via `$MESH_CONFIG_PATH` (the test/
 alternate-vault escape hatch). A missing config exits 2 with a message naming the resolved
 path and the required key. A committed reference copy — every key `schemas/config.py` defines,
 documented — lives at [`config.example.toml`](config.example.toml); `config.toml` itself is
@@ -69,8 +70,8 @@ gitignored, since it names a real vault path and identity.
 
 ```toml
 [core]
-vault_path = "~/shards-vault"     # required — the vault folder; ~ expanded and symlinks resolved
-agent = "my-agent"                # optional — default owner/claimer; $SHARDS_AGENT overrides
+vault_path = "~/mesh-vault"     # required — the vault folder; ~ expanded and symlinks resolved
+agent = "my-agent"                # optional — default owner/claimer; $MESH_AGENT overrides
 
 [search]
 collection = "my-vault"           # optional — indexed collection name
@@ -83,14 +84,14 @@ collections = ["my-agent", "another-agent"]  # optional roster; empty = any --ow
 ```
 
 `path` and `tolaria_path` are also accepted as legacy spellings of `vault_path` (precedence:
-`vault_path` > `path` > `tolaria_path`, no warning); `$SHARDS_AGENT` always wins over
+`vault_path` > `path` > `tolaria_path`, no warning); `$MESH_AGENT` always wins over
 `[core].agent` when both are set. `vault_path` is resolved at load, so a symlinked vault works.
 A vault folder that does not exist yet is created on first write; one that points at a *file* is
-a config error (exit 2), and `shards status` names the vault path and flags it when it is missing.
+a config error (exit 2), and `mesh status` names the vault path and flags it when it is missing.
 
 ## CLI surface
 
-Three verbs, plus session lenses, plus human-only admin. `shards --help` is always the source
+Three verbs, plus session lenses, plus human-only admin. `mesh --help` is always the source
 of truth for the live command list; this is a summary.
 
 **`note`** — `new` / `get` / `list` / `append` / `update` / `delete`. Types: `note`, `log`,
@@ -103,8 +104,8 @@ of truth for the live command list; this is a summary.
 adds body text to an existing task without rewriting what's there; `release` drops a claim
 back to `open` (idempotent — releasing an already-open task is a no-op).
 
-**`search`** — `shards search "<query>"` for hybrid recall (falls back to a substring scan when
-`indexed` is unavailable or `[search].hybrid` is off), or `shards search --tags x,y` for an
+**`search`** — `mesh search "<query>"` for hybrid recall (falls back to a substring scan when
+`indexed` is unavailable or `[search].hybrid` is off), or `mesh search --tags x,y` for an
 exact frontmatter tag pull. `--health` reports which mode is actually live right now.
 
 **Session lenses** (read-only) — `recent-activity`, `build-context`, `graph` (`--direction
@@ -127,8 +128,8 @@ per-agent claim breakdown); `reindex` rebuilds the search index and degrades to 
 `indexed` is missing or no `[search].collection` is configured.
 
 ```bash
-uv run shards daemon start
-uv run shards status
+uv run mesh daemon start
+uv run mesh status
 ```
 
 ### Breaking change: `--tags` on update
@@ -147,16 +148,16 @@ If a script relied on the old bare-`x,y`-replaces behaviour, switch it to `=x,y`
 ## Daemon
 
 ```bash
-uv run shards daemon start   # warm watcher + frontmatter index, backgrounded
-uv run shards daemon status
-uv run shards daemon stop
+uv run mesh daemon start   # warm watcher + frontmatter index, backgrounded
+uv run mesh daemon status
+uv run mesh daemon stop
 ```
 
 The daemon is an accelerator, never a gatekeeper: every command above degrades to a direct
 filesystem scan when it is down, never fails because it's down — and a write is durable on disk
 before the daemon is ever told about it.
 
-The socket is named per vault (`shards-<digest>.sock`) and every reply states which vault it
+The socket is named per vault (`mesh-<digest>.sock`) and every reply states which vault it
 served, so pointing two configs at two folders gives you two independent daemons and neither can
 answer the other's reads. After a write, the writing process tells the daemon what changed, so an
 agent that creates a note and immediately lists sees its own note rather than racing the
@@ -164,9 +165,9 @@ filesystem watcher.
 
 ## MCP + plugin wiring
 
-`shards-mcp` runs the FastMCP server exposing the agent-safe `shards_*` tool surface — the same
+`mesh-mcp` runs the FastMCP server exposing the agent-safe `mesh_*` tool surface — the same
 `note`/`task`/`search` verbs (plus `task_release` and the read-only session lenses, including
-`shards_session_start`), typed as real parameters rather than CLI flag strings. Delete and every
+`mesh_session_start`), typed as real parameters rather than CLI flag strings. Delete and every
 admin command (including `init`) are withheld; nothing that writes the config or touches the
 daemon is reachable over MCP.
 
@@ -175,15 +176,15 @@ Register it by hand with any MCP-capable client, e.g. in Claude Code:
 ```json
 {
   "mcpServers": {
-    "shards": {
+    "mesh": {
       "command": "uv",
-      "args": ["run", "shards-mcp"]
+      "args": ["run", "mesh-mcp"]
     }
   }
 }
 ```
 
-or, once installed outside a `uv` project, simply `"command": "shards-mcp"`.
+or, once installed outside a `uv` project, simply `"command": "mesh-mcp"`.
 
 On connect, the server sends an `instructions` block built from your live config — your
 resolved identity, valid-owner roster, vault path, and current search mode — so a client gets
@@ -192,20 +193,20 @@ oriented before making any tool call, with no separate skill required.
 ### Install the plugin
 
 This repo doubles as its own Claude Code plugin marketplace (`.claude-plugin/marketplace.json`
-at the repo root), so the MCP server and the `shards` skill install together in one step —
+at the repo root), so the MCP server and the `mesh` skill install together in one step —
 from Claude Code:
 
 ```
 /plugin marketplace add <path-or-url-to-this-repo>
-/plugin install shards@shards
+/plugin install mesh@mesh
 ```
 
-That installs `plugins/shards/`: the bundled `.mcp.json` (wiring `shards-mcp` in, so the skill
-can never be installed without the tools it describes), the `shards` skill
-(`skills/shards/SKILL.md` — the vault-coherence and coordination playbook, one skill, not
+That installs `plugins/mesh/`: the bundled `.mcp.json` (wiring `mesh-mcp` in, so the skill
+can never be installed without the tools it describes), the `mesh` skill
+(`skills/mesh/SKILL.md` — the vault-coherence and coordination playbook, one skill, not
 split by verb), and an optional `SessionStart` hook that runs
-`shards session-start --meta-only --json` to warm-start a fresh session's queue and mentions.
-`shards init` still has to be run once per machine — the plugin ships the tools and the
+`mesh session-start --meta-only --json` to warm-start a fresh session's queue and mentions.
+`mesh init` still has to be run once per machine — the plugin ships the tools and the
 playbook, not a config.
 
 `SKILL.md`'s frontmatter stays inside the six-field spec Claude accepts for a claude.ai skill

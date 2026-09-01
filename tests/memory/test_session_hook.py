@@ -1,4 +1,4 @@
-"""memory/4 — ``shards session-start`` warm-start lens + SessionStart hook config.
+"""memory/4 — ``mesh session-start`` warm-start lens + SessionStart hook config.
 
 ``session-start`` composes two read-only lenses into a single warm-start payload
 for an agent session: the recent-activity window (``recent_activity(7d, mine)``)
@@ -27,7 +27,7 @@ Acceptance coverage:
 * **--json** — emits a machine-readable JSON array; command name is hyphenated
   (``session-start``) and registered as a leaf command.
 * **hook config** — ``hooks/session_start.json`` matches the product.md UX spec:
-  a single SessionStart ``command`` hook running ``shards session-start
+  a single SessionStart ``command`` hook running ``mesh session-start
   --meta-only --json``.
 
 team-awareness/7 widens the composite with a third source — inbound mentions of
@@ -63,14 +63,14 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.core.notes import NoteView
-from shards.core.tasks import TaskView
-from shards.daemon.client import DaemonClient
-from shards.schemas.config import Config, load_config
-from shards.schemas.note import Note
-from shards.schemas.task import Task
-from shards.storage.files import note_folder, task_folder
+from mesh.cli.__main__ import app
+from mesh.core.notes import NoteView
+from mesh.core.tasks import TaskView
+from mesh.daemon.client import DaemonClient
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.note import Note
+from mesh.schemas.task import Task
+from mesh.storage.files import note_folder, task_folder
 from tests.daemon.conftest import running_daemon
 
 # The hook config file, located relative to this test (repo-root/hooks/…), never
@@ -80,7 +80,7 @@ _HOOK_PATH = Path(__file__).resolve().parents[2] / "hooks" / "session_start.json
 _EXPECTED_HOOK: dict[str, Any] = {
     "hooks": {
         "SessionStart": [
-            {"hooks": [{"type": "command", "command": "shards session-start --meta-only --json"}]}
+            {"hooks": [{"type": "command", "command": "mesh session-start --meta-only --json"}]}
         ]
     }
 }
@@ -92,7 +92,7 @@ _EXPECTED_HOOK: dict[str, Any] = {
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -222,14 +222,14 @@ def _patch_sources(
             calls["mentions"] = {"me": me, "since": since}
         return list(mentions or [])
 
-    monkeypatch.setattr("shards.cli.session.recent_activity", _fake_recent)
+    monkeypatch.setattr("mesh.cli.session.recent_activity", _fake_recent)
     # The live queue and note ownership are fetched through the daemon client
     # (core-hardening/5): warm index when it is up, the identical disk walk when
     # it is down. Faking the client verbs keeps this suite about the
     # *composition*, not any one source.
     monkeypatch.setattr(DaemonClient, "task_list", _fake_task_list)
     monkeypatch.setattr(DaemonClient, "note_list", _fake_note_list)
-    monkeypatch.setattr("shards.cli.session.session_mentions", _fake_mentions)
+    monkeypatch.setattr("mesh.cli.session.session_mentions", _fake_mentions)
 
 
 def _invoke(args: list[str]) -> Any:
@@ -525,7 +525,7 @@ def test_mention_delivered_across_two_agent_identities(cfg: Config, vault: Path)
     ``claimed_by`` half of "my nodes", not just ``owner``). Nothing ever writes
     to the task itself; the mention is only findable by inverting ``related``.
     ``--owner`` puts the CLI in flights-agent's seat from a session whose own
-    configured identity (``test-agent``, from ``shards_config``) is a third
+    configured identity (``test-agent``, from ``mesh_config``) is a third
     identity again — four distinct agents appear across this module's fixtures.
     """
     _seed_task(
@@ -577,8 +577,8 @@ def test_session_start_with_no_identity_delivers_no_mentions_of_others_work(
     )
     cfg_file = tmp_path / "noagent.toml"
     cfg_file.write_text("\n".join(("[core]", f'vault_path = "{vault}"', "")), encoding="utf-8")
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
 
     result = _invoke(["session-start", "--json"])
     assert result.exit_code == 0, result.output
@@ -681,7 +681,7 @@ def test_mention_of_my_note_surfaces_as_mention(cfg: Config, vault: Path) -> Non
 def test_no_identity_configured_never_floods_mentions_with_the_whole_vault(
     vault: Path, config_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No ``[core].agent`` and no ``$SHARDS_AGENT``: the note half degrades to
+    """No ``[core].agent`` and no ``$MESH_AGENT``: the note half degrades to
     empty, exactly like the task half already did — never to "every note in
     the vault is mine" (review finding 1).
 
@@ -706,8 +706,8 @@ def test_no_identity_configured_never_floods_mentions_with_the_whole_vault(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
 
     # Adversarial fixture: a note mentioning another note, neither owned by any
     # particular caller — with the pre-fix bug, an unset identity would still
@@ -807,7 +807,7 @@ def test_owner_flag_drives_every_source(cfg: Config, monkeypatch: pytest.MonkeyP
 def test_owner_honoured_on_root_side_of_command_name(
     cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``shards --owner X session-start`` is equivalent to ``session-start --owner X``."""
+    """``mesh --owner X session-start`` is equivalent to ``session-start --owner X``."""
     calls: dict[str, Any] = {}
     _patch_sources(monkeypatch, activity=[], tasks=[], calls=calls)
 
@@ -899,7 +899,7 @@ def test_daemon_up_and_down_produce_identical_payload_with_a_mention(
 
         warm_dir = sock_root / "warm"
         warm_dir.mkdir()
-        with running_daemon(warm_dir / "shards.sock", config=cfg):
+        with running_daemon(warm_dir / "mesh.sock", config=cfg):
             monkeypatch.setenv("XDG_RUNTIME_DIR", str(warm_dir))
             warm = _invoke(["session-start", "--json"])
         assert warm.exit_code == 0, warm.output
@@ -969,7 +969,7 @@ def test_hook_matches_product_spec() -> None:
 
     assert json.loads(text) == _EXPECTED_HOOK
     # The load-bearing command string, asserted on the raw text too.
-    assert "shards session-start --meta-only --json" in text
+    assert "mesh session-start --meta-only --json" in text
 
 
 def test_hook_runs_once_at_session_start() -> None:

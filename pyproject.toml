@@ -1,5 +1,5 @@
 [project]
-name = "shards"
+name = "mesh"
 version = "0.1.0"
 description = "A mesh for multi-agent collaboration over one Markdown folder — note, task, search."
 readme = "README.md"
@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-shards = "shards.cli.__main__:app"
-shards-mcp = "shards.mcp.server:main"
+mesh = "mesh.cli.__main__:app"
+mesh-mcp = "mesh.mcp.server:main"
 
 [dependency-groups]
 dev = [
@@ -33,7 +33,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/shards"]
+packages = ["src/mesh"]
 
 [tool.ruff]
 line-length = 100
@@ -54,7 +54,7 @@ pythonpath = ["src"]
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["src/shards"]
+source = ["src/mesh"]
 # Branch mode on: a statement-only gate cannot see a deleted guard clause, and a
 # mutation audit found every guard in index/reconcile.py deletable with the suite
 # green. Costs nothing here — branch-inclusive coverage already clears the floor.

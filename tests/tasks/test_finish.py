@@ -30,22 +30,22 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import shards.cli.task as task_cli
-from shards.cli.__main__ import app
-from shards.core.tasks import (
+import mesh.cli.task as task_cli
+from mesh.cli.__main__ import app
+from mesh.core.tasks import (
     TaskNotFoundError,
     _resolve_task_path,
     finish_task,
 )
-from shards.schemas.config import Config, load_config
-from shards.storage.files import task_folder
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 _ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -69,7 +69,7 @@ def _seed_task(
     created: datetime = _OLD,
     updated: datetime = _OLD,
 ) -> Path:
-    """Write a shards task straight to disk in the folder matching its status."""
+    """Write a mesh task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -171,8 +171,8 @@ def test_finish_outcome_names_the_acting_agent(
     ``## Outcome`` stamp names the finisher, never the task's ``owner``."""
     _seed_task(vault, status="open", owner="flights-agent")
     cfg_file = _write_agent_config(tmp_path, vault, "notes-agent")
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     finisher_cfg = load_config()
 
     finish_task(finisher_cfg, "t-seed", "Shipped it.")
@@ -188,12 +188,12 @@ def test_finish_outcome_names_the_acting_agent(
 def test_finish_unset_identity_outcome_stamp_is_bare_iso(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No ``[core].agent``/``$SHARDS_AGENT`` degrades to a bare ISO line — no
+    """No ``[core].agent``/``$MESH_AGENT`` degrades to a bare ISO line — no
     stray trailing separator, no crash."""
     _seed_task(vault, status="open")
     cfg_file = _write_agent_config(tmp_path, vault, None)
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     noagent_cfg = load_config()
     assert noagent_cfg.agent is None
 
@@ -213,8 +213,8 @@ def test_finish_idempotent_rerun_by_a_different_agent_adds_nothing(
     body = "Task body.\n\n## Outcome\n\n2026-01-01T09:00:00Z — first-agent\nFirst outcome."
     _seed_task(vault, status="done", body=body, updated=_OLD)
     cfg_file = _write_agent_config(tmp_path, vault, "second-agent")
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     second_cfg = load_config()
 
     task = finish_task(second_cfg, "t-seed", "Second outcome.")
@@ -269,7 +269,7 @@ def test_finish_already_done_does_not_write(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An already-done finish must not touch atomic_write (pure no-op)."""
-    import shards.core.tasks as tasks_core
+    import mesh.core.tasks as tasks_core
 
     _seed_task(vault, status="done", body="Task body.\n\n## Outcome\n\nx")
     calls: list[Path] = []
@@ -401,7 +401,7 @@ def test_finish_concurrent_appends_outcome_once(cfg: Config, vault: Path) -> Non
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task finish                                                       #
+# CLI — mesh task finish                                                       #
 # --------------------------------------------------------------------------- #
 
 

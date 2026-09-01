@@ -16,15 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from shards.core.notes import create_note, delete_note
-from shards.core.tasks import claim_task, create_task, finish_task
-from shards.daemon.client import DaemonClient, default_socket_path
-from shards.schemas.config import Config, load_config
+from mesh.core.notes import create_note, delete_note
+from mesh.core.tasks import claim_task, create_task, finish_task
+from mesh.daemon.client import DaemonClient, default_socket_path
+from mesh.schemas.config import Config, load_config
 from tests.daemon.conftest import running_daemon
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     """The loaded config for the tmp vault the shared fixture just wrote."""
     return load_config()
 

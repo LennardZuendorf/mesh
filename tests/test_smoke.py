@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typer.testing import CliRunner
 
-from shards import __version__
-from shards.cli.__main__ import app
+from mesh import __version__
+from mesh.cli.__main__ import app
 
 
 def test_version_matches_package() -> None:

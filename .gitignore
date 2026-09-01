@@ -1,14 +1,14 @@
 # --- Secrets & local config (never commit) ---
-.shards/
+.mesh/
 config.toml
 config.local.toml
 .env
 .env.*
 *.secret
 
-# --- Shards CLI derived cache / search index (disposable) ---
-.shards-index/
-*.shards-index
+# --- Mesh CLI derived cache / search index (disposable) ---
+.mesh-index/
+*.mesh-index
 index.sqlite
 index.sqlite-*
 

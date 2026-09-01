@@ -1,12 +1,12 @@
-"""agent-usability/8 — plugin bundle + the ``shards`` skill.
+"""agent-usability/8 — plugin bundle + the ``mesh`` skill.
 
 Acceptance coverage (``.spec/features/agent-usability/plan.md`` unit 8):
 
 * ``plugin.json`` / ``.mcp.json`` / ``hooks.json`` / ``marketplace.json`` are valid JSON and
-  reference only console scripts that actually exist (``shards``, ``shards-mcp``, both wired in
+  reference only console scripts that actually exist (``mesh``, ``mesh-mcp``, both wired in
   ``pyproject.toml``).
 * ``SKILL.md`` frontmatter keys are a subset of the six-field spec ({``name``, ``description``,
-  ``license``, ``compatibility``, ``metadata``, ``allowed-tools``}); ``name`` is ``shards``.
+  ``license``, ``compatibility``, ``metadata``, ``allowed-tools``}); ``name`` is ``mesh``.
 * The skill body states all seven vault-coherence rules and carries no authorization-implying
   language — the same denylist ``tests/memory/test_instructions.py`` checks the MCP
   ``instructions`` block against (unit 1 sets the phrasing precedent this unit must match).
@@ -15,7 +15,7 @@ Acceptance coverage (``.spec/features/agent-usability/plan.md`` unit 8):
   file can only name them, never render them.
 * Exactly one skill directory ships under ``plugins/``; the developer-facing
   ``.agents/skills/spec`` and ``.claude/skills/spec`` are untouched.
-* Every CLI command/flag and every ``shards_*`` MCP tool the skill body names is checked against
+* Every CLI command/flag and every ``mesh_*`` MCP tool the skill body names is checked against
   the real, live-introspected surface — a renamed or removed command/tool fails this suite
   rather than silently going stale in prose.
 """
@@ -36,7 +36,7 @@ from typer.core import TyperGroup
 from tests.memory.test_instructions import _AUTH_DENYLIST
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PLUGIN_ROOT = REPO_ROOT / "plugins" / "shards"
+PLUGIN_ROOT = REPO_ROOT / "plugins" / "mesh"
 
 
 # --------------------------------------------------------------------------- #
@@ -49,11 +49,11 @@ def _console_scripts() -> dict[str, str]:
     return dict(data["project"]["scripts"])
 
 
-def test_console_scripts_are_shards_and_shards_mcp() -> None:
+def test_console_scripts_are_mesh_and_mesh_mcp() -> None:
     """Pin the fact the whole bundle's ``command`` fields are checked against."""
     assert _console_scripts() == {
-        "shards": "shards.cli.__main__:app",
-        "shards-mcp": "shards.mcp.server:main",
+        "mesh": "mesh.cli.__main__:app",
+        "mesh-mcp": "mesh.mcp.server:main",
     }
 
 
@@ -66,20 +66,20 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_plugin_json_is_valid_and_named_shards() -> None:
+def test_plugin_json_is_valid_and_named_mesh() -> None:
     data = _load_json(PLUGIN_ROOT / ".claude-plugin" / "plugin.json")
-    assert data["name"] == "shards"
+    assert data["name"] == "mesh"
     assert data["description"]
     assert data["license"] == "MIT"
 
 
-def test_mcp_json_is_valid_and_references_shards_mcp() -> None:
+def test_mcp_json_is_valid_and_references_mesh_mcp() -> None:
     data = _load_json(PLUGIN_ROOT / ".mcp.json")
     servers = data["mcpServers"]
-    assert set(servers) == {"shards"}
-    command = servers["shards"]["command"]
+    assert set(servers) == {"mesh"}
+    command = servers["mesh"]["command"]
     assert command in _console_scripts()
-    assert command == "shards-mcp"
+    assert command == "mesh-mcp"
 
 
 def test_hooks_json_is_valid_and_matches_the_existing_session_start_payload() -> None:
@@ -96,12 +96,12 @@ def test_hooks_json_is_valid_and_matches_the_existing_session_start_payload() ->
 
 def test_marketplace_json_is_valid_and_points_at_the_plugin_dir() -> None:
     data = _load_json(REPO_ROOT / ".claude-plugin" / "marketplace.json")
-    assert data["name"] == "shards"
+    assert data["name"] == "mesh"
     assert data["owner"]["name"]
     assert len(data["plugins"]) == 1
     entry = data["plugins"][0]
-    assert entry["name"] == "shards"
-    assert entry["source"] == "./plugins/shards"
+    assert entry["name"] == "mesh"
+    assert entry["source"] == "./plugins/mesh"
     # The relative path a "repo doubles as its own marketplace" entry promises
     # must actually resolve on disk from the marketplace root (the repo root).
     assert (REPO_ROOT / entry["source"].removeprefix("./")).is_dir()
@@ -118,13 +118,13 @@ def test_marketplace_json_is_valid_and_points_at_the_plugin_dir() -> None:
     ids=["plugin.json", "mcp.json", "hooks.json", "marketplace.json"],
 )
 def test_bundle_json_files_only_name_real_console_scripts(path: Path) -> None:
-    """No JSON file in the bundle may name a command outside {shards, shards-mcp}."""
+    """No JSON file in the bundle may name a command outside {mesh, mesh-mcp}."""
     scripts = set(_console_scripts())
     text = path.read_text(encoding="utf-8")
-    # Every occurrence of a bare "shards" or "shards-mcp" token as a command word
-    # (not as a substring of some other identifier like "shards_note_get") must be
+    # Every occurrence of a bare "mesh" or "mesh-mcp" token as a command word
+    # (not as a substring of some other identifier like "mesh_note_get") must be
     # one of the two real console scripts.
-    for token in re.findall(r"\bshards(?:-mcp)?\b", text):
+    for token in re.findall(r"\bmesh(?:-mcp)?\b", text):
         assert token in scripts, f"{path.name} names unknown command {token!r}"
 
 
@@ -133,7 +133,7 @@ def test_bundle_json_files_only_name_real_console_scripts(path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 _SIX_FIELD_SUBSET = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
-_SKILL_PATH = PLUGIN_ROOT / "skills" / "shards" / "SKILL.md"
+_SKILL_PATH = PLUGIN_ROOT / "skills" / "mesh" / "SKILL.md"
 
 
 def _skill_text() -> str:
@@ -166,8 +166,8 @@ def test_skill_frontmatter_is_a_subset_of_the_six_field_spec() -> None:
     assert extra == set(), f"SKILL.md frontmatter has non-spec keys: {extra}"
 
 
-def test_skill_frontmatter_name_is_shards() -> None:
-    assert _skill_frontmatter()["name"] == "shards"
+def test_skill_frontmatter_name_is_mesh() -> None:
+    assert _skill_frontmatter()["name"] == "mesh"
 
 
 def test_skill_frontmatter_has_a_description() -> None:
@@ -226,7 +226,7 @@ def test_skill_does_not_duplicate_instructions_block_live_config_sections() -> N
 
 def test_exactly_one_skill_directory_under_plugins() -> None:
     skill_dirs = sorted((REPO_ROOT / "plugins").glob("*/skills/*/"))
-    assert [str(p.relative_to(REPO_ROOT)) for p in skill_dirs] == ["plugins/shards/skills/shards"]
+    assert [str(p.relative_to(REPO_ROOT)) for p in skill_dirs] == ["plugins/mesh/skills/mesh"]
 
 
 def test_developer_skill_set_is_untouched() -> None:
@@ -242,8 +242,8 @@ def test_developer_skill_set_is_untouched() -> None:
 
 
 def _cli_note_task_subcommands() -> dict[str, set[str]]:
-    from shards.cli.note import note_app
-    from shards.cli.task import task_app
+    from mesh.cli.note import note_app
+    from mesh.cli.task import task_app
 
     return {
         "note": {c.name for c in note_app.registered_commands if c.name is not None},
@@ -252,7 +252,7 @@ def _cli_note_task_subcommands() -> dict[str, set[str]]:
 
 
 def _cli_top_level_names() -> set[str]:
-    from shards.cli.__main__ import _LEAVES, _SUBAPPS
+    from mesh.cli.__main__ import _LEAVES, _SUBAPPS
 
     return set(_SUBAPPS) | set(_LEAVES)
 
@@ -268,7 +268,7 @@ def _cli_flags(*, group: str, command: str) -> set[str]:
     """
     from typer._click.core import Context as ClickContext
 
-    from shards.cli.__main__ import app
+    from mesh.cli.__main__ import app
 
     click_app = typer.main.get_command(app)
     assert isinstance(click_app, TyperGroup)
@@ -292,7 +292,7 @@ def _cli_flags(*, group: str, command: str) -> set[str]:
 def _mcp_tool_names() -> set[str]:
     import asyncio
 
-    import shards.mcp.server as server
+    import mesh.mcp.server as server
 
     tools = asyncio.run(server.app.list_tools())
     return {tool.name for tool in tools}
@@ -314,7 +314,7 @@ def test_skill_mentions_only_real_top_level_leaf_commands() -> None:
     live = _cli_top_level_names()
     for name in ("recent-activity", "build-context", "graph", "project", "session-start", "init"):
         assert name in body, f"skill body never mentions {name!r}"
-        assert name in live, f"{name!r} is not a real shards command"
+        assert name in live, f"{name!r} is not a real mesh command"
     assert "search" in body
     assert "search" in live
 
@@ -341,7 +341,7 @@ def test_skill_mentions_only_real_cli_flags() -> None:
 
 def test_skill_tags_help_matches_the_real_merge_semantics() -> None:
     """The most-changed, most-likely-to-drift claim: bare `--tags` merges, not replaces."""
-    from shards.core.notes import TAG_SPEC_SEMANTICS
+    from mesh.core.notes import TAG_SPEC_SEMANTICS
 
     body = _skill_body()
     assert "merges" in body.lower()
@@ -372,15 +372,15 @@ def test_allowed_tools_are_all_real_registered_mcp_tools() -> None:
     assert isinstance(allowed, list) and allowed, "allowed-tools must be a non-empty list"
     live_tools = _mcp_tool_names()
     for entry in allowed:
-        assert entry.startswith("mcp__shards__"), f"unexpected allowed-tools entry: {entry}"
-        tool_name = entry.removeprefix("mcp__shards__")
+        assert entry.startswith("mcp__mesh__"), f"unexpected allowed-tools entry: {entry}"
+        tool_name = entry.removeprefix("mcp__mesh__")
         assert tool_name in live_tools, f"allowed-tools names a non-existent tool: {tool_name}"
 
 
 def test_allowed_tools_excludes_every_destructive_tool() -> None:
     """Constraint 4: allowed-tools must never pre-approve a destructive verb.
 
-    ``shards_task_cancel`` is the only MCP tool registered with ``destructiveHint``
+    ``mesh_task_cancel`` is the only MCP tool registered with ``destructiveHint``
     (server.py's own ``_DESTRUCTIVE`` annotation group); the two hard-unlink delete
     verbs (``note delete`` / ``task delete``) are never MCP tools at all, so they
     cannot appear here regardless — :func:`test_delete_verbs_do_not_exist_as_mcp_tools`
@@ -388,14 +388,14 @@ def test_allowed_tools_excludes_every_destructive_tool() -> None:
     """
     import asyncio
 
-    import shards.mcp.server as server
+    import mesh.mcp.server as server
 
     tools = asyncio.run(server.app.list_tools())
     destructive = {t.name for t in tools if (t.annotations and t.annotations.destructiveHint)}
-    assert destructive == {"shards_task_cancel"}
+    assert destructive == {"mesh_task_cancel"}
 
     fm = _skill_frontmatter()
-    allowed = {e.removeprefix("mcp__shards__") for e in fm["allowed-tools"]}
+    allowed = {e.removeprefix("mcp__mesh__") for e in fm["allowed-tools"]}
     assert allowed.isdisjoint(destructive), (
         f"allowed-tools pre-approves destructive tool(s): {allowed & destructive}"
     )
@@ -403,20 +403,20 @@ def test_allowed_tools_excludes_every_destructive_tool() -> None:
 
 def test_delete_verbs_do_not_exist_as_mcp_tools() -> None:
     live_tools = _mcp_tool_names()
-    assert "shards_note_delete" not in live_tools
-    assert "shards_task_delete" not in live_tools
+    assert "mesh_note_delete" not in live_tools
+    assert "mesh_task_delete" not in live_tools
 
 
-def test_skill_mentions_shards_health_and_it_is_a_real_tool() -> None:
+def test_skill_mentions_mesh_health_and_it_is_a_real_tool() -> None:
     body = _skill_body()
-    assert "shards_health" in body
-    assert "shards_health" in _mcp_tool_names()
+    assert "mesh_health" in body
+    assert "mesh_health" in _mcp_tool_names()
 
 
-def test_skill_mentions_shards_session_start_and_it_is_a_real_tool() -> None:
+def test_skill_mentions_mesh_session_start_and_it_is_a_real_tool() -> None:
     body = _skill_body()
-    assert "shards_session_start" in body
-    assert "shards_session_start" in _mcp_tool_names()
+    assert "mesh_session_start" in body
+    assert "mesh_session_start" in _mcp_tool_names()
 
 
 def test_bundle_states_no_notes_application_prerequisite() -> None:

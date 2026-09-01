@@ -15,9 +15,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.cli._output import _iso_z as output_iso_z
-from shards.core.search import _iso_z as search_iso_z
+from mesh.cli.__main__ import app
+from mesh.cli._output import _iso_z as output_iso_z
+from mesh.core.search import _iso_z as search_iso_z
 
 _AWARE = datetime(2026, 6, 1, 12, 30, 0, tzinfo=UTC)
 _NAIVE = datetime(2026, 6, 1, 12, 30, 0)
@@ -58,7 +58,7 @@ def test_iso_z_leaves_naive_datetime_unchanged() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_cli_json_note_new_updated_is_z_suffixed(shards_config: Path, vault: Path) -> None:
+def test_cli_json_note_new_updated_is_z_suffixed(mesh_config: Path, vault: Path) -> None:
     result = _invoke(["--json", "note", "new", "Timestamp Check", "--body", "x"])
     assert result.exit_code == 0, result.output
     obj = json.loads(result.output)
@@ -66,7 +66,7 @@ def test_cli_json_note_new_updated_is_z_suffixed(shards_config: Path, vault: Pat
     assert "+00:00" not in obj["updated"]
 
 
-def test_cli_json_task_new_updated_is_z_suffixed(shards_config: Path, vault: Path) -> None:
+def test_cli_json_task_new_updated_is_z_suffixed(mesh_config: Path, vault: Path) -> None:
     result = _invoke(["--json", "task", "new", "Timestamp Check"])
     assert result.exit_code == 0, result.output
     obj = json.loads(result.output)
@@ -79,7 +79,7 @@ def test_cli_json_task_new_updated_is_z_suffixed(shards_config: Path, vault: Pat
 # --------------------------------------------------------------------------- #
 
 
-def test_cli_search_hit_updated_is_z_suffixed(shards_config: Path, vault: Path) -> None:
+def test_cli_search_hit_updated_is_z_suffixed(mesh_config: Path, vault: Path) -> None:
     new_result = _invoke(["--quiet", "note", "new", "Findable Note", "--body", "x"])
     assert new_result.exit_code == 0, new_result.output
     result = _invoke(["search", "Findable Note"])
@@ -102,7 +102,7 @@ def _meta_value(output: str, key: str) -> str:
     raise AssertionError(f"no `{key}:` line in:\n{output}")
 
 
-def test_note_get_human_timestamps_are_z_suffixed(shards_config: Path, vault: Path) -> None:
+def test_note_get_human_timestamps_are_z_suffixed(mesh_config: Path, vault: Path) -> None:
     """Same field, one format: `note get` text must not drift from its own --json."""
     new_result = _invoke(["--quiet", "note", "new", "Human Timestamp", "--body", "x"])
     assert new_result.exit_code == 0, new_result.output
@@ -114,7 +114,7 @@ def test_note_get_human_timestamps_are_z_suffixed(shards_config: Path, vault: Pa
         assert _meta_value(result.stdout, key).endswith("Z")
 
 
-def test_task_get_human_timestamps_are_z_suffixed(shards_config: Path, vault: Path) -> None:
+def test_task_get_human_timestamps_are_z_suffixed(mesh_config: Path, vault: Path) -> None:
     new_result = _invoke(["--quiet", "task", "new", "Human Timestamp"])
     assert new_result.exit_code == 0, new_result.output
 
@@ -125,7 +125,7 @@ def test_task_get_human_timestamps_are_z_suffixed(shards_config: Path, vault: Pa
         assert _meta_value(result.stdout, key).endswith("Z")
 
 
-def test_note_get_text_and_json_agree_on_updated(shards_config: Path, vault: Path) -> None:
+def test_note_get_text_and_json_agree_on_updated(mesh_config: Path, vault: Path) -> None:
     new_result = _invoke(["--quiet", "note", "new", "Cross Surface", "--body", "x"])
     assert new_result.exit_code == 0, new_result.output
     note_id = new_result.stdout.strip()
@@ -135,7 +135,7 @@ def test_note_get_text_and_json_agree_on_updated(shards_config: Path, vault: Pat
     assert _meta_value(text.stdout, "updated") == payload["updated"]
 
 
-def test_task_get_text_and_json_agree_on_updated(shards_config: Path, vault: Path) -> None:
+def test_task_get_text_and_json_agree_on_updated(mesh_config: Path, vault: Path) -> None:
     new_result = _invoke(["--quiet", "task", "new", "Cross Surface"])
     assert new_result.exit_code == 0, new_result.output
     task_id = new_result.stdout.strip()

@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 from msgspec import ValidationError
 
-from shards.core.ids import generate_task_id
-from shards.schemas.task import Task, TaskStatus
-from shards.storage.files import task_folder
+from mesh.core.ids import generate_task_id
+from mesh.schemas.task import Task, TaskStatus
+from mesh.storage.files import task_folder
 
 # --------------------------------------------------------------------------- #
 # Task schema                                                                   #
@@ -136,7 +136,7 @@ def test_task_unknown_keys_round_trip_unchanged() -> None:
         "claimed_by": None,
         "blocks": [],
         "blocked_by": [],
-        # Keys shards does not own must survive a load/dump cycle untouched.
+        # Keys mesh does not own must survive a load/dump cycle untouched.
         "othertool_pinned": True,
         "custom_ref": "PROJ-123",
     }

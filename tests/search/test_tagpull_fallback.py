@@ -1,15 +1,15 @@
 """search/1 — tag-pull + substring fallback (R2, R3, R4).
 
-Exercises the daemon-independent recall path: :func:`shards.index.tagpull.tagpull`
+Exercises the daemon-independent recall path: :func:`mesh.index.tagpull.tagpull`
 (frontmatter-only tag pull, AND semantics, zero body cost) and
-:func:`shards.index.fallback.search_fallback` (substring scoring matrix + a single
-stderr degradation notice), plus the ``shards search`` CLI surface that routes
+:func:`mesh.index.fallback.search_fallback` (substring scoring matrix + a single
+stderr degradation notice), plus the ``mesh search`` CLI surface that routes
 between them (``--tags`` without a query → tag pull; a query → fallback because no
 ``indexed`` engine is available in this unit).
 
 Corpus for both is **every** ``*.md`` under ``notes/`` and ``tasks/`` (full
 recursive walk, broader than ``note list`` / ``task list``): typed note subfolders,
-both task folders, and coexisting non-shards (foreign) files, which surface with
+both task folders, and coexisting non-mesh (foreign) files, which surface with
 ``id: None``.
 
 Scoring matrix (highest matching tier wins): title exact ``1.0`` · title
@@ -21,7 +21,7 @@ value (``None``, the default) the fallback uses its own floor, the lowest tier
 root tech.md § B5). The tests here pass an explicit low threshold (``0.1``) to
 isolate the scoring matrix from that application rule; the rule itself is
 covered by ``tests/index/test_fallback_threshold.py`` and the CLI cases below,
-whose ``shards_config`` fixture sets an *explicit* ``[search].threshold = 0.65``.
+whose ``mesh_config`` fixture sets an *explicit* ``[search].threshold = 0.65``.
 """
 
 from __future__ import annotations
@@ -34,11 +34,11 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.index.fallback import search_fallback
-from shards.index.tagpull import tagpull
-from shards.schemas.config import Config, load_config
-from shards.schemas.search import SearchResult
+from mesh.cli.__main__ import app
+from mesh.index.fallback import search_fallback
+from mesh.index.tagpull import tagpull
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.search import SearchResult
 
 _NOW = datetime(2026, 6, 20, 12, 0, 0, tzinfo=UTC)
 
@@ -49,7 +49,7 @@ _NOW = datetime(2026, 6, 20, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -71,7 +71,7 @@ def _seed(
     updated: datetime = _NOW,
     created: datetime = _NOW,
 ) -> Path:
-    """Write a shards file (valid ``n-``/``t-`` id) at ``notes|tasks/<rel>/<id>.md``."""
+    """Write a mesh file (valid ``n-``/``t-`` id) at ``notes|tasks/<rel>/<id>.md``."""
     meta: dict[str, object] = {
         "id": entry_id,
         "type": entry_type,
@@ -103,7 +103,7 @@ def _seed_foreign(
     body: str = "Foreign body.",
     extra: dict[str, object] | None = None,
 ) -> Path:
-    """Write a non-shards Markdown file (no ``n-``/``t-`` id)."""
+    """Write a non-mesh Markdown file (no ``n-``/``t-`` id)."""
     meta: dict[str, object] = {}
     if title is not None:
         meta["title"] = title
@@ -395,17 +395,17 @@ def test_fallback_quiet_suppresses_notice(
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards search                                                          #
+# CLI — mesh search                                                          #
 # --------------------------------------------------------------------------- #
 
 
-def test_cli_help_reachable(shards_config: Path) -> None:
+def test_cli_help_reachable(mesh_config: Path) -> None:
     result = _invoke(["search", "--help"])
     assert result.exit_code == 0, result.output
     assert "search" in result.output.lower()
 
 
-def test_cli_tags_routes_to_tagpull(shards_config: Path, vault: Path) -> None:
+def test_cli_tags_routes_to_tagpull(mesh_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", tags=["ndc"], title="NDC Note")
     _seed(vault, "notes", entry_id="n-miss", tags=["other"], title="Other")
     result = _invoke(["search", "--tags", "ndc"])
@@ -417,7 +417,7 @@ def test_cli_tags_routes_to_tagpull(shards_config: Path, vault: Path) -> None:
     assert all("snippet" not in h and "body" not in h for h in arr)
 
 
-def test_cli_query_degraded_json_and_notice(shards_config: Path, vault: Path) -> None:
+def test_cli_query_degraded_json_and_notice(mesh_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record", body="full detail")
     result = _invoke(["search", "Alpha Decision Record"])
     assert result.exit_code == 0, result.output
@@ -427,14 +427,14 @@ def test_cli_query_degraded_json_and_notice(shards_config: Path, vault: Path) ->
     assert _NOTICE in result.stderr
 
 
-def test_cli_quiet_suppresses_notice(shards_config: Path, vault: Path) -> None:
+def test_cli_quiet_suppresses_notice(mesh_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
     result = _invoke(["--quiet", "search", "Alpha Decision Record"])
     assert result.exit_code == 0, result.output
     assert _NOTICE not in result.stderr
 
 
-def test_cli_json_hit_shape(shards_config: Path, vault: Path) -> None:
+def test_cli_json_hit_shape(mesh_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Shape Report", tags=["t"], owner="me")
     result = _invoke(["search", "Shape Report"])
     assert result.exit_code == 0, result.output
@@ -444,7 +444,7 @@ def test_cli_json_hit_shape(shards_config: Path, vault: Path) -> None:
     assert hit["path"].endswith("n-hit.md")
 
 
-def test_cli_meta_only_omits_snippet(shards_config: Path, vault: Path) -> None:
+def test_cli_meta_only_omits_snippet(mesh_config: Path, vault: Path) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Meta Report", body="BODYMARK")
     result = _invoke(["search", "Meta Report", "--meta-only"])
     assert result.exit_code == 0, result.output
@@ -453,7 +453,7 @@ def test_cli_meta_only_omits_snippet(shards_config: Path, vault: Path) -> None:
     assert "body" not in hit
 
 
-def test_cli_full_includes_body(shards_config: Path, vault: Path) -> None:
+def test_cli_full_includes_body(mesh_config: Path, vault: Path) -> None:
     # --full carries the complete Markdown body in the declared ``snippet`` field
     # (the hit shape has no separate ``body`` key).
     _seed(vault, "notes", entry_id="n-hit", title="Full Report", body="UNIQUE-BODY-MARK")
@@ -464,8 +464,8 @@ def test_cli_full_includes_body(shards_config: Path, vault: Path) -> None:
     assert "body" not in hit
 
 
-def test_cli_threshold_excludes(shards_config: Path, vault: Path) -> None:
-    # shards_config sets an explicit [search].threshold = 0.65 → the body-only
+def test_cli_threshold_excludes(mesh_config: Path, vault: Path) -> None:
+    # mesh_config sets an explicit [search].threshold = 0.65 → the body-only
     # hit (0.4) is excluded, same as before this fix (explicit is honoured).
     _seed(vault, "notes", entry_id="n-body", title="Nothing", body="the needle here")
     excluded = _invoke(["search", "needle"])
@@ -475,7 +475,7 @@ def test_cli_threshold_excludes(shards_config: Path, vault: Path) -> None:
     assert {h["id"] for h in json.loads(included.stdout)} == {"n-body"}
 
 
-def test_cli_limit_caps_results(shards_config: Path, vault: Path) -> None:
+def test_cli_limit_caps_results(mesh_config: Path, vault: Path) -> None:
     for i in range(4):
         _seed(vault, "notes", entry_id=f"n-{i}", title="Report", updated=_NOW - timedelta(days=i))
     result = _invoke(["search", "Report", "--limit", "2"])

@@ -2,7 +2,7 @@
 
 Two halves, matching the unit's acceptance criteria:
 
-* **Server** — an ``asyncio`` unix socket at ``$XDG_RUNTIME_DIR/shards.sock`` (mode
+* **Server** — an ``asyncio`` unix socket at ``$XDG_RUNTIME_DIR/mesh.sock`` (mode
   ``0600``) speaking NDJSON. ``ping`` returns ``{"pong": true}``; every other
   method on a *config-less* server is unknown and yields a ``404`` error (the
   ``503`` stub table was culled in core-hardening/5 — a handler is either wired
@@ -10,7 +10,7 @@ Two halves, matching the unit's acceptance criteria:
   envelopes carry **no** ``id`` field (only success echoes the request id). These
   are exercised end-to-end over a real blocking socket against a daemon run in a
   background event-loop thread.
-* **Client** — :class:`~shards.daemon.client.DaemonClient` connects, and on a
+* **Client** — :class:`~mesh.daemon.client.DaemonClient` connects, and on a
   connection failure (``ConnectionRefusedError`` / ``FileNotFoundError``) invokes
   the caller's fallback instead of raising. The wired read verbs
   (``note.list`` / ``task.list`` / ``vault.status`` / ``search.tag_pull``) fall
@@ -35,10 +35,10 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from shards.daemon.client import DaemonClient, DaemonError, default_socket_path
-from shards.daemon.server import DaemonServer
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder, task_folder
+from mesh.daemon.client import DaemonClient, DaemonError, default_socket_path
+from mesh.daemon.server import DaemonServer
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder, task_folder
 from tests.daemon.conftest import running_daemon
 
 # Methods a *config-less* server does not serve: the four wired reads (registered
@@ -63,7 +63,7 @@ _UNSERVED_METHODS = (
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -160,15 +160,15 @@ def test_default_socket_path_uses_xdg_runtime_dir(
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     path = default_socket_path(cfg)
     assert path.parent == tmp_path
-    assert path.name.startswith("shards-")
+    assert path.name.startswith("mesh-")
     assert path.suffix == ".sock"
 
 
-def test_default_socket_path_falls_back_to_shards_run(
+def test_default_socket_path_falls_back_to_mesh_run(
     monkeypatch: pytest.MonkeyPatch, cfg: Config
 ) -> None:
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    assert default_socket_path(cfg).parent == Path.home() / ".shards" / "run"
+    assert default_socket_path(cfg).parent == Path.home() / ".mesh" / "run"
 
 
 def test_default_socket_path_without_a_config_keeps_the_legacy_name(
@@ -176,8 +176,8 @@ def test_default_socket_path_without_a_config_keeps_the_legacy_name(
 ) -> None:
     """No resolvable config → no vault to key on, and never an exception."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(tmp_path / "absent.toml"))
-    assert default_socket_path() == tmp_path / "shards.sock"
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(tmp_path / "absent.toml"))
+    assert default_socket_path() == tmp_path / "mesh.sock"
 
 
 # --------------------------------------------------------------------------- #
@@ -261,7 +261,7 @@ def test_call_prefers_socket_when_daemon_up(socket_path: Path) -> None:
 
 
 def test_call_falls_back_on_connection_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise ConnectionRefusedError
@@ -271,7 +271,7 @@ def test_call_falls_back_on_connection_refused(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_call_falls_back_on_file_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise FileNotFoundError
@@ -301,7 +301,7 @@ def test_note_list_falls_back_to_recursive_id_scan(
 ) -> None:
     _seed_note(vault, note_id="n-a", title="A")
     _seed_note(vault, note_id="n-b", title="B", note_type="decision")
-    # A foreign file (no shards id) must be excluded from the scan.
+    # A foreign file (no mesh id) must be excluded from the scan.
     foreign = vault / "notes" / "othertool.md"
     foreign.write_text(
         frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
@@ -363,7 +363,7 @@ def test_client_exposes_no_write_methods() -> None:
 
 def test_call_falls_back_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hung daemon raises TimeoutError (an OSError) — must fall back, not escape."""
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise TimeoutError
@@ -374,7 +374,7 @@ def test_call_falls_back_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_call_falls_back_on_broken_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
     """A mid-response crash (BrokenPipeError, an OSError) must fall back."""
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise BrokenPipeError
@@ -385,7 +385,7 @@ def test_call_falls_back_on_broken_pipe(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_call_falls_back_on_truncated_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     """A truncated/garbled reply raises json.JSONDecodeError — must fall back."""
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise json.JSONDecodeError("Expecting value", "", 0)
@@ -448,7 +448,7 @@ def test_wired_reads_fall_back_on_every_server_state_code(
 ) -> None:
     """404 (unknown), 500 (handler failed) and 503 all degrade to the disk path."""
     _seed_note(vault, note_id="n-degrade", title="Degrade")
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise DaemonError(code, "server state")
@@ -459,7 +459,7 @@ def test_wired_reads_fall_back_on_every_server_state_code(
 
 def test_call_falls_back_on_503_daemon_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 503 DaemonError from a live daemon is fallback-eligible by default."""
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
 
     def boom(method: str, params: dict[str, object]) -> object:
         raise DaemonError(503, "not yet available")
@@ -470,7 +470,7 @@ def test_call_falls_back_on_503_daemon_error(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_call_propagates_non_fallback_domain_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A domain error (e.g. 3 not-found) must propagate — never be swallowed."""
-    client = DaemonClient(socket_path=Path("/nonexistent/shards.sock"))
+    client = DaemonClient(socket_path=Path("/nonexistent/mesh.sock"))
     ran: list[bool] = []
 
     def boom(method: str, params: dict[str, object]) -> object:
@@ -504,7 +504,7 @@ def test_socket_umask_guard_yields_0600_without_chmod(
     def _no_chmod(*_a: object, **_k: object) -> None:
         return None
 
-    monkeypatch.setattr("shards.daemon.server.os.chmod", _no_chmod)
+    monkeypatch.setattr("mesh.daemon.server.os.chmod", _no_chmod)
     old_umask = os.umask(0o000)  # most permissive → bind would yield 0777 without the guard
     server = DaemonServer(socket_path)
     loop = asyncio.new_event_loop()

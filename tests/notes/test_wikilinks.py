@@ -1,17 +1,17 @@
 """notes/5 — wikilinks: ``[[Title]]`` / ``[[n-id]]`` / ``[[t-id]]`` → ``related``.
 
-Exercises R4 (Wikilinks). :func:`shards.core.wikilinks.resolve_wikilinks` scans a
+Exercises R4 (Wikilinks). :func:`mesh.core.wikilinks.resolve_wikilinks` scans a
 note body for ``[[...]]`` links and returns ``(body_unchanged, resolved_ids)``:
 a ``[[Title]]`` link is resolved by an on-disk lookup across ``notes/`` (no
 daemon), an id-form ``[[n-id]]`` / ``[[t-id]]`` passes through verbatim and its
 id is taken directly (no file lookup). Unresolvable titles stay verbatim in the
-body and surface via :func:`shards.core.wikilinks.find_dangling` for ``shards
+body and surface via :func:`mesh.core.wikilinks.find_dangling` for ``mesh
 status``. The amend verbs (``append_note`` / ``update_note``) call the resolver
 on every body write and persist the derived ``related`` list — ``related`` is a
 pure function of the body.
 
-Only shards-owned notes (id ``n-…``) participate in title resolution, mirroring
-``list_notes``: a coexisting foreign file (title present, non-shards id)
+Only mesh-owned notes (id ``n-…``) participate in title resolution, mirroring
+``list_notes``: a coexisting foreign file (title present, non-mesh id)
 must never shadow a link nor leak a foreign id into ``related``.
 """
 
@@ -23,10 +23,10 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-from shards.core.notes import append_note, update_note
-from shards.core.wikilinks import find_dangling, resolve_wikilinks
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder
+from mesh.core.notes import append_note, update_note
+from mesh.core.wikilinks import find_dangling, resolve_wikilinks
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder
 
 _WHEN = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -40,7 +40,7 @@ def _seed_note(
     body: str = "Body line.",
     related: list[str] | None = None,
 ) -> Path:
-    """Write a shards note straight to disk in the folder matching its type."""
+    """Write a mesh note straight to disk in the folder matching its type."""
     meta: dict[str, object] = {
         "id": note_id,
         "type": note_type,
@@ -61,7 +61,7 @@ def _seed_note(
 
 
 def _seed_foreign(vault: Path, name: str, meta: dict[str, object]) -> Path:
-    """Write a non-shards Markdown file (id is not a shards ``n-`` id) under ``notes/``."""
+    """Write a non-mesh Markdown file (id is not a mesh ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
     post = frontmatter.Post("Foreign content.")
     post.metadata = meta
@@ -74,7 +74,7 @@ def _reload(path: Path) -> frontmatter.Post:
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -156,7 +156,7 @@ def _seed_task(
     rel: str = "tasks/open",
     body: str = "Task body.",
 ) -> Path:
-    """Write a shards task straight to disk (core-hardening/4: dangling covers tasks too)."""
+    """Write a mesh task straight to disk (core-hardening/4: dangling covers tasks too)."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -203,26 +203,26 @@ def test_find_dangling_dedupes_across_notes_and_tasks(vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Shards-notes-only: coexisting foreign files must not resolve or leak ids      #
+# Mesh-notes-only: coexisting foreign files must not resolve or leak ids      #
 # --------------------------------------------------------------------------- #
 
 
 def test_foreign_title_does_not_resolve(vault: Path) -> None:
-    # A non-shards file with a title but a foreign id must not shadow the link.
+    # A non-mesh file with a title but a foreign id must not shadow the link.
     _seed_foreign(vault, "daily-2026-06-01", {"id": "ext-123", "title": "Daily Log"})
     _seed_note(vault, note_id="n-src", title="Src", body="See [[Daily Log]].")
     out_body, related = resolve_wikilinks("See [[Daily Log]].", vault)
     assert related == []  # foreign id never leaks into related
     assert "[[Daily Log]]" in out_body  # unresolved -> left verbatim
-    # The shards note's link to the foreign title is dangling, reported for status.
+    # The mesh note's link to the foreign title is dangling, reported for status.
     assert find_dangling(vault) == ["Daily Log"]
 
 
-def test_shards_note_wins_over_foreign_same_title(vault: Path) -> None:
+def test_mesh_note_wins_over_foreign_same_title(vault: Path) -> None:
     _seed_foreign(vault, "foreign", {"id": "ext-9", "title": "Shared Title"})
-    _seed_note(vault, note_id="n-shards", title="Shared Title")
+    _seed_note(vault, note_id="n-mesh", title="Shared Title")
     _, related = resolve_wikilinks("[[Shared Title]]", vault)
-    assert related == ["n-shards"]
+    assert related == ["n-mesh"]
 
 
 # --------------------------------------------------------------------------- #
@@ -296,7 +296,7 @@ def test_malformed_yaml_note_does_not_crash_wikilinks(cfg: Config, vault: Path) 
     # Title resolution still works despite the corrupt sibling.
     _, related = resolve_wikilinks("[[Target]]", vault)
     assert related == ["n-ref"]
-    # find_dangling (feeds `shards status`) skips the corrupt file instead of raising.
+    # find_dangling (feeds `mesh status`) skips the corrupt file instead of raising.
     assert find_dangling(vault) == []
 
 
@@ -311,7 +311,7 @@ def test_find_dangling_ignores_files_outside_the_task_lifecycle_folders(vault: P
     ``core.tasks._iter_task_files`` / ``in_task_scope`` are deliberately
     non-recursive over exactly those two folders, so a file filed beside them
     (``tasks/archive/``) or a level deeper (``tasks/open/sub/``) is not a task
-    this program can get, claim, finish or edit. ``shards status`` must not
+    this program can get, claim, finish or edit. ``mesh status`` must not
     count broken links from files no verb can reach — the count would name a
     problem the tool offers no way to fix.
     """

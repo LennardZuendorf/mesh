@@ -32,10 +32,10 @@ from pathlib import Path
 import frontmatter
 import pytest
 
-import shards.core.notes as notes_mod
-from shards.core.notes import append_note, delete_note, update_note
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder
+import mesh.core.notes as notes_mod
+from mesh.core.notes import append_note, delete_note, update_note
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder
 
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _RACER = "racing-verb"  # thread name the widened resolver parks on
@@ -63,7 +63,7 @@ def _seed_note(vault: Path, *, note_id: str, title: str = "Race Note") -> Path:
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -89,7 +89,7 @@ class _Interleave:
 
         return widened
 
-    def run(self, racer: Callable[[], None], mover: Callable[[], None]) -> None:
+    def run(self, racer: Callable[[], object], mover: Callable[[], object]) -> None:
         """Run ``racer`` on its own thread, interleaved with ``mover`` here."""
 
         def guarded() -> None:

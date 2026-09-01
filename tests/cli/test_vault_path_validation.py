@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from shards.schemas.config import load_config
+from mesh.schemas.config import load_config
 
 
 def _config_at(config_path: Path, vault: Path) -> None:
@@ -29,7 +29,7 @@ def test_a_file_as_vault_root_is_a_validation_error(
     a_file.write_text("i am a file", encoding="utf-8")
     config_path = tmp_path / "config.toml"
     _config_at(config_path, a_file)
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(config_path))
 
     with pytest.raises(Exception, match="not a directory"):
         load_config()
@@ -42,7 +42,7 @@ def test_a_vault_that_does_not_exist_yet_still_loads(
     missing = tmp_path / "not-created-yet"
     config_path = tmp_path / "config.toml"
     _config_at(config_path, missing)
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(config_path))
 
     assert load_config().core.vault_path == missing.resolve()
 
@@ -57,6 +57,6 @@ def test_a_symlinked_vault_resolves_to_its_target(
     link.symlink_to(real)
     config_path = tmp_path / "config.toml"
     _config_at(config_path, link)
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(config_path))
 
     assert load_config().core.vault_path == real.resolve()

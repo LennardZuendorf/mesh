@@ -27,14 +27,14 @@ from pathlib import Path
 
 import pytest
 
-from shards.daemon.client import DaemonClient
-from shards.daemon.server import DaemonServer, RpcError
-from shards.schemas.config import Config, load_config
+from mesh.daemon.client import DaemonClient
+from mesh.daemon.server import DaemonServer, RpcError
+from mesh.schemas.config import Config, load_config
 from tests.daemon.conftest import running_daemon
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 

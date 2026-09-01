@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
+from mesh.cli.__main__ import app
 
 _CORRUPT_NOTE = "---\nid: n-bad\ntype: note\ntitle: Broken\n---\n\nbody\n"
 _CORRUPT_TASK = "---\nid: t-bad\ntype: task\nstatus: open\ntitle: Broken\n---\n\nbody\n"
@@ -25,7 +25,7 @@ _NOT_FOUND = 3
 
 
 @pytest.fixture
-def corrupt_vault(shards_config: Path, vault: Path) -> Path:
+def corrupt_vault(mesh_config: Path, vault: Path) -> Path:
     """A vault holding one note and one task that are missing required fields."""
     (vault / "notes").mkdir(parents=True, exist_ok=True)
     (vault / "tasks" / "open").mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,15 @@
-"""daemon/3 — Admin: daemon lifecycle, ``shards status``, ``reindex``.
+"""daemon/3 — Admin: daemon lifecycle, ``mesh status``, ``reindex``.
 
 Three surfaces, matching the unit's acceptance criteria (spec R4):
 
 * **Daemon lifecycle** — ``daemon start|stop|status`` over a PID state file that
-  lives beside the socket (``$XDG_RUNTIME_DIR/shards.pid``). ``start`` is idempotent
+  lives beside the socket (``$XDG_RUNTIME_DIR/mesh.pid``). ``start`` is idempotent
   (a live PID means "already running", no second spawn); ``stop`` is idempotent
   (no PID file means "not running"). The PID file is written atomically. The heavy
   process spawn / signal are exercised via seams (``spawn_daemon`` /
   ``terminate_process``) rather than forking a real daemon inside the
   multi-threaded test process.
-* **``shards status``** — vault health by *direct scan* (works daemon-down): note
+* **``mesh status``** — vault health by *direct scan* (works daemon-down): note
   count, tasks-by-status, freshness (newest mtime + age), dangling wikilinks, and
   stale ``O_EXCL`` locks (PID dead **or** age > 300 s). Read-only: it never bumps
   ``updated`` nor rewrites a file.
@@ -18,7 +18,7 @@ Three surfaces, matching the unit's acceptance criteria (spec R4):
   invoked (the subprocess seam is mocked here so no real ``indexed`` runs).
 
 PID-path resolution reads ``$XDG_RUNTIME_DIR``; every test that touches it pins the
-runtime dir into ``tmp_path`` so no real ``~/.shards/run`` file is ever written.
+runtime dir into ``tmp_path`` so no real ``~/.mesh/run`` file is ever written.
 """
 
 from __future__ import annotations
@@ -34,20 +34,20 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner, Result
 
-from shards.cli.__main__ import app
-from shards.cli.admin import (
+from mesh.cli.__main__ import app
+from mesh.cli.admin import (
     _agent_breakdown,
     daemon_running,
     default_pid_path,
     read_pid,
     write_pid,
 )
-from shards.core.lenses import scan_stale_locks
-from shards.core.tasks import list_tasks
-from shards.daemon.client import DaemonClient, default_socket_path
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder, task_folder
-from shards.storage.locks import LOCK_TTL_SECONDS
+from mesh.core.lenses import scan_stale_locks
+from mesh.core.tasks import list_tasks
+from mesh.daemon.client import DaemonClient, default_socket_path
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder, task_folder
+from mesh.storage.locks import LOCK_TTL_SECONDS
 
 _STALE_AGE = LOCK_TTL_SECONDS + 100.0  # comfortably past the 300 s TTL
 
@@ -56,13 +56,13 @@ def vault_status(config: Config) -> dict[str, Any]:
     """The daemon-down ``vault.status`` payload: the client's own file-op fallback.
 
     core-hardening/5 moved the report assembly into
-    :func:`shards.core.lenses.status_report` and wired ``shards status`` through
+    :func:`mesh.core.lenses.status_report` and wired ``mesh status`` through
     :meth:`DaemonClient.vault_status`. Pointing this helper at a socket that
     cannot exist keeps every assertion below on the *fallback* path — the one the
     original direct-scan tests pinned — while exercising the shipped code path
     rather than a retired helper.
     """
-    return DaemonClient(socket_path=Path("/nonexistent/shards-status.sock")).vault_status(config)
+    return DaemonClient(socket_path=Path("/nonexistent/mesh-status.sock")).vault_status(config)
 
 
 # --------------------------------------------------------------------------- #
@@ -71,7 +71,7 @@ def vault_status(config: Config) -> dict[str, Any]:
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -185,12 +185,12 @@ def test_default_pid_path_uses_xdg_runtime_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert default_pid_path() == tmp_path / "shards.pid"
+    assert default_pid_path() == tmp_path / "mesh.pid"
 
 
-def test_default_pid_path_falls_back_to_shards_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_pid_path_falls_back_to_mesh_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    assert default_pid_path() == Path.home() / ".shards" / "run" / "shards.pid"
+    assert default_pid_path() == Path.home() / ".mesh" / "run" / "mesh.pid"
 
 
 # --------------------------------------------------------------------------- #
@@ -199,7 +199,7 @@ def test_default_pid_path_falls_back_to_shards_run(monkeypatch: pytest.MonkeyPat
 
 
 def test_write_pid_roundtrips_and_leaves_only_the_pid(tmp_path: Path) -> None:
-    pid_path = tmp_path / "shards.pid"
+    pid_path = tmp_path / "mesh.pid"
     write_pid(pid_path, 4242)
     assert read_pid(pid_path) == 4242
     assert pid_path.read_text(encoding="utf-8").strip() == "4242"
@@ -212,19 +212,19 @@ def test_read_pid_missing_returns_none(tmp_path: Path) -> None:
 
 
 def test_read_pid_malformed_returns_none(tmp_path: Path) -> None:
-    pid_path = tmp_path / "shards.pid"
+    pid_path = tmp_path / "mesh.pid"
     pid_path.write_text("not-a-pid\n", encoding="utf-8")
     assert read_pid(pid_path) is None
 
 
 def test_daemon_running_true_for_live_pid(tmp_path: Path) -> None:
-    pid_path = tmp_path / "shards.pid"
+    pid_path = tmp_path / "mesh.pid"
     write_pid(pid_path, os.getpid())
     assert daemon_running(pid_path) == os.getpid()
 
 
 def test_daemon_running_none_for_dead_pid(tmp_path: Path) -> None:
-    pid_path = tmp_path / "shards.pid"
+    pid_path = tmp_path / "mesh.pid"
     write_pid(pid_path, _find_dead_pid())
     assert daemon_running(pid_path) is None
 
@@ -328,7 +328,7 @@ def test_scan_stale_locks_scans_notes_and_tasks(cfg: Config, vault: Path) -> Non
 
 
 # --------------------------------------------------------------------------- #
-# shards status (CLI) — direct scan, daemon-down, read-only                    #
+# mesh status (CLI) — direct scan, daemon-down, read-only                    #
 # --------------------------------------------------------------------------- #
 
 
@@ -441,7 +441,7 @@ def test_agent_breakdown_empty_vault_is_empty_dict(cfg: Config, vault: Path) -> 
 
 
 # --------------------------------------------------------------------------- #
-# shards status — the agents breakdown end to end (team-awareness/4)           #
+# mesh status — the agents breakdown end to end (team-awareness/4)           #
 # --------------------------------------------------------------------------- #
 
 
@@ -479,9 +479,9 @@ def test_status_agents_warm_and_cold_agree(cfg: Config, vault: Path, sock_dir: P
     cold_agents = _agent_breakdown(
         DaemonClient(socket_path=sock_dir / "nonexistent.sock").task_list(cfg, limit=None)
     )
-    with running_daemon(sock_dir / "shards.sock", config=cfg):
+    with running_daemon(sock_dir / "mesh.sock", config=cfg):
         warm_agents = _agent_breakdown(
-            DaemonClient(socket_path=sock_dir / "shards.sock").task_list(cfg, limit=None)
+            DaemonClient(socket_path=sock_dir / "mesh.sock").task_list(cfg, limit=None)
         )
     assert cold_agents == warm_agents
     assert cold_agents["agent-a"] == {"owns_open": 1, "claimed": 1, "stale_claims": 0}
@@ -495,7 +495,7 @@ def test_status_agents_warm_and_cold_agree(cfg: Config, vault: Path, sock_dir: P
 def test_reindex_delegates_to_indexed(
     cfg: Config, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from shards.index import indexed_client
+    from mesh.index import indexed_client
 
     calls: list[Config] = []
     monkeypatch.setattr(indexed_client, "reindex", calls.append)
@@ -508,7 +508,7 @@ def test_reindex_delegates_to_indexed(
 def test_reindex_quiet_still_delegates(
     cfg: Config, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from shards.index import indexed_client
+    from mesh.index import indexed_client
 
     calls: list[Config] = []
     monkeypatch.setattr(indexed_client, "reindex", calls.append)
@@ -521,7 +521,7 @@ def test_reindex_degrades_when_indexed_binary_missing(
     cfg: Config, runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A missing/failed ``indexed`` binary degrades with a notice — never a crash."""
-    from shards.index import indexed_client
+    from mesh.index import indexed_client
 
     def _missing(config: Config) -> None:
         raise FileNotFoundError("indexed")
@@ -550,7 +550,7 @@ def test_daemon_status_json_when_down(cfg: Config, runtime_dir: Path) -> None:
     assert obj["running"] is False
     assert obj["pid"] is None
     # The socket file is keyed on the vault it serves, so the reported path is
-    # this vault's socket — not a machine-wide ``shards.sock``.
+    # this vault's socket — not a machine-wide ``mesh.sock``.
     assert obj["socket"] == str(default_socket_path())
 
 
@@ -576,7 +576,7 @@ def test_daemon_start_idempotent_when_running(
     def _no_spawn() -> int:  # pragma: no cover - must never run
         raise AssertionError("start must not spawn a second daemon")
 
-    monkeypatch.setattr("shards.cli.admin.spawn_daemon", _no_spawn)
+    monkeypatch.setattr("mesh.cli.admin.spawn_daemon", _no_spawn)
     result = _invoke(["daemon", "start"])
     assert result.exit_code == 0, result.output
     assert "already running" in result.output.lower()
@@ -591,7 +591,7 @@ def test_daemon_start_spawns_when_down(
         calls.append(True)
         return 54321
 
-    monkeypatch.setattr("shards.cli.admin.spawn_daemon", _fake_spawn)
+    monkeypatch.setattr("mesh.cli.admin.spawn_daemon", _fake_spawn)
     result = _invoke(["daemon", "start"])
     assert result.exit_code == 0, result.output
     assert calls == [True]
@@ -613,7 +613,7 @@ def test_daemon_stop_terminates_and_cleans_up(
     socket_path.write_text("", encoding="utf-8")  # stand-in for the socket file
 
     killed: list[int] = []
-    monkeypatch.setattr("shards.cli.admin.terminate_process", lambda pid: killed.append(pid))
+    monkeypatch.setattr("mesh.cli.admin.terminate_process", lambda pid: killed.append(pid))
 
     result = _invoke(["daemon", "stop"])
     assert result.exit_code == 0, result.output

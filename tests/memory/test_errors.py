@@ -1,10 +1,10 @@
 """agent-usability/5 — Structured MCP errors, first-run config failure.
 
-Brief: ``.superpowers/sdd/shards-3track/agent-usability-5-brief.md``. Two defects:
+Brief: ``.superpowers/sdd/mesh-3track/agent-usability-5-brief.md``. Two defects:
 
 * **Claim conflict was prose, not data.** ``ClaimConflictError`` always carried
   ``existing_owner``/``task_id`` as attributes, but the MCP boundary
-  (``_guarded``) flattened every ``ShardsError`` to ``ToolError(str(exc))`` — an
+  (``_guarded``) flattened every ``MeshError`` to ``ToolError(str(exc))`` — an
   English sentence an agent had to parse. ``_guarded`` now raises a ``ToolError``
   whose message is a JSON object: ``{kind, message, next_action}`` plus the
   exception's own structured fields (``task_id``, ``existing_owner``, ...).
@@ -12,21 +12,21 @@ Brief: ``.superpowers/sdd/shards-3track/agent-usability-5-brief.md``. Two defect
   ``_guarded`` nor FastMCP's own dispatcher catches anything above
   ``Exception``, so a missing config on an MCP-only machine could escape a real
   tool call as an unhandled crash. ``load_config`` now raises
-  :class:`~shards.schemas.config.ConfigMissingError`, a
-  :class:`~shards.core.errors.ShardsError` (plain ``Exception``) — caught by
+  :class:`~mesh.schemas.config.ConfigMissingError`, a
+  :class:`~mesh.core.errors.MeshError` (plain ``Exception``) — caught by
   ``_guarded`` like any other domain exception. The CLI is unaffected: exit 2,
   same message, now via the one ``cli_errors()`` mapper instead of a bespoke
   ``SystemExit``.
 
 Coverage:
 
-* A claim conflict driven through the *registered* ``shards_task_claim`` tool
+* A claim conflict driven through the *registered* ``mesh_task_claim`` tool
   (``server.app.call_tool``) yields ``kind="claim_conflict"`` plus ``task_id``
   and ``existing_owner`` as their own JSON fields — asserted as fields, never a
   substring of the ``message`` sentence.
 * Every registered tool, called with no config file present, raises a clean
   ``fastmcp.exceptions.ToolError`` (never ``SystemExit``/any other
-  ``BaseException``) naming ``shards init`` — asserted per tool, driven through
+  ``BaseException``) naming ``mesh init`` — asserted per tool, driven through
   the real registration table so a newly added tool cannot silently skip this
   net.
 * A representative spread of the other domain exceptions an agent must branch
@@ -48,13 +48,13 @@ import pytest
 from fastmcp.exceptions import ToolError
 from typer.testing import CliRunner
 
-import shards.mcp.server as server
-from shards.cli.__main__ import app as cli_app
-from shards.core.notes import create_note as core_create_note
-from shards.core.tasks import claim_task as core_claim_task
-from shards.core.tasks import create_task as core_create_task
-from shards.schemas.config import Config, load_config
-from shards.storage import locks
+import mesh.mcp.server as server
+from mesh.cli.__main__ import app as cli_app
+from mesh.core.notes import create_note as core_create_note
+from mesh.core.tasks import claim_task as core_claim_task
+from mesh.core.tasks import create_task as core_create_task
+from mesh.schemas.config import Config, load_config
+from mesh.storage import locks
 
 # --------------------------------------------------------------------------- #
 # Fixtures                                                                     #
@@ -62,20 +62,20 @@ from shards.storage import locks
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
 @pytest.fixture
 def missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Export ``SHARDS_CONFIG_PATH`` at a path that does not exist.
+    """Export ``MESH_CONFIG_PATH`` at a path that does not exist.
 
-    Deliberately does *not* use the ``shards_config`` fixture — the whole point
+    Deliberately does *not* use the ``mesh_config`` fixture — the whole point
     is that no config file is present anywhere ``load_config`` would look.
     """
     missing = tmp_path / "nope" / "config.toml"
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(missing))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(missing))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     return missing
 
 
@@ -97,7 +97,7 @@ def test_claim_conflict_over_mcp_yields_structured_fields(cfg: Config) -> None:
 
     with pytest.raises(ToolError) as exc_info:
         asyncio.run(
-            server.app.call_tool("shards_task_claim", {"task_id": task.id, "claimer": "test-agent"})
+            server.app.call_tool("mesh_task_claim", {"task_id": task.id, "claimer": "test-agent"})
         )
 
     payload = json.loads(str(exc_info.value))
@@ -120,7 +120,7 @@ def test_release_conflict_over_mcp_yields_structured_fields(cfg: Config) -> None
 
     with pytest.raises(ToolError) as exc_info:
         asyncio.run(
-            server.app.call_tool("shards_task_release", {"task_id": task.id, "owner": "test-agent"})
+            server.app.call_tool("mesh_task_release", {"task_id": task.id, "owner": "test-agent"})
         )
 
     payload = json.loads(str(exc_info.value))
@@ -149,7 +149,7 @@ def test_lock_conflict_over_mcp_yields_lock_conflict_kind(
 
     with pytest.raises(ToolError) as exc_info:
         asyncio.run(
-            server.app.call_tool("shards_task_append", {"task_id": task.id, "text": "blocked"})
+            server.app.call_tool("mesh_task_append", {"task_id": task.id, "text": "blocked"})
         )
 
     payload = json.loads(str(exc_info.value))
@@ -167,27 +167,27 @@ def test_lock_conflict_over_mcp_yields_lock_conflict_kind(
 # asserted for exact set-equality against the live registration table below,
 # so a newly added tool cannot silently skip this net.
 _MINIMAL_ARGS: dict[str, dict[str, Any]] = {
-    "shards_note_get": {"id": "n-doesnotmatter"},
-    "shards_note_list": {},
-    "shards_task_get": {"id": "t-doesnotmatter"},
-    "shards_task_list": {},
-    "shards_search": {},
-    "shards_health": {},
-    "shards_recent_activity": {},
-    "shards_build_context": {"seed_id": "n-doesnotmatter"},
-    "shards_graph": {"seed_id": "n-doesnotmatter"},
-    "shards_project": {"project_id": "n-doesnotmatter"},
-    "shards_session_start": {},
-    "shards_note_new": {"title": "x"},
-    "shards_note_append": {"target": "n-doesnotmatter", "text": "y"},
-    "shards_task_new": {"title": "x"},
-    "shards_task_append": {"task_id": "t-doesnotmatter", "text": "y"},
-    "shards_note_update": {"target": "n-doesnotmatter"},
-    "shards_task_claim": {"task_id": "t-doesnotmatter"},
-    "shards_task_release": {"task_id": "t-doesnotmatter"},
-    "shards_task_finish": {"task_id": "t-doesnotmatter"},
-    "shards_task_update": {"task_id": "t-doesnotmatter"},
-    "shards_task_cancel": {"task_id": "t-doesnotmatter"},
+    "mesh_note_get": {"id": "n-doesnotmatter"},
+    "mesh_note_list": {},
+    "mesh_task_get": {"id": "t-doesnotmatter"},
+    "mesh_task_list": {},
+    "mesh_search": {},
+    "mesh_health": {},
+    "mesh_recent_activity": {},
+    "mesh_build_context": {"seed_id": "n-doesnotmatter"},
+    "mesh_graph": {"seed_id": "n-doesnotmatter"},
+    "mesh_project": {"project_id": "n-doesnotmatter"},
+    "mesh_session_start": {},
+    "mesh_note_new": {"title": "x"},
+    "mesh_note_append": {"target": "n-doesnotmatter", "text": "y"},
+    "mesh_task_new": {"title": "x"},
+    "mesh_task_append": {"task_id": "t-doesnotmatter", "text": "y"},
+    "mesh_note_update": {"target": "n-doesnotmatter"},
+    "mesh_task_claim": {"task_id": "t-doesnotmatter"},
+    "mesh_task_release": {"task_id": "t-doesnotmatter"},
+    "mesh_task_finish": {"task_id": "t-doesnotmatter"},
+    "mesh_task_update": {"task_id": "t-doesnotmatter"},
+    "mesh_task_cancel": {"task_id": "t-doesnotmatter"},
 }
 
 
@@ -207,16 +207,16 @@ def test_no_baseexception_escapes_registered_tool_with_missing_config(
     tool_name: str, missing_config: Path
 ) -> None:
     """Every registered tool, called with no config file anywhere, raises a
-    clean ``fastmcp.exceptions.ToolError`` naming ``shards init`` — never
+    clean ``fastmcp.exceptions.ToolError`` naming ``mesh init`` — never
     ``SystemExit`` or any other ``BaseException`` reaching past the handler."""
     with pytest.raises(ToolError) as exc_info:
         asyncio.run(server.app.call_tool(tool_name, _MINIMAL_ARGS[tool_name]))
 
     payload = json.loads(str(exc_info.value))
     assert payload["kind"] == "config_missing"
-    assert "shards init" in payload["message"]
+    assert "mesh init" in payload["message"]
     assert payload["cfg_path"] == str(missing_config)
-    assert "next_action" in payload and "shards init" in payload["next_action"]
+    assert "next_action" in payload and "mesh init" in payload["next_action"]
 
 
 # --------------------------------------------------------------------------- #
@@ -226,7 +226,7 @@ def test_no_baseexception_escapes_registered_tool_with_missing_config(
 
 def test_note_not_found_over_mcp_yields_structured_field(cfg: Config) -> None:
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(server.app.call_tool("shards_note_get", {"id": "n-ghost"}))
+        asyncio.run(server.app.call_tool("mesh_note_get", {"id": "n-ghost"}))
 
     payload = json.loads(str(exc_info.value))
     assert payload["kind"] == "not_found"
@@ -235,7 +235,7 @@ def test_note_not_found_over_mcp_yields_structured_field(cfg: Config) -> None:
 
 def test_task_not_found_over_mcp_yields_structured_field(cfg: Config) -> None:
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(server.app.call_tool("shards_task_get", {"id": "t-ghost"}))
+        asyncio.run(server.app.call_tool("mesh_task_get", {"id": "t-ghost"}))
 
     payload = json.loads(str(exc_info.value))
     assert payload["kind"] == "not_found"
@@ -247,7 +247,7 @@ def test_ambiguous_slug_over_mcp_yields_structured_ids(cfg: Config) -> None:
     core_create_note(cfg, "Duplicate Title Probe", body="two")
 
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(server.app.call_tool("shards_note_get", {"id": "Duplicate Title Probe"}))
+        asyncio.run(server.app.call_tool("mesh_note_get", {"id": "Duplicate Title Probe"}))
 
     payload = json.loads(str(exc_info.value))
     assert payload["kind"] == "ambiguous_slug"
@@ -263,11 +263,11 @@ def test_ambiguous_slug_over_mcp_yields_structured_ids(cfg: Config) -> None:
 
 def test_cli_missing_config_still_exits_2_with_message(missing_config: Path) -> None:
     """``ConfigMissingError`` reaches ``cli_errors()`` exactly like any other
-    ``ShardsError`` — the CLI's exit code and message are unchanged."""
+    ``MeshError`` — the CLI's exit code and message are unchanged."""
     result = _invoke(["note", "list"])
     assert result.exit_code == 2, result.output
     assert str(missing_config) in result.output
-    assert "shards init" in result.output
+    assert "mesh init" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit), result.output
 
 

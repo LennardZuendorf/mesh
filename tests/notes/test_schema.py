@@ -1,7 +1,7 @@
 """notes/1 — config, Note schema, and id generation.
 
 Covers the shared primitives every later feature inherits: the msgspec Config
-model (with SHARDS_CONFIG_PATH / SHARDS_AGENT overrides), the Note frontmatter
+model (with MESH_CONFIG_PATH / MESH_AGENT overrides), the Note frontmatter
 schema (unknown-key round-trip), and the deterministic hash-id generator.
 """
 
@@ -12,16 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from shards.core.ids import generate_note_id, generate_task_id
-from shards.schemas.config import Config, ConfigMissingError, load_config
-from shards.schemas.note import Note
+from mesh.core.ids import generate_note_id, generate_task_id
+from mesh.schemas.config import Config, ConfigMissingError, load_config
+from mesh.schemas.note import Note
 
 # --------------------------------------------------------------------------- #
 # Config                                                                        #
 # --------------------------------------------------------------------------- #
 
 
-def test_config_reads_all_sections(shards_config: Path, vault: Path) -> None:
+def test_config_reads_all_sections(mesh_config: Path, vault: Path) -> None:
     cfg = load_config()
     assert isinstance(cfg, Config)
     assert cfg.core.vault_path == vault
@@ -32,8 +32,8 @@ def test_config_reads_all_sections(shards_config: Path, vault: Path) -> None:
     assert cfg.tasks.collections == ["test-agent", "other-agent"]
 
 
-def test_search_threshold_explicit_when_set_in_toml(shards_config: Path, vault: Path) -> None:
-    # shards_config writes an explicit [search].threshold = 0.65.
+def test_search_threshold_explicit_when_set_in_toml(mesh_config: Path, vault: Path) -> None:
+    # mesh_config writes an explicit [search].threshold = 0.65.
     cfg = load_config()
     assert cfg.search.threshold_explicit() is True
 
@@ -109,7 +109,7 @@ def test_legacy_alias_expands_tilde(tmp_path: Path) -> None:
 
 def test_missing_config_raises_config_missing_error(tmp_path: Path) -> None:
     # agent-usability/5: load_config now raises a typed ConfigMissingError
-    # (a ShardsError, plain Exception) instead of SystemExit(2) — the old
+    # (a MeshError, plain Exception) instead of SystemExit(2) — the old
     # BaseException could walk past both the CLI and MCP boundary mappers,
     # which catch Exception. The CLI still exits 2 (ConfigMissingError.code),
     # now via cli_errors() like every other domain exception.
@@ -120,36 +120,36 @@ def test_missing_config_raises_config_missing_error(tmp_path: Path) -> None:
     assert exc.value.cfg_path == missing
 
 
-def test_shards_config_path_override_is_authoritative(
+def test_mesh_config_path_override_is_authoritative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Point SHARDS_CONFIG_PATH at a nonexistent file. If the override were ignored
-    # and it silently fell back to ~/.shards/config.toml this would not raise.
+    # Point MESH_CONFIG_PATH at a nonexistent file. If the override were ignored
+    # and it silently fell back to ~/.mesh/config.toml this would not raise.
     missing = tmp_path / "nope.toml"
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(missing))
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(missing))
     with pytest.raises(ConfigMissingError) as exc:
         load_config()
     assert exc.value.code == 2
     assert exc.value.cfg_path == missing
 
 
-def test_shards_config_path_isolates_from_home(shards_config: Path, vault: Path) -> None:
-    # The fixture set SHARDS_CONFIG_PATH; load_config must read *that* file, not
-    # any real ~/.shards/config.toml on the host running the suite.
+def test_mesh_config_path_isolates_from_home(mesh_config: Path, vault: Path) -> None:
+    # The fixture set MESH_CONFIG_PATH; load_config must read *that* file, not
+    # any real ~/.mesh/config.toml on the host running the suite.
     cfg = load_config()
     assert cfg.core.vault_path == vault
 
 
-def test_shards_agent_env_overrides_config_agent(
-    shards_config: Path, monkeypatch: pytest.MonkeyPatch
+def test_mesh_agent_env_overrides_config_agent(
+    mesh_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SHARDS_AGENT", "env-agent")
+    monkeypatch.setenv("MESH_AGENT", "env-agent")
     cfg = load_config()
     assert cfg.core.agent == "env-agent"
     assert cfg.agent == "env-agent"
 
 
-def test_config_agent_used_when_env_absent(shards_config: Path) -> None:
+def test_config_agent_used_when_env_absent(mesh_config: Path) -> None:
     cfg = load_config()
     assert cfg.agent == "test-agent"
 
@@ -186,7 +186,7 @@ def test_vault_path_resolves_through_a_symlink(tmp_path: Path, key: str) -> None
 
 
 def test_nonexistent_vault_path_still_loads(tmp_path: Path) -> None:
-    """`shards init` creates the vault lazily — resolution must not require it."""
+    """`mesh init` creates the vault lazily — resolution must not require it."""
     missing = tmp_path / "not-yet" / "vault"
     cfg_file = tmp_path / "config.toml"
     _write_core(cfg_file, "vault_path", missing)
@@ -291,7 +291,7 @@ def test_note_unknown_keys_round_trip_unchanged() -> None:
         "created": _now(),
         "updated": _now(),
         "related": [],
-        # Keys shards does not own must survive a load/dump cycle untouched.
+        # Keys mesh does not own must survive a load/dump cycle untouched.
         "othertool_pinned": True,
         "custom_ref": "PROJ-123",
     }

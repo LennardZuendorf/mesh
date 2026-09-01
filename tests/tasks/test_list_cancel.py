@@ -2,14 +2,14 @@
 
 Exercises the task read verbs and the cancel lifecycle transition:
 
-* :func:`shards.core.tasks.list_tasks` scans **both** ``tasks/open/`` and
+* :func:`mesh.core.tasks.list_tasks` scans **both** ``tasks/open/`` and
   ``tasks/done/``, surfaces only files whose frontmatter validates as a
-  :class:`~shards.schemas.task.Task` (``t-`` id, ``type: task``), and applies
+  :class:`~mesh.schemas.task.Task` (``t-`` id, ``type: task``), and applies
   conjunctive ``status`` / ``owner`` / ``--mine`` / tag / ``--since`` filters with
   ``--sort`` and ``--limit`` (same semantics as notes).
-* :func:`shards.core.tasks.get_task` reads one task by id from either folder into a
-  :class:`~shards.core.tasks.TaskView`; not-found raises (CLI exit 3).
-* :func:`shards.core.tasks.cancel_task` appends a ``## Cancelled`` section (ISO-8601
+* :func:`mesh.core.tasks.get_task` reads one task by id from either folder into a
+  :class:`~mesh.core.tasks.TaskView`; not-found raises (CLI exit 3).
+* :func:`mesh.core.tasks.cancel_task` appends a ``## Cancelled`` section (ISO-8601
   timestamp + optional reason), sets ``status=cancelled``, bumps ``updated``, and
   moves the file to ``tasks/done/`` — all under the per-entity lock, idempotent on
   a terminal status.
@@ -30,9 +30,9 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-import shards.cli.task as task_cli
-from shards.cli.__main__ import app
-from shards.core.tasks import (
+import mesh.cli.task as task_cli
+from mesh.cli.__main__ import app
+from mesh.core.tasks import (
     TaskNotFoundError,
     TaskView,
     _resolve_task_path,
@@ -40,15 +40,15 @@ from shards.core.tasks import (
     get_task,
     list_tasks,
 )
-from shards.schemas.config import Config, load_config
-from shards.storage.files import task_folder
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import task_folder
 
 _OLD = datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)
 _ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -78,7 +78,7 @@ def _seed_task(
     created: datetime = _OLD,
     updated: datetime = _OLD,
 ) -> Path:
-    """Write a shards task straight to disk in the folder matching its status."""
+    """Write a mesh task straight to disk in the folder matching its status."""
     meta: dict[str, object] = {
         "id": task_id,
         "type": "task",
@@ -104,7 +104,7 @@ def _seed_task(
 
 
 def _seed_foreign(vault: Path, sub: str, name: str, meta: dict[str, object] | None = None) -> Path:
-    """Write a non-shards Markdown file (no valid ``t-`` id / ``type: task``)."""
+    """Write a non-mesh Markdown file (no valid ``t-`` id / ``type: task``)."""
     folder = vault / "tasks" / sub
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}.md"
@@ -137,7 +137,7 @@ def _done_path(vault: Path, task_id: str = "t-seed") -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# list_tasks (core) — shards-id/type gate + scans both folders                  #
+# list_tasks (core) — mesh-id/type gate + scans both folders                  #
 # --------------------------------------------------------------------------- #
 
 
@@ -628,7 +628,7 @@ def test_cancel_already_cancelled_does_not_write(
     cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An already-cancelled cancel must not touch atomic_write (pure no-op)."""
-    import shards.core.tasks as tasks_core
+    import mesh.core.tasks as tasks_core
 
     _seed_task(vault, status="cancelled", body="Task body.\n\n## Cancelled\n\nx")
     calls: list[Path] = []
@@ -684,8 +684,8 @@ def test_cancel_reason_names_the_acting_agent(
     ``## Cancelled`` stamp names the canceller, never the task's ``owner``."""
     _seed_task(vault, status="open", owner="flights-agent")
     cfg_file = _write_agent_config(tmp_path, vault, "notes-agent")
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     canceller_cfg = load_config()
 
     cancel_task(canceller_cfg, "t-seed", "not needed")
@@ -701,12 +701,12 @@ def test_cancel_reason_names_the_acting_agent(
 def test_cancel_unset_identity_stamp_is_bare_iso(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No ``[core].agent``/``$SHARDS_AGENT`` degrades to a bare ISO line — no
+    """No ``[core].agent``/``$MESH_AGENT`` degrades to a bare ISO line — no
     stray trailing separator, no crash."""
     _seed_task(vault, status="open")
     cfg_file = _write_agent_config(tmp_path, vault, None)
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     noagent_cfg = load_config()
     assert noagent_cfg.agent is None
 
@@ -719,7 +719,7 @@ def test_cancel_unset_identity_stamp_is_bare_iso(
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task list                                                        #
+# CLI — mesh task list                                                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -740,7 +740,7 @@ def test_cli_list_default_limit_caps(cfg: Config, vault: Path) -> None:
 
 
 def test_cli_list_mine_status_json_is_array(cfg: Config, vault: Path) -> None:
-    """Acceptance: shards task list --mine --status claimed --json → JSON array of tasks."""
+    """Acceptance: mesh task list --mine --status claimed --json → JSON array of tasks."""
     _seed_task(vault, task_id="t-owned", owner="test-agent", status="open", updated=_now())
     _seed_task(
         vault,
@@ -775,8 +775,8 @@ def test_cli_list_mine_with_no_identity_returns_empty_not_null_owner_tasks(
     unsound ``spec.me is None`` case)."""
     _seed_task(vault, task_id="t-null-owner", owner=None, status="open")
     cfg_file = _write_agent_config(tmp_path, vault, None)
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_file))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_file))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
 
     result = _invoke(["--json", "task", "list", "--mine"])
     assert result.exit_code == 0, result.output
@@ -841,7 +841,7 @@ def test_cli_list_invalid_stale_exits_2(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task list --available (team-awareness/5)                        #
+# CLI — mesh task list --available (team-awareness/5)                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -911,7 +911,7 @@ def test_cli_list_available_composes_with_status_filter(cfg: Config, vault: Path
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task list human text rows carry claimed_by (team-awareness/4)    #
+# CLI — mesh task list human text rows carry claimed_by (team-awareness/4)    #
 # --------------------------------------------------------------------------- #
 
 
@@ -954,7 +954,7 @@ def test_list_command_registered() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task get                                                         #
+# CLI — mesh task get                                                         #
 # --------------------------------------------------------------------------- #
 
 
@@ -1028,7 +1028,7 @@ def test_get_command_registered() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards task cancel                                                       #
+# CLI — mesh task cancel                                                       #
 # --------------------------------------------------------------------------- #
 
 

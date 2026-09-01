@@ -14,14 +14,14 @@ matrix: the threshold filters only when a caller set it explicitly — via
 `config.toml`. With no explicit value the fallback uses its own floor, the
 lowest matrix tier (0.4), so every tier is reachable out of the box.
 
-These tests exercise the real `shards search` CLI over a real temp vault with
+These tests exercise the real `mesh search` CLI over a real temp vault with
 no `indexed` binary on PATH and no daemon running — the substring fallback is
 the only path available, exactly the "fresh install" scenario the defect
 report describes. Nothing here patches the scorer.
 
 `core/search.py::resolve_effective_threshold` is the one shared three-way
 resolution (flag / explicit config / neither) both the CLI (`cli/search.py`)
-and the MCP tool (`mcp/server.py::shards_search`, covered separately in
+and the MCP tool (`mcp/server.py::mesh_search`, covered separately in
 `tests/memory/test_tools.py`) call into — added after a review finding that
 the two surfaces had hand-rolled the same branch, unverified on the MCP side.
 """
@@ -35,10 +35,10 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.core.search import resolve_effective_threshold
-from shards.index.fallback import search_fallback
-from shards.schemas.config import Config, load_config
+from mesh.cli.__main__ import app
+from mesh.core.search import resolve_effective_threshold
+from mesh.index.fallback import search_fallback
+from mesh.schemas.config import Config, load_config
 
 _NOTICE = "search: using substring fallback (indexed unavailable)"
 
@@ -95,8 +95,8 @@ def default_threshold_config(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(config_path))
-    monkeypatch.delenv("SHARDS_AGENT", raising=False)
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("MESH_AGENT", raising=False)
     return config_path
 
 
@@ -106,8 +106,8 @@ def cfg_default_threshold(default_threshold_config: Path) -> Config:
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
-    """`shards_config` (tests/conftest.py) sets an explicit [search].threshold = 0.65."""
+def cfg(mesh_config: Path) -> Config:
+    """`mesh_config` (tests/conftest.py) sets an explicit [search].threshold = 0.65."""
     return load_config()
 
 
@@ -152,7 +152,7 @@ def test_resolve_effective_threshold_flag_wins(cfg_default_threshold: Config) ->
 
 
 def test_resolve_effective_threshold_explicit_config_used_when_no_flag(cfg: Config) -> None:
-    # `cfg` (shards_config fixture) sets an explicit [search].threshold = 0.65.
+    # `cfg` (mesh_config fixture) sets an explicit [search].threshold = 0.65.
     assert resolve_effective_threshold(None, cfg) == pytest.approx(0.65)
 
 
@@ -189,8 +189,8 @@ def test_cli_threshold_flag_lower_than_floor_still_included(
 # --------------------------------------------------------------------------- #
 
 
-def test_explicit_config_threshold_065_behaves_as_today(shards_config: Path, vault: Path) -> None:
-    # `shards_config` (tests/conftest.py) writes an explicit [search].threshold = 0.65.
+def test_explicit_config_threshold_065_behaves_as_today(mesh_config: Path, vault: Path) -> None:
+    # `mesh_config` (tests/conftest.py) writes an explicit [search].threshold = 0.65.
     cfg = load_config()
     assert cfg.search.threshold_explicit() is True
     _seed_body_only_hit(vault)

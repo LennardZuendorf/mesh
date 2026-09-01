@@ -1,6 +1,6 @@
-# AGENTS.md — Shards Engineering Guide
+# AGENTS.md — Mesh Engineering Guide
 
-> **`shards`** — a mesh for multi-agent collaboration over a single Markdown folder.
+> **`mesh`** — a mesh for multi-agent collaboration over a single Markdown folder.
 > Three verbs (`note`, `task`, `search`), one daemon, one folder, all agents.
 
 ---
@@ -22,7 +22,7 @@ Before you touch anything:
      not installed rather than working around it.
 2. **Read the `.spec/` root layer** (`product.md`, `tech.md`, `design.md`, `plan.md`, `lessons.md`) before
    writing code or docs. There is no feature layer right now — every landed feature has been
-   compounded into the root layer and deleted, so the root files plus `src/shards/` and `tests/`
+   compounded into the root layer and deleted, so the root files plus `src/mesh/` and `tests/`
    are the whole truth. A new feature arc creates `.spec/features/<name>/` again, branch-scoped.
 3. **Any change that contradicts or extends the spec updates the spec first** — via the `spec`
    skill, with user confirmation — *then* the implementation follows.
@@ -53,16 +53,16 @@ memory subsystem, or an external task tracker.
 
 - **Notes + search = memory.** No separate memory store; recall delegates to `indexed`.
 - **Tasks = coordination = handoff.** v1: `owner` / `claimed_by` / `claim` / `finish` / `cancel` / `list`. The dependency graph (`blocks` / `blocked_by` readiness, `release`, strict gate) is a deferred later phase.
-- **Markdown is the source of truth.** Shards owns the *interface* (and writes), not the data.
+- **Markdown is the source of truth.** Mesh owns the *interface* (and writes), not the data.
 
-**Connections (what shards talks to):**
+**Connections (what mesh talks to):**
 
 | System | Role | Boundary |
 |---|---|---|
-| **The vault folder** | The one Markdown folder (`notes/`, `tasks/`) — source of truth | Shards **owns writes** and cheap direct reads inside `notes/` and `tasks/`; it **coexists** with any other tool on the same folder (Obsidian and its plugins, another MCP server, git). If `[search].collection` is set, `shards reindex` hands the whole configured vault root to `indexed`, which ingests everything under it — not just `notes/`/`tasks/`. Versioning, sync and backup are the vault owner's job, never shards's |
-| **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Shards's `search` is a thin wrapper; the shards↔indexed contract is co-designed; falls back to a built-in substring scan if absent |
-| **Cowork agents** | Consumers (flights-agent, notes-agent, …) | Call shards via CLI (`--json`) and the `memory` MCP tools |
-| **`$SHARDS_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine` |
+| **The vault folder** | The one Markdown folder (`notes/`, `tasks/`) — source of truth | Mesh **owns writes** and cheap direct reads inside `notes/` and `tasks/`; it **coexists** with any other tool on the same folder (Obsidian and its plugins, another MCP server, git). If `[search].collection` is set, `mesh reindex` hands the whole configured vault root to `indexed`, which ingests everything under it — not just `notes/`/`tasks/`. Versioning, sync and backup are the vault owner's job, never mesh's |
+| **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Mesh's `search` is a thin wrapper; the mesh↔indexed contract is co-designed; falls back to a built-in substring scan if absent |
+| **Cowork agents** | Consumers (flights-agent, notes-agent, …) | Call mesh via CLI (`--json`) and the `memory` MCP tools |
+| **`$MESH_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine` |
 | **The daemon** | Watcher + warm frontmatter index; drives `indexed index update`; shared by CLI and MCP | An accelerator, never a hard dependency — CLI degrades gracefully when it's down |
 
 ---
@@ -73,7 +73,7 @@ memory subsystem, or an external task tracker.
 
 **Core libraries:** `typer` (CLI), `python-frontmatter` (YAML frontmatter), `msgspec`
 (schemas/validation), `watchdog` (file watching), `FastMCP` (MCP server). Search is delegated to
-the first-party `indexed` engine (hybrid lexical + vector); Shards keeps only a deterministic
+the first-party `indexed` engine (hybrid lexical + vector); Mesh keeps only a deterministic
 tag-pull and a substring fallback in-process.
 
 **Dev tools:** `ruff` (lint/format), `ty` (type-check — Astral's Rust-based checker, currently
@@ -92,8 +92,8 @@ uv run ruff format .              # Format
 uv run ty check src/              # Type-check (strict)
 uv run pytest -q                  # Run tests
 uv run pytest -q --cov=src        # With coverage
-uv run shards --help               # CLI help
-uv run shards daemon start         # Start the local daemon
+uv run mesh --help               # CLI help
+uv run mesh daemon start         # Start the local daemon
 ```
 
 > Phase 1–2 is **delivered** and hardened across four further tracks — core-hardening,
@@ -123,16 +123,17 @@ docs(spec): wrap indexed for ranked retrieval
 ## 5. Repository Structure
 
 ```
-shards/
+mesh/
 ├── AGENTS.md            # this guide  (CLAUDE.md is a symlink to it)
 ├── CLAUDE.md -> AGENTS.md
 ├── README.md            # short overview
+├── docs/concepts.md     # architecture Q&A: memory vs. notes, schemas, atomicity, vault config
 ├── .spec/               # THE SPEC — source of truth (managed via the `spec` skill)
 │   ├── product.md       # root: mini PRD            ├── tech.md     # root: architecture
 │   ├── design.md        # root: CLI design language  ├── plan.md     # root: feature sequence
 │   ├── lessons.md       # root: accumulated lessons
 │   └── (no features/ — all landed arcs compounded into the root layer and deleted)
-└── src/shards/
+└── src/mesh/
     ├── cli/             # typer app: note, task, search, daemon, status (thin)
     ├── mcp/             # FastMCP memory server over the same daemon (thin)
     ├── daemon/          # asyncio unix-socket server: watcher + warm frontmatter index (drives indexed)
@@ -153,18 +154,18 @@ shards/
   unblock-cascade arrives with the deferred dependency-graph phase).
 - **Markdown stays clean.** Only agreed frontmatter keys; round-trip unknown keys; never inject machinery into bodies.
 - **Path sandboxing.** All file access stays inside `vault_path`; reject traversal/symlink escapes.
-- **Owner identity is trusted local input, not an authorization boundary.** `$SHARDS_AGENT` /
+- **Owner identity is trusted local input, not an authorization boundary.** `$MESH_AGENT` /
   `--owner` / `claimed_by` say who an agent *claims* to be; `[tasks].collections` gates which
   identities are valid, but nothing verifies an agent calling the CLI/MCP tools actually *is* the
   owner it claims — any agent with local access can pass any valid `--owner`. This is fine for a
   trusted local fleet on one operator's machine; it is not an auth boundary and must not be treated
-  as one if shards ever crosses a multi-user/multi-machine trust line.
+  as one if mesh ever crosses a multi-user/multi-machine trust line.
 - **Agent content is data**, never instructions or shell input.
 - **Hash IDs** (`n-…`, `t-…`), never sequential.
 - **Delete is a hard `unlink`, by design.** No soft-delete/trash: the vault belongs to the
   operator, and versioning/backup is the vault owner's concern (git, Obsidian Sync, Time Machine,
-  or nothing). Shards is not a backup tool and promises no recovery. A `.trash/` would add a second
-  delete lifecycle for shards to keep in sync with whatever history mechanism the operator already
+  or nothing). Mesh is not a backup tool and promises no recovery. A `.trash/` would add a second
+  delete lifecycle for mesh to keep in sync with whatever history mechanism the operator already
   runs — evaluated and deferred, not built. The trade-off is explicit: an unversioned vault has no
   recovery path for a deleted note, and that is the operator's call.
 

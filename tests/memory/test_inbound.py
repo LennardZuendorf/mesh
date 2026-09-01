@@ -4,8 +4,8 @@
 on every ``note``/``task`` write (``core/notes.py``, ``core/tasks.py``, from
 ``[[wikilinks]]``). Nothing in the vault ever walks it backward — so a mention
 in someone else's note is structurally invisible from the mentioned node's own
-frontmatter. :func:`~shards.core.context.inbound_ids` (and its batched sibling
-:func:`~shards.core.context._inbound_index`, which :func:`~shards.core.context._bfs`
+frontmatter. :func:`~mesh.core.context.inbound_ids` (and its batched sibling
+:func:`~mesh.core.context._inbound_index`, which :func:`~mesh.core.context._bfs`
 uses for a ``--direction in``/``both`` ``graph`` query) inverts it at *read*
 time: ``inbound(X) = {N : X in N.related}`` — one extra vault pass, no store, no
 schema change, no daemon.
@@ -22,7 +22,7 @@ diamonds, edge orientation, ``--direction both`` union). Coverage:
   (``core.wikilinks.resolve_wikilinks`` runs at write time), so a body written
   as ``[[Some Title]]`` is exercised end-to-end via the real ``create_note`` /
   ``append_note`` write path, not by hand-writing an id into frontmatter.
-* **robustness** — a malformed ``.md``, a foreign file with no shards id, and a
+* **robustness** — a malformed ``.md``, a foreign file with no mesh id, and a
   ``related`` entry naming a deleted id are all skipped without aborting the
   scan (the corpus-wide invariant every reader routes through
   ``storage.files.read_post`` for).
@@ -40,14 +40,14 @@ from typing import Any
 import frontmatter
 import pytest
 
-from shards.core.context import inbound_ids
-from shards.core.notes import append_note, create_note
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder, task_folder
+from mesh.core.context import inbound_ids
+from mesh.core.notes import append_note, create_note
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder, task_folder
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -233,9 +233,9 @@ def test_inbound_skips_malformed_frontmatter(cfg: Config, vault: Path) -> None:
     assert inbound_ids(cfg, "n-target") == ["n-good"]
 
 
-def test_inbound_skips_a_foreign_file_with_no_shards_id(cfg: Config, vault: Path) -> None:
+def test_inbound_skips_a_foreign_file_with_no_mesh_id(cfg: Config, vault: Path) -> None:
     """A coexisting foreign ``.md`` — even one that happens to carry a
-    ``related``-shaped key — is not a valid source (no shards id)."""
+    ``related``-shaped key — is not a valid source (no mesh id)."""
     _seed_note(vault, note_id="n-target", title="Target")
 
     foreign = vault / "notes" / "not-a-shard.md"

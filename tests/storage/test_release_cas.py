@@ -3,13 +3,13 @@
 ``acquire`` used to end its body with a bare ``_clear(lock_path)`` — an
 unconditional ``unlink`` of whatever file sat at the path. That is safe only
 while the holder is guaranteed to still own the lock, and it is not: once a
-holder ages past :data:`~shards.storage.locks.LOCK_TTL_SECONDS` a peer
+holder ages past :data:`~mesh.storage.locks.LOCK_TTL_SECONDS` a peer
 legitimately reclaims the path and creates *its own* live lock there. The
 original holder's release then deleted the peer's live lock, and the next
 acquirer walked straight in — two simultaneous holders of what the module
 advertises as an atomic test-and-set.
 
-The reclaim path (:func:`~shards.storage.locks._reclaim_if_stale`) has always
+The reclaim path (:func:`~mesh.storage.locks._reclaim_if_stale`) has always
 been a compare-and-swap for exactly this reason; these tests pin the same
 property on the release path — and pin the one filesystem fact the comparison
 rests on (``test_open_descriptor_pins_the_inode_against_reuse``), because
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-import shards.storage.locks as locks_mod
-from shards.storage.locks import acquire
+import mesh.storage.locks as locks_mod
+from mesh.storage.locks import acquire
 
 
 @pytest.fixture

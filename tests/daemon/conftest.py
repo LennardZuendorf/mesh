@@ -1,6 +1,6 @@
 """Shared daemon-test scaffolding: unix-socket paths and a live server harness.
 
-Three test modules in this package need a real :class:`~shards.daemon.server.DaemonServer`
+Three test modules in this package need a real :class:`~mesh.daemon.server.DaemonServer`
 listening on a real ``AF_UNIX`` socket, so the harness lives here once rather than
 being re-pasted per module (core-hardening/5 would otherwise have added a third
 copy).
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from shards.daemon.server import DaemonServer
-from shards.schemas.config import Config
+from mesh.daemon.server import DaemonServer
+from mesh.schemas.config import Config
 
 
 @pytest.fixture

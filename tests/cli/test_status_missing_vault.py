@@ -1,11 +1,11 @@
 """Round-2 review — a mistyped `[core].vault_path` must be visible in `status`.
 
-Nothing checked that the configured vault existed: `shards status` on a typoed
+Nothing checked that the configured vault existed: `mesh status` on a typoed
 path reported `notes: 0`, `freshness: (no vault files)` and exit 0, and the
 next `note new` silently materialised a whole parallel vault at the typo via
 `atomic_write`'s `mkdir(parents=True)`.
 
-Lazy creation is `shards init`'s documented behaviour, so this is a
+Lazy creation is `mesh init`'s documented behaviour, so this is a
 *visibility* fix and not a hard failure: `status` names the vault and marks it
 missing, on both the human and the `--json` surface, and writes still work.
 """
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
+from mesh.cli.__main__ import app
 from tests.cli._vault_config import point_at
 
 

@@ -2,7 +2,7 @@
 
 Coverage maps 1:1 to the unit's acceptance criteria:
 
-* **Index** — a ``VaultIndex`` keyed by shards id: ``reparse`` reads frontmatter for
+* **Index** — a ``VaultIndex`` keyed by mesh id: ``reparse`` reads frontmatter for
   a path, ``evict`` drops a (possibly already-gone) path without error, ``recent``
   returns mtime-sorted rows.
 * **Reconcile** — a file whose frontmatter ``status``/``type`` maps to a different
@@ -46,13 +46,13 @@ from watchdog.events import (
     FileMovedEvent,
 )
 
-from shards.daemon.client import DaemonClient, DaemonError
-from shards.daemon.server import DaemonServer
-from shards.index.reconcile import reconcile_path
-from shards.index.warm import DEFAULT_RECENT_LIMIT, VaultIndex, scan_recent
-from shards.index.watcher import ChangeHooks, Watcher
-from shards.schemas.config import Config, load_config
-from shards.storage.sandbox import safe_resolve
+from mesh.daemon.client import DaemonClient, DaemonError
+from mesh.daemon.server import DaemonServer
+from mesh.index.reconcile import reconcile_path
+from mesh.index.warm import DEFAULT_RECENT_LIMIT, VaultIndex, scan_recent
+from mesh.index.watcher import ChangeHooks, Watcher
+from mesh.schemas.config import Config, load_config
+from mesh.storage.sandbox import safe_resolve
 from tests.daemon.conftest import running_daemon
 
 # --------------------------------------------------------------------------- #
@@ -61,7 +61,7 @@ from tests.daemon.conftest import running_daemon
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -173,7 +173,7 @@ def test_reparse_indexes_note_by_id(vault: Path) -> None:
     assert entry.meta["title"] == "Indexed Note"
 
 
-def test_reparse_skips_file_without_shards_id(vault: Path) -> None:
+def test_reparse_skips_file_without_mesh_id(vault: Path) -> None:
     foreign = vault / "notes" / "othertool.md"
     foreign.write_text(
         frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
@@ -265,7 +265,7 @@ def test_reconcile_ignores_foreign_file(cfg: Config, vault: Path) -> None:
     )
     final = reconcile_path(cfg, foreign)
     assert final == foreign
-    assert foreign.exists()  # no shards id → never moved
+    assert foreign.exists()  # no mesh id → never moved
 
 
 def test_reconcile_returns_unmoved_when_source_races_away(
@@ -281,7 +281,7 @@ def test_reconcile_returns_unmoved_when_source_races_away(
     def _vanish(_src: object, _dst: object) -> None:
         raise FileNotFoundError
 
-    monkeypatch.setattr("shards.index.reconcile.os.replace", _vanish)
+    monkeypatch.setattr("mesh.index.reconcile.os.replace", _vanish)
     result = reconcile_path(cfg, path)  # must not raise
     # Left in place (move failed); the caller's own path is returned so a later
     # event can reconcile it — and so the index never changes path space.
@@ -303,7 +303,7 @@ def test_reconcile_keeps_the_caller_path_space_when_nothing_moves(
     link.symlink_to(vault, target_is_directory=True)
     cfg_path = tmp_path / "linked.toml"
     cfg_path.write_text(f'[core]\nvault_path = "{link}"\nagent = "test-agent"\n', encoding="utf-8")
-    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MESH_CONFIG_PATH", str(cfg_path))
     linked_cfg = load_config()
 
     _write_note(vault, note_id="n-link", note_type="note")
@@ -534,10 +534,10 @@ def test_index_recent_sorted_by_mtime_desc_and_limited(vault: Path) -> None:
     assert [r["id"] for r in rows] == ["n-2", "n-3"]  # most-recent first, capped at 2
 
 
-def test_scan_recent_fallback_mtime_sorted_and_shards_ids_only(cfg: Config, vault: Path) -> None:
+def test_scan_recent_fallback_mtime_sorted_and_mesh_ids_only(cfg: Config, vault: Path) -> None:
     _write_note(vault, note_id="n-old", title="Old", mtime=1000.0)
     _write_task(vault, task_id="t-new", status="open", mtime=5000.0)
-    # A foreign file (no shards id) must be excluded.
+    # A foreign file (no mesh id) must be excluded.
     foreign = vault / "notes" / "othertool.md"
     foreign.write_text(
         frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
@@ -686,7 +686,7 @@ def test_daemon_owns_change_hooks_and_stop_clears(
     # The daemon's own hook is ``lambda p: incremental_update(config, p)``; patch the
     # target it resolves so a fired hook is observable.
     monkeypatch.setattr(
-        "shards.daemon.server.incremental_update", lambda config, path: calls.append(path)
+        "mesh.daemon.server.incremental_update", lambda config, path: calls.append(path)
     )
 
     with running_daemon(socket_path, config=cfg) as server:
@@ -715,8 +715,8 @@ def test_watcher_module_does_not_eagerly_bind_observer_backend() -> None:
     The warm index (which a daemon-less CLI imports for ``scan_recent``) never touches
     ``watchdog`` at all, and the watcher module defers the platform backend, so neither
     binds ``Observer`` at import time."""
-    import shards.index.warm as warm_mod
-    import shards.index.watcher as watcher_mod
+    import mesh.index.warm as warm_mod
+    import mesh.index.watcher as watcher_mod
 
     assert not hasattr(warm_mod, "Observer")
     assert not hasattr(watcher_mod, "Observer")

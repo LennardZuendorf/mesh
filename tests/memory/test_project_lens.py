@@ -1,4 +1,4 @@
-"""cli-toolset-rework/4 — the project read-lens: ``core/lenses.py`` + ``shards project``.
+"""cli-toolset-rework/4 — the project read-lens: ``core/lenses.py`` + ``mesh project``.
 
 The project lens is the fourth read-only view alongside ``recent-activity`` /
 ``build-context`` / ``graph`` (root ``.spec/tech.md`` § Contracts;
@@ -8,7 +8,7 @@ matches — "my project and its work in one call" — as a :class:`ProjectResult
 whose ``to_dict`` yields ``{"project": <note>, "tasks": [<task>, ...]}``.
 
 It is *daemon-independent* (nodes read straight off disk) and read-only. It ships
-as a leaf lens command + a read-only ``shards_project`` MCP tool, mirroring the
+as a leaf lens command + a read-only ``mesh_project`` MCP tool, mirroring the
 ``graph`` lens — NOT as a fourth write verb: this suite pins that the three verbs
 (note/task/search) are unchanged.
 """
@@ -25,14 +25,14 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.core.lenses import ProjectNotFoundError, ProjectResult, project_view
-from shards.schemas.config import Config, load_config
-from shards.storage.files import note_folder, task_folder
+from mesh.cli.__main__ import app
+from mesh.core.lenses import ProjectNotFoundError, ProjectResult, project_view
+from mesh.schemas.config import Config, load_config
+from mesh.storage.files import note_folder, task_folder
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -135,7 +135,7 @@ def test_project_view_unknown_id_raises(cfg: Config, vault: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI — shards project (a leaf lens, not a verb)                                #
+# CLI — mesh project (a leaf lens, not a verb)                                #
 # --------------------------------------------------------------------------- #
 
 
@@ -172,26 +172,26 @@ def test_cli_project_unknown_exits_3(cfg: Config) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# MCP — shards_project registered read-only                                    #
+# MCP — mesh_project registered read-only                                    #
 # --------------------------------------------------------------------------- #
 
 
 def test_mcp_project_tool_registered_read_only(cfg: Config) -> None:
-    import shards.mcp.server as server
+    import mesh.mcp.server as server
 
     tools = {tool.name: tool for tool in asyncio.run(server.app.list_tools())}
-    assert "shards_project" in tools
-    assert tools["shards_project"].annotations is not None
-    assert tools["shards_project"].annotations.readOnlyHint is True
+    assert "mesh_project" in tools
+    assert tools["mesh_project"].annotations is not None
+    assert tools["mesh_project"].annotations.readOnlyHint is True
 
 
 def test_mcp_project_tool_delegates(cfg: Config, vault: Path) -> None:
-    import shards.mcp.server as server
+    import mesh.mcp.server as server
 
     _seed_project_note(vault, note_id="n-proj")
     _seed_task(vault, task_id="t-a", project="n-proj")
 
-    out = server.shards_project(project_id="n-proj")
+    out = server.mesh_project(project_id="n-proj")
     assert out["project"]["id"] == "n-proj"
     assert [t["id"] for t in out["tasks"]] == ["t-a"]
 
@@ -203,13 +203,13 @@ def test_mcp_project_tool_delegates(cfg: Config, vault: Path) -> None:
 
 def test_no_new_top_level_verb() -> None:
     """The three write verbs stay note/task/search (+ daemon admin); no 4th verb."""
-    import shards.cli.__main__ as main
+    import mesh.cli.__main__ as main
 
     assert set(main._SUBAPPS) == {"note", "task", "search", "daemon"}
 
 
 def test_project_is_a_leaf_lens_not_a_subapp() -> None:
-    import shards.cli.__main__ as main
+    import mesh.cli.__main__ as main
 
     assert "project" in main._LEAVES
     assert "project" not in main._SUBAPPS
@@ -225,7 +225,7 @@ def test_task_verb_gains_no_new_command() -> None:
     so it is included here too. This assertion guards against a *stray* extra
     subcommand, not against ``task`` ever growing one.
     """
-    import shards.cli.task as task_cli
+    import mesh.cli.task as task_cli
 
     names = {cmd.name for cmd in task_cli.task_app.registered_commands}
     assert names == {

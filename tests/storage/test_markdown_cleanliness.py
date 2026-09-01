@@ -1,10 +1,10 @@
-"""The Markdown shards writes stays plain for every other tool sharing the folder.
+"""The Markdown mesh writes stays plain for every other tool sharing the folder.
 
 Invariant 3 (`.spec/tech.md`) promises clean Markdown and byte-for-byte round-trip
-of frontmatter keys shards does not own. These tests pin the two ways a write can
-quietly break a *coexisting* tool rather than shards itself: YAML anchors that a
+of frontmatter keys mesh does not own. These tests pin the two ways a write can
+quietly break a *coexisting* tool rather than mesh itself: YAML anchors that a
 restricted frontmatter parser cannot resolve, and permission narrowing on a file
-shards did not create.
+mesh did not create.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import frontmatter
 
-from shards.storage.files import atomic_write, dump_post, read_post
+from mesh.storage.files import atomic_write, dump_post, read_post
 
 
 def _anchors(text: str) -> bool:
@@ -50,7 +50,7 @@ def test_created_and_updated_survive_as_independent_values(tmp_path: Path) -> No
 
 
 def test_unknown_keys_round_trip_byte_for_byte(tmp_path: Path) -> None:
-    """Invariant 3: keys shards does not own come back unchanged."""
+    """Invariant 3: keys mesh does not own come back unchanged."""
     post = frontmatter.Post(
         "body",
         id="n-1",
@@ -69,7 +69,7 @@ def test_unknown_keys_round_trip_byte_for_byte(tmp_path: Path) -> None:
 
 
 def test_overwrite_keeps_the_destination_mode(tmp_path: Path) -> None:
-    """A 0644 file checked in by another tool stays 0644 after a shards write."""
+    """A 0644 file checked in by another tool stays 0644 after a mesh write."""
     path = tmp_path / "shared.md"
     path.write_text("before", encoding="utf-8")
     os.chmod(path, 0o644)
@@ -92,7 +92,7 @@ def test_overwrite_keeps_a_group_writable_mode(tmp_path: Path) -> None:
 
 
 def test_new_file_follows_the_process_umask(tmp_path: Path) -> None:
-    """A file shards creates looks like any other tool's, not a 0600 secret."""
+    """A file mesh creates looks like any other tool's, not a 0600 secret."""
     path = tmp_path / "fresh.md"
     previous = os.umask(0o022)
     try:

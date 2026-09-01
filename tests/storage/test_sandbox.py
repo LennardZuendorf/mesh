@@ -31,16 +31,16 @@ import pytest
 from fastmcp.exceptions import ToolError
 from typer.testing import CliRunner
 
-import shards.mcp.server as server
-from shards.cli.__main__ import app
-from shards.schemas.config import Config, load_config
-from shards.storage.sandbox import safe_resolve
+import mesh.mcp.server as server
+from mesh.cli.__main__ import app
+from mesh.schemas.config import Config, load_config
+from mesh.storage.sandbox import safe_resolve
 
 _NOW = "2026-01-01T09:00:00+00:00"
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -103,7 +103,7 @@ def test_cli_task_get_absolute_out_of_vault_id_is_not_found(cfg: Config) -> None
 
 def test_mcp_note_get_absolute_out_of_vault_id_is_not_found(cfg: Config) -> None:
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(server.app.call_tool("shards_note_get", {"id": "/etc/passwd"}))
+        asyncio.run(server.app.call_tool("mesh_note_get", {"id": "/etc/passwd"}))
     payload = json.loads(str(exc_info.value))
     assert payload["kind"] == "not_found"
     assert "root:" not in payload["message"]
@@ -111,7 +111,7 @@ def test_mcp_note_get_absolute_out_of_vault_id_is_not_found(cfg: Config) -> None
 
 def test_mcp_task_get_absolute_out_of_vault_id_is_not_found(cfg: Config) -> None:
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(server.app.call_tool("shards_task_get", {"id": "/etc/passwd"}))
+        asyncio.run(server.app.call_tool("mesh_task_get", {"id": "/etc/passwd"}))
     payload = json.loads(str(exc_info.value))
     assert payload["kind"] == "not_found"
     assert "root:" not in payload["message"]
@@ -163,7 +163,7 @@ def test_mcp_note_get_symlinked_notes_dir_component_is_rejected(
     notes_dir.symlink_to(outside)
 
     with pytest.raises(ToolError) as exc_info:
-        asyncio.run(server.app.call_tool("shards_note_get", {"id": "n-hack2"}))
+        asyncio.run(server.app.call_tool("mesh_note_get", {"id": "n-hack2"}))
     payload = json.loads(str(exc_info.value))
     assert payload["kind"] == "validation"  # safe_resolve's ValueError, not a leak
     assert "Hack2" not in json.dumps(payload)
@@ -193,7 +193,7 @@ def test_mcp_task_append_dotdot_id_is_not_found(cfg: Config, vault: Path) -> Non
     with pytest.raises(ToolError) as exc_info:
         asyncio.run(
             server.app.call_tool(
-                "shards_task_append", {"task_id": "../../secret_task", "text": "pwned"}
+                "mesh_task_append", {"task_id": "../../secret_task", "text": "pwned"}
             )
         )
     payload = json.loads(str(exc_info.value))
@@ -209,7 +209,7 @@ def test_mcp_task_append_dotdot_id_is_not_found(cfg: Config, vault: Path) -> Non
 # vault-side path *is* the file, canonically, so ``safe_resolve`` has no path
 # signal to reject and correctly does not try. What actually protects the
 # outside file the inode is shared with is unrelated to sandboxing: every
-# shards write goes through ``atomic_write`` (temp file + ``os.replace``),
+# mesh write goes through ``atomic_write`` (temp file + ``os.replace``),
 # which always severs a hardlink on write rather than mutating the shared
 # inode in place. This substitutes "rejected" with the property that is
 # actually true and actually load-bearing here — reported as a substitution
@@ -249,7 +249,7 @@ def test_mcp_note_append_through_hardlink_never_mutates_the_outside_file(
     os.link(outside, inside)
     assert outside.stat().st_ino == inside.stat().st_ino
 
-    reply = _call_tool("shards_note_append", {"target": "n-hlink-mcp", "text": "APPENDED-VIA-MCP"})
+    reply = _call_tool("mesh_note_append", {"target": "n-hlink-mcp", "text": "APPENDED-VIA-MCP"})
     assert reply  # the tool call succeeded (no ToolError raised)
 
     assert "APPENDED-VIA-MCP" in inside.read_text(encoding="utf-8")

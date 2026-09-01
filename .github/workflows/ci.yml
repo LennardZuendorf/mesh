@@ -77,13 +77,13 @@ jobs:
           uv venv /tmp/wheel-smoke-venv
           uv pip install --python /tmp/wheel-smoke-venv/bin/python dist/*.whl
 
-      - name: Smoke-test the `shards` console script
+      - name: Smoke-test the `mesh` console script
         run: |
-          /tmp/wheel-smoke-venv/bin/shards --version
-          /tmp/wheel-smoke-venv/bin/shards --help
+          /tmp/wheel-smoke-venv/bin/mesh --version
+          /tmp/wheel-smoke-venv/bin/mesh --help
 
-      - name: Smoke-test the `shards-mcp` entry point resolves
-        # `shards-mcp` has no arg parsing at all (`main()` is a bare `app.run()`),
+      - name: Smoke-test the `mesh-mcp` entry point resolves
+        # `mesh-mcp` has no arg parsing at all (`main()` is a bare `app.run()`),
         # so `--help` doesn't print help and exit — it boots the stdio MCP server
         # and blocks on stdin (core-hardening/7 finding, reported not fixed: an
         # out-of-scope src/ behaviour change). Resolving the declared
@@ -93,7 +93,7 @@ jobs:
         run: |
           /tmp/wheel-smoke-venv/bin/python -c "
           from importlib.metadata import entry_points
-          ep = next(e for e in entry_points(group='console_scripts') if e.name == 'shards-mcp')
+          ep = next(e for e in entry_points(group='console_scripts') if e.name == 'mesh-mcp')
           fn = ep.load()
-          print(f'shards-mcp entry point resolves: {ep.value} -> {fn!r}')
+          print(f'mesh-mcp entry point resolves: {ep.value} -> {fn!r}')
           "

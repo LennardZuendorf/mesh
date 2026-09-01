@@ -1,7 +1,7 @@
 """storage/create-race — race-safe creates: per-kind allocator lock (core-hardening/2).
 
-Verifies :func:`shards.core.notes.create_note` and :func:`shards.core.tasks.create_task`
-hold a per-kind allocator lock (:func:`shards.storage.locks.allocator_lock_path`) across
+Verifies :func:`mesh.core.notes.create_note` and :func:`mesh.core.tasks.create_task`
+hold a per-kind allocator lock (:func:`mesh.storage.locks.allocator_lock_path`) across
 id allocation *and* the write, closing the ``_id_taken`` -> ``atomic_write`` TOCTOU.
 
 Uses real :mod:`multiprocessing` (separate OS processes, spawned fresh — not threads in
@@ -43,7 +43,7 @@ N_RACERS = 6
 
 def _install_fixed_digest() -> None:
     """Force every id candidate (pre-extension) onto the same collision path."""
-    import shards.core.ids as ids_mod
+    import mesh.core.ids as ids_mod
 
     def _fixed(created_iso: str, title: str) -> str:
         return _FIXED_DIGEST
@@ -79,11 +79,11 @@ def _note_worker(
     """Run in a spawned child process: create one racing note."""
     import os
 
-    os.environ["SHARDS_CONFIG_PATH"] = config_path
-    os.environ.pop("SHARDS_AGENT", None)
+    os.environ["MESH_CONFIG_PATH"] = config_path
+    os.environ.pop("MESH_AGENT", None)
 
-    import shards.core.notes as notes_mod
-    from shards.schemas.config import load_config
+    import mesh.core.notes as notes_mod
+    from mesh.schemas.config import load_config
 
     _install_fixed_digest()
     _install_toctou_delay(notes_mod)
@@ -107,11 +107,11 @@ def _task_worker(
     """Run in a spawned child process: create one racing task."""
     import os
 
-    os.environ["SHARDS_CONFIG_PATH"] = config_path
-    os.environ.pop("SHARDS_AGENT", None)
+    os.environ["MESH_CONFIG_PATH"] = config_path
+    os.environ.pop("MESH_AGENT", None)
 
-    import shards.core.tasks as tasks_mod
-    from shards.schemas.config import load_config
+    import mesh.core.tasks as tasks_mod
+    from mesh.schemas.config import load_config
 
     _install_fixed_digest()
     _install_toctou_delay(tasks_mod)
@@ -149,7 +149,7 @@ def _run_race(worker: Callable[..., None], config_path: Path, n: int) -> list[tu
 
 
 def test_concurrent_note_creates_no_lost_content(
-    shards_config: Path, vault: Path, config_path: Path
+    mesh_config: Path, vault: Path, config_path: Path
 ) -> None:
     """N separate processes race a colliding note id candidate; all N survive intact."""
     results = _run_race(_note_worker, config_path, N_RACERS)
@@ -177,7 +177,7 @@ def test_concurrent_note_creates_no_lost_content(
 
 
 def test_concurrent_task_creates_no_lost_content(
-    shards_config: Path, vault: Path, config_path: Path
+    mesh_config: Path, vault: Path, config_path: Path
 ) -> None:
     """N separate processes race a colliding task id candidate; all N survive intact."""
     results = _run_race(_task_worker, config_path, N_RACERS)
@@ -207,10 +207,10 @@ def test_concurrent_task_creates_no_lost_content(
 # --------------------------------------------------------------------------- #
 
 
-def test_create_note_succeeds_with_daemon_down(shards_config: Path, vault: Path) -> None:
+def test_create_note_succeeds_with_daemon_down(mesh_config: Path, vault: Path) -> None:
     """``create_note`` never talks to a daemon -- it must not gate on one being up."""
-    import shards.core.notes as notes_mod
-    from shards.schemas.config import load_config
+    import mesh.core.notes as notes_mod
+    from mesh.schemas.config import load_config
 
     assert "daemon" not in notes_mod.__dict__  # no daemon import, no daemon dependency
     cfg = load_config()
@@ -218,10 +218,10 @@ def test_create_note_succeeds_with_daemon_down(shards_config: Path, vault: Path)
     assert (vault / "notes" / f"{note.id}.md").exists()
 
 
-def test_create_task_succeeds_with_daemon_down(shards_config: Path, vault: Path) -> None:
+def test_create_task_succeeds_with_daemon_down(mesh_config: Path, vault: Path) -> None:
     """``create_task`` never talks to a daemon -- it must not gate on one being up."""
-    import shards.core.tasks as tasks_mod
-    from shards.schemas.config import load_config
+    import mesh.core.tasks as tasks_mod
+    from mesh.schemas.config import load_config
 
     assert "daemon" not in tasks_mod.__dict__  # no daemon import, no daemon dependency
     cfg = load_config()

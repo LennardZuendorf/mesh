@@ -1,7 +1,7 @@
 """search/2 — the ``indexed`` hybrid wrapper (R1, R3, R4).
 
-Exercises :mod:`shards.index.indexed_client`, a thin wrapper over the first-party
-``indexed`` CLI, plus the ``shards search`` hybrid routing it enables. The real
+Exercises :mod:`mesh.index.indexed_client`, a thin wrapper over the first-party
+``indexed`` CLI, plus the ``mesh search`` hybrid routing it enables. The real
 ``indexed`` binary is **never** shelled in these unit tests: every subprocess is
 faked, either at the module-level seam (``_run_indexed_search`` /
 ``_run_indexed_update`` / ``_run_indexed_create``) or by monkeypatching
@@ -11,7 +11,7 @@ Contract under test (search/tech.md):
 
 * ``indexed index search "<q>" --collection <c> --json --limit N`` → NDJSON hits
   ``{"path","score","snippet"}``; each is mapped to a :class:`SearchResult` by
-  reading frontmatter at ``path`` (a missing shards id → ``id=None``, a foreign
+  reading frontmatter at ``path`` (a missing mesh id → ``id=None``, a foreign
   file).
 * Recency tiebreak: two hits whose scores are within ``0.02`` sort by ``updated``
   descending (more recent first).
@@ -33,10 +33,10 @@ import frontmatter
 import pytest
 from typer.testing import CliRunner
 
-from shards.cli.__main__ import app
-from shards.index import indexed_client
-from shards.schemas.config import Config, load_config
-from shards.schemas.search import SearchResult
+from mesh.cli.__main__ import app
+from mesh.index import indexed_client
+from mesh.schemas.config import Config, load_config
+from mesh.schemas.search import SearchResult
 
 _NOW = datetime(2026, 6, 20, 12, 0, 0, tzinfo=UTC)
 _FALLBACK_NOTICE = "search: using substring fallback (indexed unavailable)"
@@ -48,7 +48,7 @@ _FALLBACK_NOTICE = "search: using substring fallback (indexed unavailable)"
 
 
 @pytest.fixture
-def cfg(shards_config: Path) -> Config:
+def cfg(mesh_config: Path) -> Config:
     return load_config()
 
 
@@ -69,7 +69,7 @@ def _seed(
     body: str = "Body text.",
     updated: datetime = _NOW,
 ) -> Path:
-    """Write a shards file (valid ``n-``/``t-`` id) under ``vault/<rel>/<id>.md``."""
+    """Write a mesh file (valid ``n-``/``t-`` id) under ``vault/<rel>/<id>.md``."""
     meta: dict[str, object] = {
         "id": entry_id,
         "type": entry_type,
@@ -92,7 +92,7 @@ def _seed(
 
 
 def _seed_foreign(vault: Path, rel: str, name: str, *, title: str, body: str = "x") -> Path:
-    """Write a non-shards Markdown file (no ``n-``/``t-`` id)."""
+    """Write a non-mesh Markdown file (no ``n-``/``t-`` id)."""
     folder = vault / rel
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}.md"
@@ -175,7 +175,7 @@ def test_search_missing_file_skipped(
 def test_search_sandbox_skips_escaping_path(
     cfg: Config, vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A shards-shaped file that lives OUTSIDE the vault must never be read/returned.
+    # A mesh-shaped file that lives OUTSIDE the vault must never be read/returned.
     outside = tmp_path / "outside.md"
     outside.write_text(
         frontmatter.dumps(frontmatter.Post("x", id="n-out", type="note", title="Outside")),
@@ -627,10 +627,10 @@ def test_incremental_update_noop_without_collection(
 
 
 def test_cli_hybrid_uses_indexed_when_daemon_up(
-    shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+    mesh_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hit = _seed(vault, "notes", entry_id="n-hit", title="Hybrid Note")
-    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
+    monkeypatch.setattr("mesh.core.search._daemon_up", lambda: True)
     _patch_search(
         monkeypatch, _ndjson({"path": str(hit), "score": 0.91, "snippet": "indexed snip"})
     )
@@ -644,10 +644,10 @@ def test_cli_hybrid_uses_indexed_when_daemon_up(
 
 
 def test_cli_hybrid_falls_back_on_called_process_error(
-    shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+    mesh_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
+    monkeypatch.setattr("mesh.core.search._daemon_up", lambda: True)
 
     def _raise(*_a: object, **_k: object) -> str:
         raise subprocess.CalledProcessError(1, ["indexed"])
@@ -662,10 +662,10 @@ def test_cli_hybrid_falls_back_on_called_process_error(
 
 
 def test_cli_hybrid_falls_back_on_missing_binary(
-    shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+    mesh_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
+    monkeypatch.setattr("mesh.core.search._daemon_up", lambda: True)
 
     def _raise(*_a: object, **_k: object) -> str:
         raise FileNotFoundError("indexed")
@@ -677,10 +677,10 @@ def test_cli_hybrid_falls_back_on_missing_binary(
 
 
 def test_cli_substring_when_daemon_down(
-    shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+    mesh_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed(vault, "notes", entry_id="n-hit", title="Alpha Decision Record")
-    monkeypatch.setattr("shards.core.search._daemon_up", lambda: False)
+    monkeypatch.setattr("mesh.core.search._daemon_up", lambda: False)
 
     def _boom(*_a: object, **_k: object) -> str:
         raise AssertionError("indexed must not be shelled when the daemon is down")
@@ -694,9 +694,9 @@ def test_cli_substring_when_daemon_down(
 
 
 def test_cli_hybrid_honours_status_filter(
-    shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+    mesh_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # shards search "q" --status open with hybrid active + daemon up must filter by
+    # mesh search "q" --status open with hybrid active + daemon up must filter by
     # status, not silently return tasks of all statuses (the reported regression).
     open_task = _seed(
         vault, "tasks/open", entry_id="t-open", entry_type="task", status="open", title="Shared"
@@ -704,7 +704,7 @@ def test_cli_hybrid_honours_status_filter(
     done_task = _seed(
         vault, "tasks/done", entry_id="t-done", entry_type="task", status="done", title="Shared"
     )
-    monkeypatch.setattr("shards.core.search._daemon_up", lambda: True)
+    monkeypatch.setattr("mesh.core.search._daemon_up", lambda: True)
     _patch_search(
         monkeypatch,
         _ndjson(

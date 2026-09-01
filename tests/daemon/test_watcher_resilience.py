@@ -16,11 +16,12 @@ import os
 from pathlib import Path
 
 import pytest
+from watchdog.events import FileSystemEvent
 
-from shards.index.reconcile import reconcile_path
-from shards.index.warm import VaultIndex
-from shards.index.watcher import Watcher
-from shards.schemas.config import Config
+from mesh.index.reconcile import reconcile_path
+from mesh.index.warm import VaultIndex
+from mesh.index.watcher import Watcher
+from mesh.schemas.config import Config
 
 
 def _write(path: Path, text: str) -> Path:
@@ -60,10 +61,10 @@ def _good_note(vault: Path, note_id: str) -> Path:
     ],
 )
 def test_reconcile_never_raises_on_a_hostile_file(
-    shards_config: Path, vault: Path, name: str, content: str
+    mesh_config: Path, vault: Path, name: str, content: str
 ) -> None:
     """Each of these used to be a live route to killing the observer thread."""
-    from shards.schemas.config import load_config
+    from mesh.schemas.config import load_config
 
     config: Config = load_config()
     path = _write(vault / "notes" / name, content)
@@ -71,18 +72,18 @@ def test_reconcile_never_raises_on_a_hostile_file(
     result = reconcile_path(config, path)
 
     assert isinstance(result, Path)
-    assert path.exists(), "a file shards cannot classify must be left alone"
+    assert path.exists(), "a file mesh cannot classify must be left alone"
 
 
-def test_a_non_markdown_file_is_never_relocated(shards_config: Path, vault: Path) -> None:
+def test_a_non_markdown_file_is_never_relocated(mesh_config: Path, vault: Path) -> None:
     """The `.md` guard is about *placement*, not about raising.
 
-    A sidecar carrying shards-shaped frontmatter (an export, a template, another
+    A sidecar carrying mesh-shaped frontmatter (an export, a template, another
     tool's scratch file) must stay exactly where its owner put it. Without the
     suffix guard reconcile happily files it under `notes/logs/`, silently moving a
-    file shards does not own.
+    file mesh does not own.
     """
-    from shards.schemas.config import load_config
+    from mesh.schemas.config import load_config
 
     sidecar = _write(
         vault / "notes" / "sidecar.txt",
@@ -97,10 +98,10 @@ def test_a_non_markdown_file_is_never_relocated(shards_config: Path, vault: Path
 
 
 def test_reconcile_leaves_a_symlink_escaping_the_vault_in_place(
-    shards_config: Path, vault: Path, tmp_path: Path
+    mesh_config: Path, vault: Path, tmp_path: Path
 ) -> None:
     """A link pointing outside the sandbox is skipped, not followed and moved."""
-    from shards.schemas.config import load_config
+    from mesh.schemas.config import load_config
 
     outside = _write(tmp_path / "outside" / "n-esc.md", "---\nid: n-esc\ntype: log\n---\nb\n")
     link = vault / "notes" / "n-esc.md"
@@ -113,14 +114,14 @@ def test_reconcile_leaves_a_symlink_escaping_the_vault_in_place(
 
 
 def test_the_watcher_survives_a_hostile_file_and_keeps_indexing(
-    shards_config: Path, vault: Path
+    mesh_config: Path, vault: Path
 ) -> None:
     """The whole point: a bad file costs one event, not the watcher.
 
     Drives the real watchdog adapter the way the observer thread does, so the
     guard under test is the one that actually runs in the daemon.
     """
-    from shards.schemas.config import load_config
+    from mesh.schemas.config import load_config
 
     config = load_config()
     index = VaultIndex()
@@ -138,10 +139,10 @@ def test_the_watcher_survives_a_hostile_file_and_keeps_indexing(
 
 
 def test_an_exception_from_handle_event_never_escapes(
-    shards_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+    mesh_config: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Belt and braces: even an unforeseen bug must not reach the observer."""
-    from shards.schemas.config import load_config
+    from mesh.schemas.config import load_config
 
     watcher = Watcher(load_config(), VaultIndex(), None)
 
@@ -155,11 +156,9 @@ def test_an_exception_from_handle_event_never_escapes(
     watcher.handler.on_deleted(_FakeEvent(str(vault / "notes" / "x.md")))
 
 
-class _FakeEvent:
+class _FakeEvent(FileSystemEvent):
     """Minimal stand-in for a watchdog file event."""
 
-    is_directory = False
-
     def __init__(self, src_path: str, event_type: str = "modified") -> None:
-        self.src_path = src_path
+        super().__init__(src_path)
         self.event_type = event_type
