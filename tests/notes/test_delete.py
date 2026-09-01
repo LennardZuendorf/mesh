@@ -72,7 +72,9 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -168,7 +170,7 @@ def test_delete_note_is_hard_no_archive_or_trash(cfg: Config, vault: Path) -> No
 
 
 def _seed_foreign(vault: Path, name: str, title: str) -> Path:
-    """Write a coexisting Tolaria file with no shards ``n-`` id (non-``n-`` stem)."""
+    """Write a coexisting foreign file with no shards ``n-`` id (non-``n-`` stem)."""
     path = vault / "notes" / f"{name}.md"
     post = frontmatter.Post("Foreign content.", title=title, tags=["x"])
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
@@ -177,23 +179,23 @@ def _seed_foreign(vault: Path, name: str, title: str) -> Path:
 
 def test_delete_note_refuses_foreign_by_stem(cfg: Config, vault: Path) -> None:
     """A foreign file addressed by its filename stem is not-found, not deleted."""
-    foreign = _seed_foreign(vault, "tolaria-foo", "Tolaria Foo")
+    foreign = _seed_foreign(vault, "othertool-foo", "Othertool Foo")
     with pytest.raises(NoteNotFoundError):
-        delete_note(cfg, "tolaria-foo")
+        delete_note(cfg, "othertool-foo")
     assert foreign.exists()  # data loss averted
 
 
 def test_delete_note_refuses_foreign_by_slug(cfg: Config, vault: Path) -> None:
     """A foreign file addressed by its title slug is not-found, not deleted."""
-    foreign = _seed_foreign(vault, "tolaria-bar", "Tolaria Bar")
+    foreign = _seed_foreign(vault, "othertool-bar", "Othertool Bar")
     with pytest.raises(NoteNotFoundError):
-        delete_note(cfg, "tolaria-bar")  # == _slugify("Tolaria Bar")
+        delete_note(cfg, "othertool-bar")  # == _slugify("Othertool Bar")
     assert foreign.exists()
 
 
 def test_cli_delete_foreign_exits_3_keeps_file(cfg: Config, vault: Path) -> None:
-    foreign = _seed_foreign(vault, "tolaria-cli", "Tolaria Cli")
-    result = _invoke(["note", "delete", "tolaria-cli", "--force"])
+    foreign = _seed_foreign(vault, "othertool-cli", "Othertool Cli")
+    result = _invoke(["note", "delete", "othertool-cli", "--force"])
     assert result.exit_code == 3, result.output
     assert foreign.exists()
 

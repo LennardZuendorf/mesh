@@ -14,7 +14,7 @@ import pytest
 from msgspec import ValidationError
 
 from shards.core.ids import generate_task_id
-from shards.schemas.task import Task
+from shards.schemas.task import Task, TaskStatus
 from shards.storage.files import task_folder
 
 # --------------------------------------------------------------------------- #
@@ -89,9 +89,36 @@ def test_task_status_rejects_unknown_value() -> None:
 
 
 @pytest.mark.parametrize("status", ["open", "claimed", "done", "cancelled"])
-def test_task_status_accepts_all_lifecycle_values(status: str) -> None:
-    task = Task(id="t-c7d1", title="x", created=_now(), updated=_now(), status=status)  # type: ignore[arg-type]
+def test_task_status_accepts_all_lifecycle_values(status: TaskStatus) -> None:
+    task = Task(id="t-c7d1", title="x", created=_now(), updated=_now(), status=status)
     assert task.status == status
+
+
+def test_task_priority_accepts_free_form_value() -> None:
+    """R5 tolerant read: ``priority`` stays ``str | None`` — no strict ``Literal``.
+
+    ``list_tasks``/``select_tasks`` skip any row that fails ``Task.model_validate``,
+    so a legacy value outside the ``high``/``normal``/``low`` write-boundary
+    vocabulary must still validate here, or every listing containing that task
+    would silently drop it (the spec's rejected-design failure mode).
+    """
+    task = Task.model_validate(
+        {
+            "id": "t-c7d1",
+            "title": "x",
+            "created": _now(),
+            "updated": _now(),
+            "priority": "urgent-ish",
+        }
+    )
+    assert task.priority == "urgent-ish"
+
+
+def test_task_priority_accepts_none() -> None:
+    task = Task.model_validate(
+        {"id": "t-c7d1", "title": "x", "created": _now(), "updated": _now(), "priority": None}
+    )
+    assert task.priority is None
 
 
 def test_task_unknown_keys_round_trip_unchanged() -> None:
@@ -110,12 +137,12 @@ def test_task_unknown_keys_round_trip_unchanged() -> None:
         "blocks": [],
         "blocked_by": [],
         # Keys shards does not own must survive a load/dump cycle untouched.
-        "tolaria_pinned": True,
+        "othertool_pinned": True,
         "custom_ref": "PROJ-123",
     }
     task = Task.model_validate(payload)
     dumped = task.model_dump()
-    assert dumped["tolaria_pinned"] is True
+    assert dumped["othertool_pinned"] is True
     assert dumped["custom_ref"] == "PROJ-123"
 
 

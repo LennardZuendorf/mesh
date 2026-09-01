@@ -44,3 +44,9 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+
+# subagent-driven-development scratch workspace (ledger, briefs, review packages)
+.superpowers/
+
+# transient git worktrees created for isolated agent runs
+.claude/worktrees/

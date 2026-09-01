@@ -2,8 +2,8 @@
 
 The pydantic v2 -> msgspec swap is *gated* on this test. Root ``tech.md``
 Invariant 3 ("unknown frontmatter keys round-trip") is load-bearing: shards
-coexists with Tolaria, which writes its own frontmatter keys, and those foreign
-keys must survive a shards load/dump cycle byte-for-byte. pydantic's
+coexists with other tools, which write their own frontmatter keys, and those
+foreign keys must survive a shards load/dump cycle byte-for-byte. pydantic's
 ``extra="allow"`` gave this for free; a msgspec ``Struct`` drops unknown fields
 unless a mechanism preserves them.
 
@@ -27,10 +27,10 @@ from shards.schemas.task import Task
 # nested mapping, a list, and the adversarial case of a key *literally* named
 # ``extra`` (which a naive stash field would clobber).
 _FOREIGN = {
-    "tolaria_pinned": True,
+    "othertool_pinned": True,
     "custom_ref": "PROJ-123",
     "priority_hint": 7,
-    "tolaria_meta": {"nested": {"deep": "value"}},
+    "othertool_meta": {"nested": {"deep": "value"}},
     "aliases": ["a", "b"],
     "extra": {"reserved": "name"},
 }
@@ -47,8 +47,8 @@ def _now() -> datetime:
 # they must reach ``model_dump`` — and the disk round-trip — as the exact objects
 # frontmatter parsed.
 _FOREIGN_TEMPORAL = {
-    "tolaria_review_date": date(2026, 8, 1),
-    "tolaria_synced_at": datetime(2026, 7, 10, 9, 30, 0, tzinfo=UTC),
+    "othertool_review_date": date(2026, 8, 1),
+    "othertool_synced_at": datetime(2026, 7, 10, 9, 30, 0, tzinfo=UTC),
 }
 
 
@@ -193,8 +193,13 @@ def test_note_foreign_temporal_keys_json_dump_is_json_dumpable() -> None:
     text = json.dumps(dumped)  # must not raise (foreign date/datetime stringify)
 
     reloaded = json.loads(text)
-    assert reloaded["tolaria_review_date"] == "2026-08-01"
-    assert reloaded["tolaria_synced_at"] == "2026-07-10T09:30:00Z"
+    assert reloaded["othertool_review_date"] == "2026-08-01"
+    assert reloaded["othertool_synced_at"] == "2026-07-10T09:30:00Z"
+    # The model's own created/updated fields use the same Z convention.
+    assert reloaded["created"].endswith("Z")
+    assert reloaded["updated"].endswith("Z")
+    assert "+00:00" not in reloaded["created"]
+    assert "+00:00" not in reloaded["updated"]
 
 
 def test_note_bare_date_on_known_field_promotes_and_roundtrips() -> None:

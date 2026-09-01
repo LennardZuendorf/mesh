@@ -28,19 +28,18 @@ because ``AF_UNIX`` paths are length-capped.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import shutil
-import tempfile
-import threading
 import time
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import frontmatter
 import pytest
 from watchdog.events import (
+    DirDeletedEvent,
+    DirModifiedEvent,
+    DirMovedEvent,
     FileCreatedEvent,
     FileDeletedEvent,
     FileModifiedEvent,
@@ -54,6 +53,7 @@ from shards.index.warm import DEFAULT_RECENT_LIMIT, VaultIndex, scan_recent
 from shards.index.watcher import ChangeHooks, Watcher
 from shards.schemas.config import Config, load_config
 from shards.storage.sandbox import safe_resolve
+from tests.daemon.conftest import running_daemon
 
 # --------------------------------------------------------------------------- #
 # Fixtures & helpers                                                          #
@@ -63,26 +63,6 @@ from shards.storage.sandbox import safe_resolve
 @pytest.fixture
 def cfg(shards_config: Path) -> Config:
     return load_config()
-
-
-@pytest.fixture
-def sock_dir() -> Iterator[Path]:
-    """A short-lived ``/tmp`` dir for unix sockets (AF_UNIX path-length limit)."""
-    path = Path(tempfile.mkdtemp(prefix="brn-", dir="/tmp"))
-    try:
-        yield path
-    finally:
-        shutil.rmtree(path, ignore_errors=True)
-
-
-@pytest.fixture
-def socket_path(sock_dir: Path) -> Path:
-    return sock_dir / "d.sock"
-
-
-@pytest.fixture
-def missing_socket(sock_dir: Path) -> Path:
-    return sock_dir / "absent.sock"
 
 
 def _write_note(
@@ -114,7 +94,9 @@ def _write_note(
     dest_dir = vault / sub
     dest_dir.mkdir(parents=True, exist_ok=True)
     path = dest_dir / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
@@ -167,49 +149,12 @@ def _write_task(
     dest_dir = vault / sub
     dest_dir.mkdir(parents=True, exist_ok=True)
     path = dest_dir / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
-
-
-@contextlib.contextmanager
-def running_daemon(path: Path, config: Config | None = None) -> Iterator[DaemonServer]:
-    """Run a :class:`DaemonServer` on its own event loop in a daemon thread."""
-    loop = asyncio.new_event_loop()
-    server = DaemonServer(path, config=config)
-    stop_future: asyncio.Future[None] = loop.create_future()
-    ready = threading.Event()
-    start_error: list[BaseException] = []
-
-    async def main() -> None:
-        try:
-            await server.start()
-        except BaseException as exc:  # noqa: BLE001 - surfaced to the test thread
-            start_error.append(exc)
-            return
-        finally:
-            ready.set()
-        await stop_future
-        await server.stop()
-
-    def run() -> None:
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
-        loop.close()
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    if not ready.wait(timeout=5):
-        raise RuntimeError("daemon did not become ready")
-    if start_error:
-        thread.join(timeout=5)
-        raise start_error[0]
-    try:
-        yield server
-    finally:
-        loop.call_soon_threadsafe(stop_future.set_result, None)
-        thread.join(timeout=5)
 
 
 # --------------------------------------------------------------------------- #
@@ -229,8 +174,10 @@ def test_reparse_indexes_note_by_id(vault: Path) -> None:
 
 
 def test_reparse_skips_file_without_shards_id(vault: Path) -> None:
-    foreign = vault / "notes" / "tolaria.md"
-    foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
+    foreign = vault / "notes" / "othertool.md"
+    foreign.write_text(
+        frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
+    )
     index = VaultIndex()
     index.reparse(foreign)
     assert len(index) == 0
@@ -305,19 +252,19 @@ def test_reconcile_does_not_bump_updated_and_roundtrips_unknown_keys(
 def test_reconcile_leaves_correctly_placed_file(cfg: Config, vault: Path) -> None:
     path = _write_note(vault, note_id="n-ok", note_type="note")  # correct folder
     final = reconcile_path(cfg, path)
-    assert final == path.resolve()
+    assert final == path  # unchanged path space: the caller's path, not a realpath
     assert path.exists()
 
 
 def test_reconcile_ignores_foreign_file(cfg: Config, vault: Path) -> None:
-    foreign = vault / "tasks" / "open" / "tolaria.md"
+    foreign = vault / "tasks" / "open" / "othertool.md"
     foreign.parent.mkdir(parents=True, exist_ok=True)
     foreign.write_text(
         frontmatter.dumps(frontmatter.Post("x", title="Foreign", status="done")),
         encoding="utf-8",
     )
     final = reconcile_path(cfg, foreign)
-    assert final == foreign.resolve()
+    assert final == foreign
     assert foreign.exists()  # no shards id → never moved
 
 
@@ -336,10 +283,34 @@ def test_reconcile_returns_unmoved_when_source_races_away(
 
     monkeypatch.setattr("shards.index.reconcile.os.replace", _vanish)
     result = reconcile_path(cfg, path)  # must not raise
-    # Left in place (move failed); the resolved original path is returned so a
-    # later event can reconcile it.
-    assert result == safe_resolve(cfg.core.tolaria_path, path)
+    # Left in place (move failed); the caller's own path is returned so a later
+    # event can reconcile it — and so the index never changes path space.
+    assert result == path
     assert path.exists()
+
+
+def test_reconcile_keeps_the_caller_path_space_when_nothing_moves(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A correctly-placed file reached through a symlink comes back unresolved.
+
+    ``Watcher.warm`` seeds the index with paths exactly as walked, and every scope
+    predicate compares against the configured vault, so a no-move reconcile that
+    handed back ``safe_resolve``'s realpath dropped the row out of scope: with a
+    symlinked vault the whole index emptied one edit after daemon start.
+    """
+    link = tmp_path / "vault-link"
+    link.symlink_to(vault, target_is_directory=True)
+    cfg_path = tmp_path / "linked.toml"
+    cfg_path.write_text(f'[core]\nvault_path = "{link}"\nagent = "test-agent"\n', encoding="utf-8")
+    monkeypatch.setenv("SHARDS_CONFIG_PATH", str(cfg_path))
+    linked_cfg = load_config()
+
+    _write_note(vault, note_id="n-link", note_type="note")
+    walked = link / "notes" / "n-link.md"
+
+    assert reconcile_path(linked_cfg, walked) == walked
+    assert reconcile_path(linked_cfg, walked) != safe_resolve(linked_cfg.core.vault_path, walked)
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +362,95 @@ def test_handle_event_reconciles_folder_mismatch(cfg: Config, vault: Path) -> No
     assert entry.path.resolve() == (vault / "tasks" / "done" / "t-rec.md").resolve()
     assert (vault / "tasks" / "done" / "t-rec.md").exists()
     assert not path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Directory events — watchdog reports a subtree rename as ONE event            #
+# --------------------------------------------------------------------------- #
+
+
+def test_directory_moved_out_of_the_vault_evicts_the_whole_subtree(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """``mv notes/decisions ../archive`` arrives as one ``DirMovedEvent``.
+
+    There are no per-file events behind it, so a handler that returned early on
+    ``is_directory`` served phantom rows for every file in that subtree for the
+    daemon's whole lifetime. (``rmtree`` is unaffected — it emits a delete per
+    file.)
+    """
+    inside = _write_note(vault, note_id="n-sub", note_type="decision")
+    index = VaultIndex()
+    index.reparse(inside)
+    watcher = Watcher(cfg, index)
+    seen: list[Path] = []
+    watcher.hooks.register(seen.append)
+
+    src = vault / "notes" / "decisions"
+    dest = tmp_path / "archive"
+    shutil.move(str(src), str(dest))
+    watcher.handle_event(DirMovedEvent(str(src), str(dest)))
+
+    assert len(index) == 0
+    assert index.get("n-sub") is None
+    assert [p.name for p in seen] == ["n-sub.md"]  # the hook heard about it too
+
+
+def test_directory_deleted_evicts_the_whole_subtree(cfg: Config, vault: Path) -> None:
+    """A directory delete reported without per-file events still empties the subtree."""
+    inside = _write_note(vault, note_id="n-rm", note_type="decision")
+    index = VaultIndex()
+    index.reparse(inside)
+    watcher = Watcher(cfg, index)
+
+    folder = vault / "notes" / "decisions"
+    shutil.rmtree(folder)
+    watcher.handle_event(DirDeletedEvent(str(folder)))
+
+    assert len(index) == 0
+
+
+def test_directory_moved_into_the_vault_indexes_the_whole_subtree(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """A folder moved *in* must be walked — nothing else will announce its files."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _write_note(staging, note_id="n-in", note_type="decision", folder=".")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+
+    dest = vault / "notes" / "decisions" / "arrived"
+    shutil.move(str(staging), str(dest))
+    watcher.handle_event(DirMovedEvent(str(staging), str(dest)))
+
+    assert index.get("n-in") is not None
+
+
+def test_directory_moved_outside_the_watched_tree_is_not_indexed(
+    cfg: Config, vault: Path, tmp_path: Path
+) -> None:
+    """A destination outside ``notes/``/``tasks/`` is not a vault row source."""
+    staging = tmp_path / "elsewhere"
+    staging.mkdir()
+    _write_note(staging, note_id="n-out", folder=".")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+
+    dest = vault / "archive"
+    shutil.move(str(staging), str(dest))
+    watcher.handle_event(DirMovedEvent(str(staging), str(dest)))
+
+    assert len(index) == 0
+
+
+def test_directory_modified_events_are_ignored(cfg: Config, vault: Path) -> None:
+    """Every file write also modifies its parent dir — that must stay a no-op."""
+    _write_note(vault, note_id="n-dm", note_type="decision")
+    index = VaultIndex()
+    watcher = Watcher(cfg, index)
+    watcher.handle_event(DirModifiedEvent(str(vault / "notes" / "decisions")))
+    assert len(index) == 0
 
 
 def test_event_handler_routes_created(cfg: Config, vault: Path) -> None:
@@ -477,9 +537,11 @@ def test_index_recent_sorted_by_mtime_desc_and_limited(vault: Path) -> None:
 def test_scan_recent_fallback_mtime_sorted_and_shards_ids_only(cfg: Config, vault: Path) -> None:
     _write_note(vault, note_id="n-old", title="Old", mtime=1000.0)
     _write_task(vault, task_id="t-new", status="open", mtime=5000.0)
-    # A foreign Tolaria file (no shards id) must be excluded.
-    foreign = vault / "notes" / "tolaria.md"
-    foreign.write_text(frontmatter.dumps(frontmatter.Post("x", title="Tolaria")), encoding="utf-8")
+    # A foreign file (no shards id) must be excluded.
+    foreign = vault / "notes" / "othertool.md"
+    foreign.write_text(
+        frontmatter.dumps(frontmatter.Post("x", title="Othertool")), encoding="utf-8"
+    )
     rows = scan_recent(cfg, limit=10)
     ids = [r["id"] for r in rows]
     assert ids == ["t-new", "n-old"]  # mtime desc; foreign excluded
@@ -518,13 +580,20 @@ def test_activity_recent_falls_back_when_daemon_down(
     assert [r["id"] for r in result["entries"]] == ["t-fb", "n-fb"]
 
 
-def test_activity_recent_is_503_stub_without_config(cfg: Config, socket_path: Path) -> None:
-    """A daemon started without a vault config keeps activity.recent as a stub."""
+def test_activity_recent_is_unknown_without_config(cfg: Config, socket_path: Path) -> None:
+    """A daemon started without a vault config registers no activity.recent handler.
+
+    core-hardening/5 culled the ``503`` stub table: a handler is either wired (at
+    config-ful startup, over the warm index) or the method is simply unknown. The
+    ``activity.recent`` verb deliberately passes an *empty* fallback-code set, so
+    that ``404`` propagates as a server-state signal — the ``recent-activity``
+    lens catches it and scans the folder itself.
+    """
     with running_daemon(socket_path, config=None):
         client = DaemonClient(socket_path=socket_path)
         with pytest.raises(DaemonError) as excinfo:
             client.activity_recent(cfg, limit=5)
-    assert excinfo.value.code == 503
+    assert excinfo.value.code == 404
 
 
 def test_default_recent_limit_is_sane() -> None:

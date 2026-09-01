@@ -14,6 +14,7 @@ an explicit ``--owner`` outside ``[tasks].collections`` is rejected (exit 2).
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -22,7 +23,7 @@ import pytest
 from typer.testing import CliRunner
 
 from shards.cli.__main__ import app
-from shards.core.notes import create_note, get_note
+from shards.core.notes import create_note, find_duplicate_title, get_note
 from shards.schemas.config import Config, load_config
 from shards.storage.files import note_folder
 
@@ -133,12 +134,12 @@ def test_create_note_roundtrips_unknown_frontmatter_key(cfg: Config, vault: Path
     note = create_note(cfg, "Round Trip", body="x")
     path = note_folder("note", vault) / f"{note.id}.md"
     post = frontmatter.loads(path.read_text(encoding="utf-8"))
-    post.metadata["tolaria_pinned"] = True
+    post.metadata["othertool_pinned"] = True
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
 
     view = get_note(cfg, note.id)
     dumped = view.note.model_dump()
-    assert dumped.get("tolaria_pinned") is True
+    assert dumped.get("othertool_pinned") is True
 
 
 def test_create_note_resolves_wikilinks_into_related(cfg: Config, vault: Path) -> None:
@@ -250,3 +251,139 @@ def test_cli_new_tags_and_timestamps(cfg: Config, vault: Path) -> None:
     assert meta["created"] is not None
     assert meta["updated"] is not None
     assert meta["created"] == meta["updated"]
+
+
+# --------------------------------------------------------------------------- #
+# find_duplicate_title / duplicate-title warning at create (R9)                #
+# --------------------------------------------------------------------------- #
+
+
+def test_find_duplicate_title_exact_match(cfg: Config, vault: Path) -> None:
+    first = create_note(cfg, "Japan visa requirements for Q3 trip", body="x")
+    assert find_duplicate_title(cfg, "Japan visa requirements for Q3 trip") == first.id
+
+
+def test_find_duplicate_title_no_match_returns_none(cfg: Config, vault: Path) -> None:
+    create_note(cfg, "Existing Title", body="x")
+    assert find_duplicate_title(cfg, "Unrelated Title") is None
+
+
+def test_find_duplicate_title_case_and_whitespace_collide(cfg: Config, vault: Path) -> None:
+    """Mirrors ``_resolve_path``'s slug-normalized rule (``_slugify``), not
+    ``wikilinks._title_index``'s exact-match rule: a title differing only by
+    case or surrounding/internal whitespace *does* collide, because it would
+    already collide once slugified — the same normalization the CLI's
+    ``<id|slug>`` resolver applies (asserted, not incidental). This is the case
+    that actually poisons the slug resolver, which is the harm this warning
+    exists to flag."""
+    first = create_note(cfg, "Japan Visa", body="x")
+    assert find_duplicate_title(cfg, "japan visa") == first.id
+    assert find_duplicate_title(cfg, "JAPAN VISA") == first.id
+    assert find_duplicate_title(cfg, " Japan Visa ") == first.id
+    assert find_duplicate_title(cfg, "Japan  Visa") == first.id  # internal whitespace run
+
+
+def test_find_duplicate_title_ignores_tasks(cfg: Config, vault: Path) -> None:
+    """Same-kind only: a task with the same title is invisible to the note check."""
+    from shards.core.tasks import create_task
+
+    create_task(cfg, "Shared Title")
+    assert find_duplicate_title(cfg, "Shared Title") is None
+
+
+def test_create_note_duplicate_title_still_succeeds(cfg: Config, vault: Path) -> None:
+    """Non-blocking: creating a second note with an existing title still creates
+    it (exit 0 equivalent at the core layer — no exception, id returned, file on
+    disk) rather than refusing."""
+    first = create_note(cfg, "Japan visa requirements for Q3 trip", body="x")
+    second = create_note(cfg, "Japan visa requirements for Q3 trip", body="y")
+    assert second.id != first.id
+    assert (note_folder("note", vault) / f"{second.id}.md").exists()
+    assert (note_folder("note", vault) / f"{first.id}.md").exists()
+
+
+# --------------------------------------------------------------------------- #
+# CLI — duplicate-title warning (R9)                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_new_duplicate_title_warns_and_still_creates(cfg: Config, vault: Path) -> None:
+    """Load-bearing: the create SUCCEEDS (exit 0, id on stdout, file on disk)
+    *and* a warning naming the prior id lands on stderr."""
+    first = _invoke(
+        ["--quiet", "note", "new", "Japan visa requirements for Q3 trip", "--body", "x"]
+    )
+    assert first.exit_code == 0, first.output
+    first_id = first.output.strip()
+
+    second = _invoke(["note", "new", "Japan visa requirements for Q3 trip", "--body", "y"])
+    assert second.exit_code == 0, second.output
+    assert first_id in second.stderr
+    assert "duplicate title" in second.stderr
+    second_id = second.output.strip().split()[-1]
+    assert (note_folder("note", vault) / f"{second_id}.md").exists()
+
+
+def test_cli_new_unique_title_emits_no_warning(cfg: Config, vault: Path) -> None:
+    result = _invoke(["note", "new", "A Wholly Unique Title", "--body", "x"])
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+
+
+def test_cli_new_duplicate_title_quiet_suppresses_warning(cfg: Config, vault: Path) -> None:
+    _invoke(["--quiet", "note", "new", "Repeat Title", "--body", "x"])
+    second = _invoke(["--quiet", "note", "new", "Repeat Title", "--body", "y"])
+    assert second.exit_code == 0, second.output
+    assert second.stderr == ""
+
+
+def test_cli_new_duplicate_title_json_never_carries_warning(cfg: Config, vault: Path) -> None:
+    """``--json`` payload never carries the advisory text; the warning still
+    reaches stderr (only ``--quiet`` suppresses it)."""
+    _invoke(["--quiet", "note", "new", "JSON Dup", "--body", "x"])
+    second = _invoke(["--json", "note", "new", "JSON Dup", "--body", "y"])
+    assert second.exit_code == 0, second.output
+    obj = json.loads(second.stdout)
+    assert "warning" not in json.dumps(obj)
+    assert "duplicate title" in second.stderr
+
+
+def test_cli_new_note_task_same_title_no_warning(cfg: Config, vault: Path) -> None:
+    """A note and a task sharing a title do not warn (same-kind only, R9)."""
+    task_result = _invoke(["--quiet", "task", "new", "Cross-Kind Title"])
+    assert task_result.exit_code == 0, task_result.output
+
+    note_result = _invoke(["note", "new", "Cross-Kind Title", "--body", "x"])
+    assert note_result.exit_code == 0, note_result.output
+    assert note_result.stderr == ""
+
+
+def test_cli_new_case_whitespace_duplicate_warns_and_is_genuinely_ambiguous_slug(
+    cfg: Config, vault: Path
+) -> None:
+    """The motivating case: two titles differing only in case/whitespace.
+
+    Ties the warning to the *real* harm rather than to a string comparison —
+    the create succeeds and warns naming the prior id, and the resulting pair
+    is genuinely what makes ``note get <slug>`` permanently ambiguous
+    afterwards (the whole reason this warning exists)."""
+    first = _invoke(["--quiet", "note", "new", "Japan Visa", "--body", "x"])
+    assert first.exit_code == 0, first.output
+    first_id = first.output.strip()
+
+    second = _invoke(["note", "new", " japan  visa ", "--body", "y"])
+    assert second.exit_code == 0, second.output
+    assert first_id in second.stderr
+    assert "duplicate title" in second.stderr
+    second_id = second.output.strip().split()[-1]
+    assert second_id != first_id
+    assert (note_folder("note", vault) / f"{second_id}.md").exists()
+    assert (note_folder("note", vault) / f"{first_id}.md").exists()
+
+    # The warned-about pair is genuinely the ambiguous-slug case: a slug lookup
+    # on either spelling now refuses forever rather than resolving.
+    ambiguous = _invoke(["note", "get", "japan visa"])
+    assert ambiguous.exit_code == 2, ambiguous.output
+    assert "ambiguous slug" in ambiguous.stderr
+    assert first_id in ambiguous.stderr
+    assert second_id in ambiguous.stderr

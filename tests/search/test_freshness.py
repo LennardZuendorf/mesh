@@ -123,18 +123,6 @@ def test_incremental_update_swallows_generic_oserror(
     indexed_client.incremental_update(cfg, vault / "notes" / "n-x.md")
 
 
-def test_incremental_update_noop_without_collection(
-    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cfg.search.collection = None
-
-    def _boom(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise AssertionError("no subprocess when collection is None")
-
-    monkeypatch.setattr(indexed_client.subprocess, "run", _boom)
-    indexed_client.incremental_update(cfg, vault / "notes" / "n-x.md")
-
-
 # --------------------------------------------------------------------------- #
 # full_rebuild / reindex — argv, delegation, no-op                             #
 # --------------------------------------------------------------------------- #
@@ -156,16 +144,6 @@ def test_reindex_delegates_to_full_rebuild(cfg: Config, monkeypatch: pytest.Monk
     assert calls == [cfg]
 
 
-def test_full_rebuild_noop_without_collection(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg.search.collection = None
-
-    def _boom(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        raise AssertionError("no subprocess when collection is None")
-
-    monkeypatch.setattr(indexed_client.subprocess, "run", _boom)
-    indexed_client.full_rebuild(cfg)  # silent no-op
-
-
 # --------------------------------------------------------------------------- #
 # No module-import side-effect: registration is explicit + config-bound        #
 # --------------------------------------------------------------------------- #
@@ -176,29 +154,17 @@ def test_no_hook_registered_at_import(
 ) -> None:
     """Importing ``indexed_client`` must not have registered any change hook.
 
-    A fresh registry fired without an explicit ``register_hook`` must reach
+    A fresh registry fired with no explicit hook registration must reach
     ``incremental_update`` zero times, proving registration is an explicit step
-    (not an import-time side-effect).
+    (not an import-time side-effect). The real registration path is the daemon's
+    own inlined hook (``daemon/server.py``, covered below by
+    ``test_daemon_start_registers_incremental_update_hook``); this test only
+    pins the absence of any hidden default.
     """
     calls: list[Path] = []
     monkeypatch.setattr(indexed_client, "incremental_update", lambda c, p: calls.append(p))
     ChangeHooks().fire(vault / "notes" / "n-x.md")
     assert calls == []
-
-
-def test_register_hook_is_explicit_and_config_bound(
-    cfg: Config, vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """After an explicit ``register_hook``, a vault change drives incremental_update."""
-    calls: list[tuple[Config, Path]] = []
-    monkeypatch.setattr(
-        indexed_client, "incremental_update", lambda config, path: calls.append((config, path))
-    )
-    hooks = ChangeHooks()
-    indexed_client.register_hook(cfg, hooks)
-    changed = vault / "notes" / "n-x.md"
-    hooks.fire(changed)
-    assert calls == [(cfg, changed)]
 
 
 # --------------------------------------------------------------------------- #

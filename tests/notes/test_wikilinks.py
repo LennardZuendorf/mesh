@@ -11,7 +11,7 @@ on every body write and persist the derived ``related`` list — ``related`` is 
 pure function of the body.
 
 Only shards-owned notes (id ``n-…``) participate in title resolution, mirroring
-``list_notes``: a coexisting Tolaria/foreign file (title present, non-shards id)
+``list_notes``: a coexisting foreign file (title present, non-shards id)
 must never shadow a link nor leak a foreign id into ``related``.
 """
 
@@ -54,16 +54,18 @@ def _seed_note(
     folder = note_folder(note_type, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post(body, **meta)), encoding="utf-8")
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
-def _seed_tolaria(vault: Path, name: str, meta: dict[str, object]) -> Path:
+def _seed_foreign(vault: Path, name: str, meta: dict[str, object]) -> Path:
     """Write a non-shards Markdown file (id is not a shards ``n-`` id) under ``notes/``."""
     path = vault / "notes" / f"{name}.md"
-    path.write_text(
-        frontmatter.dumps(frontmatter.Post("Tolaria content.", **meta)), encoding="utf-8"
-    )
+    post = frontmatter.Post("Foreign content.")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -147,14 +149,67 @@ def test_find_dangling_empty_when_all_resolve(vault: Path) -> None:
     assert find_dangling(vault) == []
 
 
+def _seed_task(
+    vault: Path,
+    *,
+    task_id: str,
+    rel: str = "tasks/open",
+    body: str = "Task body.",
+) -> Path:
+    """Write a shards task straight to disk (core-hardening/4: dangling covers tasks too)."""
+    meta: dict[str, object] = {
+        "id": task_id,
+        "type": "task",
+        "title": "A Task",
+        "tags": [],
+        "owner": "seed-agent",
+        "status": "open",
+        "created": _WHEN,
+        "updated": _WHEN,
+        "related": [],
+    }
+    folder = vault / rel
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{task_id}.md"
+    post = frontmatter.Post(body)
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    return path
+
+
+def test_find_dangling_covers_task_bodies(vault: Path) -> None:
+    # root tech.md § B6 / product.md "Vault-health counts cover the whole vault":
+    # a title-form wikilink in a task body that matches no note is dangling too.
+    _seed_task(vault, task_id="t-open1", body="Blocked on [[Missing Design Doc]].")
+    assert "Missing Design Doc" in find_dangling(vault)
+
+
+def test_find_dangling_task_id_form_link_is_not_dangling(vault: Path) -> None:
+    # An id-form link in a task body is never dangling, matching note behaviour.
+    _seed_task(vault, task_id="t-open2", body="See [[n-nope]] and [[t-nope]].")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_task_title_link_resolving_to_a_note_is_not_dangling(vault: Path) -> None:
+    _seed_note(vault, note_id="n-spec", title="Design Doc")
+    _seed_task(vault, task_id="t-open3", body="See [[Design Doc]] for details.")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_dedupes_across_notes_and_tasks(vault: Path) -> None:
+    _seed_note(vault, note_id="n-s1", title="S1", body="[[Phantom]]")
+    _seed_task(vault, task_id="t-open4", body="Also references [[Phantom]].")
+    assert find_dangling(vault) == ["Phantom"]
+
+
 # --------------------------------------------------------------------------- #
-# Shards-notes-only: coexisting Tolaria files must not resolve or leak ids       #
+# Shards-notes-only: coexisting foreign files must not resolve or leak ids      #
 # --------------------------------------------------------------------------- #
 
 
-def test_foreign_tolaria_title_does_not_resolve(vault: Path) -> None:
+def test_foreign_title_does_not_resolve(vault: Path) -> None:
     # A non-shards file with a title but a foreign id must not shadow the link.
-    _seed_tolaria(vault, "daily-2026-06-01", {"id": "tol-123", "title": "Daily Log"})
+    _seed_foreign(vault, "daily-2026-06-01", {"id": "ext-123", "title": "Daily Log"})
     _seed_note(vault, note_id="n-src", title="Src", body="See [[Daily Log]].")
     out_body, related = resolve_wikilinks("See [[Daily Log]].", vault)
     assert related == []  # foreign id never leaks into related
@@ -164,7 +219,7 @@ def test_foreign_tolaria_title_does_not_resolve(vault: Path) -> None:
 
 
 def test_shards_note_wins_over_foreign_same_title(vault: Path) -> None:
-    _seed_tolaria(vault, "foreign", {"id": "tol-9", "title": "Shared Title"})
+    _seed_foreign(vault, "foreign", {"id": "ext-9", "title": "Shared Title"})
     _seed_note(vault, note_id="n-shards", title="Shared Title")
     _, related = resolve_wikilinks("[[Shared Title]]", vault)
     assert related == ["n-shards"]
@@ -243,3 +298,115 @@ def test_malformed_yaml_note_does_not_crash_wikilinks(cfg: Config, vault: Path) 
     assert related == ["n-ref"]
     # find_dangling (feeds `shards status`) skips the corrupt file instead of raising.
     assert find_dangling(vault) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task scope — the dangling scan walks exactly the task lifecycle folders        #
+# --------------------------------------------------------------------------- #
+
+
+def test_find_dangling_ignores_files_outside_the_task_lifecycle_folders(vault: Path) -> None:
+    """The scan walks ``tasks/{open,done}`` non-recursively, like ``core.tasks``.
+
+    ``core.tasks._iter_task_files`` / ``in_task_scope`` are deliberately
+    non-recursive over exactly those two folders, so a file filed beside them
+    (``tasks/archive/``) or a level deeper (``tasks/open/sub/``) is not a task
+    this program can get, claim, finish or edit. ``shards status`` must not
+    count broken links from files no verb can reach — the count would name a
+    problem the tool offers no way to fix.
+    """
+    _seed_task(vault, task_id="t-arch", rel="tasks/archive", body="[[Ghost From Archive]]")
+    _seed_task(vault, task_id="t-nest", rel="tasks/open/sub", body="[[Ghost From Subfolder]]")
+    assert find_dangling(vault) == []
+
+
+def test_find_dangling_still_covers_both_lifecycle_folders(vault: Path) -> None:
+    """Narrowing the walk must not lose ``tasks/done/`` — both folders still scan."""
+    _seed_task(vault, task_id="t-o", rel="tasks/open", body="[[Ghost Open]]")
+    _seed_task(vault, task_id="t-d", rel="tasks/done", body="[[Ghost Done]]")
+    assert find_dangling(vault) == ["Ghost Open", "Ghost Done"]
+
+
+# --------------------------------------------------------------------------- #
+# Dialect — aliases (``|``) and heading/block anchors (``#`` / ``^``)           #
+# --------------------------------------------------------------------------- #
+#
+# The wikilink dialect the surrounding Markdown ecosystem writes is wider than
+# ``[[Title]]``: a link may carry a display alias after ``|`` and/or a heading
+# (``#``) or block (``^``) anchor. Those decorations name a *location inside*
+# the target, never a different entity, so the target is normalised before
+# lookup — otherwise a link every host app resolves is reported as dangling with
+# the pipe or hash still in its text, which is what made the health signal
+# useless on a real vault.
+
+
+def test_alias_link_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al1", title="First note")
+    _, related = resolve_wikilinks("See [[First note|the first]].", vault)
+    assert related == ["n-al1"]
+
+
+def test_heading_anchor_link_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al2", title="First note")
+    _, related = resolve_wikilinks("See [[First note#Section]].", vault)
+    assert related == ["n-al2"]
+
+
+def test_block_ref_link_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al3", title="First note")
+    _, related = resolve_wikilinks("See [[First note^block-id]].", vault)
+    assert related == ["n-al3"]
+
+
+def test_heading_anchor_with_alias_resolves_to_the_target_note(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al4", title="First note")
+    _, related = resolve_wikilinks("See [[First note#Sec|display]].", vault)
+    assert related == ["n-al4"]
+
+
+def test_decorated_links_to_the_same_note_dedupe_into_one_related_id(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al5", title="First note")
+    body = "[[First note]] [[First note|x]] [[First note#S]] [[First note#S|x]] [[First note^b]]"
+    _, related = resolve_wikilinks(body, vault)
+    assert related == ["n-al5"]
+
+
+def test_decorated_links_are_not_reported_dangling(vault: Path) -> None:
+    _seed_note(vault, note_id="n-al6", title="First note")
+    _seed_note(
+        vault,
+        note_id="n-al7",
+        title="Source",
+        body="See [[First note|the first]] and [[First note#Section]].",
+    )
+    assert find_dangling(vault) == []
+
+
+def test_dangling_decorated_link_reports_the_normalised_target(vault: Path) -> None:
+    """A genuinely broken decorated link reports the *entity* it failed to find."""
+    _seed_note(vault, note_id="n-al8", title="Source", body="See [[Ghost Note#Sec|display]].")
+    assert find_dangling(vault) == ["Ghost Note"]
+
+
+def test_id_form_link_with_alias_passes_through(vault: Path) -> None:
+    _, related = resolve_wikilinks("See [[n-abcd|the note]] and [[t-wxyz#Outcome]].", vault)
+    assert related == ["n-abcd", "t-wxyz"]
+
+
+def test_bare_anchor_link_is_neither_resolved_nor_dangling(vault: Path) -> None:
+    """``[[#Heading]]`` / ``[[^block]]`` name a spot in *this* file, not another entity."""
+    _seed_note(vault, note_id="n-al9", title="Source", body="Jump to [[#Heading]] or [[^blk]].")
+    _, related = resolve_wikilinks("Jump to [[#Heading]] or [[^blk]].", vault)
+    assert related == []
+    assert find_dangling(vault) == []
+
+
+def test_plain_link_resolution_is_byte_identical(vault: Path) -> None:
+    """The undecorated path must be untouched by normalisation."""
+    _seed_note(vault, note_id="n-pl1", title="Plain Title")
+    body = "See [[Plain Title]] and [[Missing Title]] and [[n-idform]]."
+    out_body, related = resolve_wikilinks(body, vault)
+    assert out_body == body
+    assert related == ["n-pl1", "n-idform"]
+    _seed_note(vault, note_id="n-pl2", title="Src", body=body)
+    assert find_dangling(vault) == ["Missing Title"]

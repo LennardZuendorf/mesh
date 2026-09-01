@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import frontmatter
@@ -49,6 +50,7 @@ def atomic_write(path: Path, content: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
             fh.flush()
+            _match_destination_mode(fh.fileno(), path)
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
         _fsync_dir(path.parent)
@@ -56,6 +58,49 @@ def atomic_write(path: Path, content: str) -> None:
         with contextlib.suppress(FileNotFoundError):
             tmp_path.unlink()
         raise
+
+
+def _match_destination_mode(fd: int, path: Path) -> None:
+    """Give the temp file the mode the destination should end up with.
+
+    ``mkstemp`` creates 0600, and ``os.replace`` carries that mode onto the
+    destination — so without this an existing 0644 note silently becomes 0600 on
+    its first append, one file at a time. The vault is shared with whatever else
+    writes to the folder (git, another tool, a second operator), so shards must
+    not quietly narrow a file's permissions. An overwrite keeps the destination's
+    current mode; a fresh file gets the process umask's default, exactly as any
+    other tool writing that folder would produce.
+    """
+    try:
+        mode = path.stat().st_mode & 0o7777
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    with contextlib.suppress(OSError):
+        os.fchmod(fd, mode)
+
+
+class _NoAliasDumper(yaml.SafeDumper):
+    """A YAML dumper that never emits anchors or aliases.
+
+    Binding one object to two frontmatter keys (``created`` and ``updated`` on a
+    freshly created entity) makes PyYAML emit ``&id001``/``*id001``. That is valid
+    YAML, but anchors are an advanced feature plain-Markdown consumers routinely
+    do not implement — a restricted frontmatter parser reads ``updated`` as the
+    literal string ``*id001``. Invariant 3 says the Markdown stays clean for every
+    other tool sharing the folder, so the guarantee lives here, at the single
+    serialisation boundary, rather than depending on every caller remembering to
+    pass distinct objects.
+    """
+
+    def ignore_aliases(self, data: object) -> bool:
+        return True
+
+
+def dump_post(post: frontmatter.Post) -> str:
+    """Serialise ``post`` to Markdown with anchor-free frontmatter."""
+    return frontmatter.dumps(post, Dumper=_NoAliasDumper)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -90,16 +135,47 @@ def read_post(path: Path) -> frontmatter.Post | None:
         return None
 
 
-def note_folder(note_type: str, tolaria_path: Path) -> Path:
+def read_body(path: Path) -> str:
+    """The Markdown body at ``path``, or ``""`` when it is unreadable/malformed.
+
+    A thin projection of :func:`read_post` for the callers that want only the
+    body and treat "cannot read it" as "no body" — the ``--full`` search hit and
+    the ``session-start`` payload both need exactly this, and neither should
+    grow its own reader.
+    """
+    post = read_post(path)
+    return post.content if post is not None else ""
+
+
+def iter_md(root: Path, *, recursive: bool = True) -> Iterator[Path]:
+    """Yield every ``*.md`` under ``root`` — the one vault-walk primitive.
+
+    ``recursive=True`` (``rglob``) covers a whole subtree — ``notes/``, or a
+    corpus root (``notes/``/``tasks/`` for the warm index and the wikilink
+    scanners). ``recursive=False`` (``glob``) covers a single, non-nested
+    folder — a task lifecycle folder (``tasks/open/``, ``tasks/done/``), which
+    must **not** pick up anything filed a level deeper (``tasks/open/sub/…``)
+    or beside it (``tasks/archive/…``); the daemon's warm-index membership
+    predicates (``in_note_scope``/``in_task_scope``) are pinned to exactly this
+    shape, so ``recursive`` is a parameter of the walk, never a discriminator
+    that changes what gets skipped. A missing ``root`` yields nothing rather
+    than raising — every caller already treats "not created yet" as empty.
+    """
+    if not root.is_dir():
+        return
+    yield from (root.rglob("*.md") if recursive else root.glob("*.md"))
+
+
+def note_folder(note_type: str, vault_path: Path) -> Path:
     """Return the vault folder for ``note_type`` (raises ``ValueError`` if unknown)."""
     try:
         parts = _NOTE_SUBDIRS[note_type]
     except KeyError:
         raise ValueError(f"unknown note type: {note_type!r}") from None
-    return tolaria_path.joinpath(*parts)
+    return vault_path.joinpath(*parts)
 
 
-def task_folder(status: str, tolaria_path: Path) -> Path:
+def task_folder(status: str, vault_path: Path) -> Path:
     """Return the vault folder for a task ``status`` (raises ``ValueError`` if unknown).
 
     ``open``/``claimed`` route to ``tasks/open/``; ``done``/``cancelled`` route to
@@ -109,4 +185,4 @@ def task_folder(status: str, tolaria_path: Path) -> Path:
         parts = _TASK_SUBDIRS[status]
     except KeyError:
         raise ValueError(f"unknown task status: {status!r}") from None
-    return tolaria_path.joinpath(*parts)
+    return vault_path.joinpath(*parts)

@@ -55,7 +55,9 @@ def _seed_project_note(vault: Path, *, note_id: str = "n-proj", title: str = "Q3
     folder = note_folder("project", vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{note_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("scope", **meta)), encoding="utf-8")
+    post = frontmatter.Post("scope")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -83,7 +85,9 @@ def _seed_task(
     folder = task_folder(status, vault)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{task_id}.md"
-    path.write_text(frontmatter.dumps(frontmatter.Post("body", **meta)), encoding="utf-8")
+    post = frontmatter.Post("body")
+    post.metadata = meta
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
     return path
 
 
@@ -212,8 +216,27 @@ def test_project_is_a_leaf_lens_not_a_subapp() -> None:
 
 
 def test_task_verb_gains_no_new_command() -> None:
-    """--project rides existing task new/update/list; no new task subcommand."""
+    """--project rides existing task new/update/list; no new task subcommand.
+
+    ``append`` is included because team-awareness/2 legitimately adds it as a
+    sub-command of the existing ``task`` verb (still three top-level verbs); this
+    unit (team-awareness/3) legitimately adds ``release`` the same way — the
+    missing inverse of the already-built ``claim`` primitive, not a fourth verb —
+    so it is included here too. This assertion guards against a *stray* extra
+    subcommand, not against ``task`` ever growing one.
+    """
     import shards.cli.task as task_cli
 
     names = {cmd.name for cmd in task_cli.task_app.registered_commands}
-    assert names == {"new", "update", "claim", "finish", "cancel", "get", "list", "delete"}
+    assert names == {
+        "new",
+        "append",
+        "update",
+        "claim",
+        "release",
+        "finish",
+        "cancel",
+        "get",
+        "list",
+        "delete",
+    }

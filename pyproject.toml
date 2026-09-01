@@ -1,7 +1,7 @@
 [project]
 name = "shards"
 version = "0.1.0"
-description = "A mesh for multi-agent collaboration over one Tolaria Markdown folder — note, task, search."
+description = "A mesh for multi-agent collaboration over one Markdown folder — note, task, search."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -46,7 +46,7 @@ ignore = ["E501"]
 
 [tool.ty.environment]
 python-version = "3.11"
-root = ["src"]
+root = ["src", "."]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -55,3 +55,13 @@ addopts = "-q"
 
 [tool.coverage.run]
 source = ["src/shards"]
+# Branch mode on: a statement-only gate cannot see a deleted guard clause, and a
+# mutation audit found every guard in index/reconcile.py deletable with the suite
+# green. Costs nothing here — branch-inclusive coverage already clears the floor.
+branch = true
+
+[tool.coverage.report]
+# Measured with branch mode on: 97.7% combined (statement-only is 98.2%).
+# Floored ~0.7pt below the observed value — never lower this without a coverage
+# regression backing it, and always ratchet it up as coverage genuinely grows.
+fail_under = 97

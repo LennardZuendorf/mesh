@@ -1,0 +1,64 @@
+# shards config — reference copy.
+#
+# `config.toml` itself is gitignored (it names a real vault path and identity),
+# so this committed example is the shape every key comes in. It documents
+# every field `src/shards/schemas/config.py` defines and loads cleanly as-is
+# (see `tests/cli/test_init.py::test_example_config_loads` — it is asserted
+# against `load_config`, so it cannot silently rot).
+#
+# Fastest way to get a real one: `shards init` (writes `~/.shards/config.toml`,
+# or `$SHARDS_CONFIG_PATH` when set). This file is the reference, not a
+# template to copy by hand — `init` also creates the vault directory and
+# expands `~` for you.
+
+[core]
+# Path to your Markdown vault folder — any directory shards can write
+# `notes/` and `tasks/` into. `~` is expanded at load and the result is
+# canonicalised (made absolute, symlinks followed) so the CLI, the daemon's
+# watcher and the sandbox all speak one path space. The folder need not exist
+# yet — `shards init` creates it. `path` and `tolaria_path` are still accepted
+# as legacy spellings.
+#
+# Shards' own reads and writes stay inside `notes/` and `tasks/` — an
+# Obsidian vault root works as-is, and `.obsidian/`/`.trash/` are never
+# touched. But if `[search].collection` is set below, `shards reindex` hands
+# this whole path to `indexed index create`, which ingests everything under
+# it — including `.obsidian/` and any root `.trash/`. Point this at a
+# dedicated folder (or a subfolder of an Obsidian vault) if you don't want
+# unrelated files indexed.
+vault_path = "~/shards-vault"
+
+# This agent's default identity. Used as the default `owner` on note/task
+# creation and as the implicit claimer for `task claim` / `task release` /
+# `session-start` when no explicit identity is passed. Optional — if unset,
+# `$SHARDS_AGENT` may still supply it at load time (the environment variable
+# always wins over this key when both are present). Commands that need an
+# identity (task_claim, task creation with no --owner) fail with a clear
+# message if neither is set.
+agent = "my-agent"
+
+[search]
+# The `indexed` collection name this vault is registered under. Optional —
+# leave unset to use indexed's own default collection resolution.
+collection = "my-vault"
+
+# Whether `shards search` asks `indexed` for hybrid lexical+vector ranking.
+# When false, or when the `indexed` binary is unavailable, search degrades to
+# a built-in substring scan over frontmatter + body. Default: true.
+hybrid = true
+
+# Minimum score to keep a hit. Deliberately left commented out — and `shards
+# init` omits it too. It applies *only* when set explicitly here (or passed as
+# `search --threshold`); with it unset, the substring fallback keeps its own
+# floor, so tag matches (0.6) and body matches (0.4) still come back. Setting
+# it to the nominal 0.65 makes both tiers unreachable, which is body search
+# switched off. Set it only if you want that cutoff.
+# threshold = 0.65
+
+[tasks]
+# The roster of identities `--owner` (CLI) / `owner` (MCP) is allowed to take
+# on task and note writes — a spelling/value check, not an authorization
+# check (nothing verifies who is actually calling). Leave empty (`[]`) for an
+# open roster where any owner string is accepted; that is also the default
+# when this key is omitted entirely.
+collections = ["my-agent", "another-agent"]
