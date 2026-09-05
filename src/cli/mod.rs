@@ -275,7 +275,7 @@ pub enum NoteSub {
             help = "updated | created | title."
         )]
         sort: String,
-        #[arg(long, default_value_t = 20, value_name = "INT", help = LIMIT_HELP)]
+        #[arg(long, default_value_t = 20, value_name = "INT", allow_negative_numbers = true, help = LIMIT_HELP)]
         limit: i64,
         #[arg(
             long,
@@ -517,7 +517,7 @@ pub enum TaskSub {
             help = "updated | created | title | priority (default: updated, or priority with --available)."
         )]
         sort: Option<String>,
-        #[arg(long, default_value_t = 20, value_name = "INT", help = LIMIT_HELP)]
+        #[arg(long, default_value_t = 20, value_name = "INT", allow_negative_numbers = true, help = LIMIT_HELP)]
         limit: i64,
         #[command(flatten)]
         out: OutFlags,
@@ -743,7 +743,7 @@ pub enum MemorySub {
             help = "updated | created | title | importance."
         )]
         sort: String,
-        #[arg(long, default_value_t = 20, value_name = "INT", help = LIMIT_HELP)]
+        #[arg(long, default_value_t = 20, value_name = "INT", allow_negative_numbers = true, help = LIMIT_HELP)]
         limit: i64,
         #[command(flatten)]
         out: OutFlags,
@@ -770,6 +770,7 @@ pub enum MemorySub {
             long,
             default_value_t = 10,
             value_name = "INT",
+            allow_negative_numbers = true,
             help = "Cap the number of hits."
         )]
         limit: i64,
@@ -974,7 +975,7 @@ pub enum AssetSub {
             help = "updated | created | title | bytes."
         )]
         sort: String,
-        #[arg(long, default_value_t = 20, value_name = "INT", help = LIMIT_HELP)]
+        #[arg(long, default_value_t = 20, value_name = "INT", allow_negative_numbers = true, help = LIMIT_HELP)]
         limit: i64,
         #[command(flatten)]
         out: OutFlags,
@@ -1057,6 +1058,7 @@ pub struct SearchArgs {
         long,
         default_value_t = 10,
         value_name = "INT",
+        allow_negative_numbers = true,
         help = "Cap the number of hits."
     )]
     pub limit: i64,
@@ -1092,6 +1094,7 @@ pub struct RecentActivityArgs {
         long,
         default_value_t = 20,
         value_name = "INT",
+        allow_negative_numbers = true,
         help = "Cap the number of rows."
     )]
     pub limit: i64,
