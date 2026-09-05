@@ -311,16 +311,17 @@ fn config_path_never_requires_a_config_file() {
         "{}",
         stderr_of(&out)
     );
+    let target = fixture.dir.path().join("fresh.toml");
     let out = fixture
         .bare_cmd()
-        .args(["init"])
+        .arg("--config")
+        .arg(&target)
+        .args(["init", "--path"])
+        .arg(fixture.dir.path().join("fresh-vault"))
         .output()
         .expect("run mesh");
-    assert!(
-        !stderr_of(&out).contains("no config found"),
-        "{}",
-        stderr_of(&out)
-    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(target.is_file());
 }
 
 #[test]
