@@ -100,7 +100,7 @@ step "task claim"             0 --owner smoke task claim "$TASK_ID"
 step "task append"            0 task append "$TASK_ID" "progress"
 step "task get"               0 task get "$TASK_ID"
 step "task finish"            0 --owner smoke task finish "$TASK_ID" --outcome "done"
-step "task next"              3 task next
+step "task next"              0 task next
 
 # ---- memories, scratch, assets --------------------------------------------------------------
 MEM_ID="$(capture memory new "Prefers dark mode" --body "observed" --kind fact)"
