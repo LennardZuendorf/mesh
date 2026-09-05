@@ -49,6 +49,8 @@ pub fn resolve_wikilinks(cfg: &Config, body: &str) -> Vec<String> {
     for target in targets {
         let resolved = if is_id_form(&target) {
             target
+        } else if let Some(stem) = blob_stem(&target) {
+            stem
         } else {
             let idx = index.get_or_insert_with(|| title_index(cfg));
             match idx.get(&target) {
@@ -61,6 +63,13 @@ pub fn resolve_wikilinks(cfg: &Config, body: &str) -> Vec<String> {
         }
     }
     related
+}
+
+/// `![[a-XXXX.png]]` embeds name a blob, not an entity: the stem before the first `.` is the
+/// asset id when it is id-form, so an embed links the sidecar without a file lookup.
+fn blob_stem(target: &str) -> Option<String> {
+    let (stem, _ext) = target.split_once('.')?;
+    (stem.starts_with("a-") && is_id_form(stem)).then(|| stem.to_string())
 }
 
 /// Every link target in the vault that resolves to nothing, first-seen order, deduped.
@@ -81,7 +90,11 @@ pub fn find_dangling(cfg: &Config) -> Vec<String> {
             continue;
         }
         for target in link_targets(&doc.body) {
-            if is_id_form(&target) || index.contains_key(&target) || out.contains(&target) {
+            if is_id_form(&target)
+                || blob_stem(&target).is_some()
+                || index.contains_key(&target)
+                || out.contains(&target)
+            {
                 continue;
             }
             out.push(target);

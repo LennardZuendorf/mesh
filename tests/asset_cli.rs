@@ -891,12 +891,19 @@ fn attach_to_a_task_embeds_the_blob_and_links_both_related_lists() {
 }
 
 #[test]
-#[ignore = "memory lane pending"]
+
 fn attach_to_a_memory_embeds_the_blob_and_links_both_related_lists() {
     let f = VaultFixture::new();
     let out = f
         .cmd()
-        .args(["memory", "new", "Prefers aisle seats", "--quiet"])
+        .args([
+            "memory",
+            "new",
+            "Prefers aisle seats",
+            "--body",
+            "aisle",
+            "--quiet",
+        ])
         .output()
         .expect("run");
     let memory = stdout_of(&out).trim().to_string();
