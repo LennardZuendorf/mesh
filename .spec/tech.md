@@ -3,12 +3,18 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-09-01
+  - features/rust-rewrite/tech.md
+updated: 2026-09-05
 ---
 
 # Mesh — Technical Architecture
 
-Daemon-centric, never daemon-dependent. Warm index + watcher in the daemon; writes in `core`/`storage`; ranking in `indexed`. CLI and MCP are thin socket clients with file-op fallback.
+One Rust binary over one Markdown folder. Parse, dispatch into pure domain functions that read
+and write the folder directly, map one error enum onto a fixed exit code, exit. No daemon, no
+database, no async runtime; ranking is delegated to `indexed` when it is configured and present.
+CLI and MCP are two thin renderers over the same domain.
+
+Feature detail for the in-flight rewrite: [features/rust-rewrite/tech.md](features/rust-rewrite/tech.md).
 
 ---
 
@@ -16,148 +22,185 @@ Daemon-centric, never daemon-dependent. Warm index + watcher in the daemon; writ
 
 | Layer | Choice |
 |---|---|
-| Runtime | Python 3.11+, `uv` / `pipx` |
-| CLI | `typer` |
-| Data | Markdown + `python-frontmatter`, `msgspec` |
-| Watcher | `watchdog` |
-| Agents | `FastMCP` |
-| Vault | Any Markdown folder (operator-owned; Obsidian vault works as-is) |
-| Search engine | `indexed` (first-party hybrid; Mesh wraps) |
+| Runtime | Rust 1.94, edition 2021, single binary, no async runtime |
+| CLI | `clap` 4 (derive) + `clap_complete` |
+| Data | Markdown + `yaml-rust2` (read) + a hand-rolled canonical emitter (write); `serde_json` with `preserve_order` |
+| Config | `toml` (read) + `toml_edit` (format-preserving edits) |
+| Time / hashing / syscalls | `chrono`, `sha2`, `rustix` (O_EXCL, flock, fstat, kill, umask) |
+| Walking / watching | `walkdir`, `notify` |
+| Agents | Hand-rolled JSON-RPC 2.0 over stdio (no MCP SDK) |
+| Search engine | `indexed` (first-party hybrid; mesh wraps its CLI) |
+| Dev | `assert_cmd`, `predicates`, `tempfile`, `serial_test` |
 
-**Added deps only:** typer, python-frontmatter, msgspec, watchdog, FastMCP. Mesh code stays small — wrapper, daemon, locks, wikilinks.
+Rejected on purpose: `regex`, `anyhow`, any MCP SDK, `mime_guess`. Mesh code stays small —
+wrapper, locks, walk, wikilinks.
 
-**Vault requirement.** Mesh needs only a directory it can write `notes/`/`tasks/` into — no notes application need be installed, running, or detected; `mesh init` creates the folder when none exists. Obsidian is the maintainer's reference pairing, not a dependency: it is a supported value for `[core].vault_path`, not a requirement any code path checks for.
+**Vault requirement.** Mesh needs only a directory it can write into — no notes application need
+be installed, running, or detected; `mesh init` creates the folder when none exists. Obsidian is
+the maintainer's reference pairing, not a dependency: the notes space can *be* an Obsidian vault,
+and nothing checks for one.
 
 ---
 
 ## Layout
 
 ```
-src/mesh/
-├── cli/       # note, task, search, daemon, status, session (graph/project lenses)
-├── mcp/       # mesh_* tools
-├── daemon/    # socket server, client shim, owns ChangeHooks
-├── core/      # notes, tasks, ids, wikilinks, activity, context, search, lenses
-├── index/     # indexed_client, tagpull, fallback, warm, watcher, reconcile
-├── schemas/   # note, task, config, search (msgspec Structs)
-└── storage/   # atomic files, locks, sandbox
+src/
+├── main.rs, lib.rs, ctx.rs      # parse -> dispatch -> exit code; module surface; invocation context
+├── bin/mesh-mcp.rs              # shim binary for the plugin bundle
+├── error.rs config.rs spaces.rs ids.rs timefmt.rs text.rs render.rs
+├── fm/                          # frontmatter: value, load, canonical emit, doc
+├── storage/                     # atomic write, O_EXCL locks, sandbox, THE walk
+├── model/                       # per-space typed views + field order (note, task, memory, scratch, asset)
+├── domain/                      # verbs + select/tags/owner/wikilinks/deps/activity/context/lenses
+├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
+├── cli/                         # one file per verb family + globals, out, admin, watch
+└── mcp/                         # stdio JSON-RPC server, schemas, 37-tool table, instructions
+tests/                           # one integration file per verb family + compat corpus, race, bundle
 ```
 
 ---
 
 ## Invariants
 
-1. Daemon accelerates; never gates writes. A write lands on disk first and only
-   then best-effort-notifies a running daemon (`vault.touch`) so the writer's own
-   next read sees it; every failure of that notification is swallowed, and with no
-   daemon running it costs an immediately-failing connect. Freshness may degrade,
-   a write never can.
-2. Writes: temp-file + `os.replace`; idempotent where stated. The temp file takes
-   the destination's mode when one exists (else the umask default) — mesh never
-   silently narrows a file another tool owns.
-3. Clean Markdown; unknown frontmatter keys round-trip. Frontmatter is dumped
-   anchor-free (`&id001`/`*id001` are valid YAML but unreadable to restricted
-   parsers), so what mesh writes stays plain for every other tool on the folder.
-4. One folder, one search path; rank in `indexed`.
-5. Agent content is inert data.
-6. Instant CLI: daemon-only deps (`watchdog`) import lazily inside the daemon path, never at CLI import time.
-7. Read-lenses serve from the warm index when the daemon is up; a disk re-parse happens only on the daemon-down fallback.
-8. One vault, one socket. The daemon socket is named from a digest of the resolved
-   `vault_path` and every reply names the vault it served; a mismatch degrades to
-   the file-op fallback. One daemon per *vault*, never one per user.
-9. `vault_path` is canonicalised once, at the config boundary (`expanduser` then
-   `resolve`), so walkers, scope predicates, the sandbox and the watcher all speak
-   one path space. A vault that does not exist yet is legal (created lazily); one
-   that exists and is not a directory is a validation error.
-10. Mesh owns the interface, not the vault — versioning, sync, and backup are the vault owner's job. That is the basis for hard delete (`unlink`, no trash, no promised recovery) and for skipping/round-tripping any file or key mesh did not write, for any tool sharing the folder.
+1. **No daemon.** Every command reads disk directly and behaves identically whether or not any
+   watcher runs. `mesh watch` is an optional foreground accelerator for search freshness and
+   folder reconciliation only.
+2. **Spaces.** The vault is five configurable spaces — notes, tasks, memories, scratch, assets —
+   each a folder relative to the vault root, an absolute folder, the vault root itself, or
+   disabled. The sandbox is the union of the enabled roots; type/status routing is relative to a
+   space root, never the vault root; folders are created lazily on first write. An omitted
+   `[spaces]` table reproduces the pre-rewrite layout exactly.
+3. **Derived state is never stored.** Task readiness is computed at read time from the union of
+   both edge directions. No verb writes another entity's file as part of its own transaction: the
+   unblock cascade is a report, and `blocks` mirrors are single-lock, one at a time, best-effort.
+4. **Canonical frontmatter.** Mesh reads everything the Python era wrote and writes its own
+   canonical form: model-declaration key order, RFC 3339 `T…Z` timestamps for values it sets,
+   unmodified scalars re-emitted from preserved raw text, no anchors, no line folding, one
+   trailing newline. Unknown keys round-trip in place. Compatibility is semantic, not byte-level;
+   machine JSON pins key *order*, not whitespace.
+5. **One walk, one skip set.** Every scan goes through a single walk that skips dot-prefixed path
+   components, nested space roots, files over 4 MiB and non-UTF-8 files, and through a single safe
+   reader that yields nothing rather than failing.
+6. **Writes are atomic and single-entity.** Temp file plus rename, preserving an existing file's
+   mode; every mutation holds that entity's lock and re-resolves its target inside it; lock
+   removal is always a compare-and-swap on `(dev, ino)`, never a blind unlink.
+7. **Identity is validated across every space** at one core write boundary — notes, tasks,
+   memories, assets and the scratch namespace. A spelling check, never authorisation; every
+   identity that becomes part of a path is normalised first.
+8. **No panics on user input.** `unwrap`/`expect`/`panic` are lint-denied in the library; `main`
+   catches anything that escapes and prints one line instead of a trace.
+9. **Agent content is inert data**, never instructions or shell input.
+10. **Mesh owns the interface, not the vault** — versioning, sync and backup are the vault
+    owner's job. That is the basis for hard delete (no trash, no promised recovery) and for
+    skipping and round-tripping any file or key mesh did not write.
 
 ---
 
 ## Performance
 
-**Goal:** instant CLI. **Target:** ~150–180ms cold start (the msgspec path, below) — the honest
-floor, not the aspiration. ~100ms is the "feels instant" UX threshold, not a number literally
-reachable while keeping `typer` + a schema-validator class. **Principle:** heavy work lives in the
-warm daemon; the CLI import path pays only for what it uses (invariant 6). `watchdog` stays
-lazy-imported (daemon-only). Measured non-levers, no action needed: `FastMCP` is already off the
-CLI hot path (separate `mesh-mcp` console script); `python-frontmatter` already uses PyYAML's C
-loader. The dominant cost was `pydantic` v2's one-time schema-compile tax, paid the moment the
-first `BaseModel` subclass is defined — unavoidable via lazy-import alone, since any real command
-needs config. Fixed by swapping `schemas/` to **msgspec** (~90ms saved), gated on a
-round-trip-fidelity spike protecting invariant 3. Keep-and-optimize: the runtime stays Python
-3.11+, the existing daemon + hybrid-search architecture is tuned, not restructured — a Rust
-rewrite was evaluated and **shelved** (see [Risks](#risks)).
+**Goal:** instant CLI. **Target:** cold start under 10 ms for a read command on a warm
+filesystem, asserted by a wall-clock test that also proves the MCP tool table is never
+constructed off the MCP path. Heavy work does not exist: a full-vault scan of thousands of files
+in Rust is milliseconds, which is what let the warm daemon be deleted rather than ported.
 
-**Optimization tactics — measured, decided, shipped:** stop wrapping hot invocations in
-`uv run`; swap `schemas/` pydantic → msgspec (gated on the round-trip-fidelity spike, which
-passed); decompose eager CLI sub-verb imports (hygiene, not perf); CI startup-time regression
-guard. `daemon/client.py` is lazy-imported from `core` — a write pays for the socket client only
-when it actually writes.
+**The Rust rewrite decision was reversed (2026-09).** It was shelved when the trade was a ~2–10 ms
+Rust floor against a ~150–180 ms Python floor for a three-verb CLI a human invoked occasionally.
+What changed is the product shape: a granular multi-space surface (five verb families plus
+lenses, search and MCP) called by agents in hot loops pays that floor on every call, and the
+daemon that used to hide it became the thing most in the way. → [features/rust-rewrite/tech.md](features/rust-rewrite/tech.md)
 
 ---
 
 ## Shared primitives (DRY)
 
-A task is a note with `type: task`, so every cross-cutting mechanic has **one** implementation the two verbs share — never per-verb copies (copies drift; the spec's whole thesis is a small, single-surface core):
+Every space is note-shaped, so each cross-cutting mechanic has **one** implementation the verb
+families share — never per-verb copies:
 
-- **Lock-hold** — the bounded wait-retry over the `O_EXCL` lock lives in `storage/locks.py`; `core/notes.py` and `core/tasks.py` import it.
-- **Safe read** — read-text + `frontmatter.loads` guarding **both** `OSError` and `yaml.YAMLError` (foreign/corrupt files skip silently) is one reader (`storage/files.read_post`); every scanner (`tagpull`, `activity`, `wikilinks`, `scan_recent`) routes through it.
-- **Vault walk** — one iterator over `notes/**` + `tasks/{open,done}/`; all scanners consume it.
-- **CLI output** — one `cli/_output.py` surface (`emit_mutation`, `preview`, `is_json`/`is_quiet`/`is_machine`, delete-guard); `note` and `task` render through it. The interactive-tty check stays a per-module seam so the delete tests can fake it.
-- **Frontmatter is serialized from the schema model** (msgspec `Struct`), never a parallel hand-built dict — the schema is the single on-disk contract.
-- **Terminalize** — `finish`/`cancel` are thin wrappers over one `_terminate_task(*, heading, status, text)`.
-- **Exit codes** are a fixed convention — `2` validation/ambiguous, `3` not-found, `4` claim-conflict — that each CLI handler maps its domain exceptions to at the boundary.
+- **Frontmatter** — one ordered-map loader, one canonical emitter, one document reader/writer.
+- **Safe read** — one reader that yields nothing on an I/O error, malformed YAML or non-UTF-8;
+  every scanner routes through it.
+- **Vault walk** — one iterator with one skip set; all scanners consume it.
+- **Select** — one filter/sort/limit engine generic over a typed view; every list verb and the
+  tag pull use it, so listings cannot drift.
+- **Locks and atomic writes** — one lock module, one atomic-write function.
+- **CLI output** — one output surface (mutation/rows/object emitters, notices, the delete guard,
+  the error envelope); every verb renders through it.
+- **Errors** — one enum whose `code()` is the exit status, mapped once in `main`.
 
 ---
 
 ## Contracts
 
-| Contract | Module | Rule |
-|---|---|---|
-| Schemas | `schemas/note.py`, `task.py` | Task = note + `type: task`. See field tables below. `updated` bumps on writes; watcher reconcile does not. |
-| IDs | `core/ids.py` | `n-`/`t-` + Crockford b32 hash of `created_iso\0title` (4+ chars, extend on collision). Never sequential. |
-| Folders | `storage/files.py` | `type`/`status` drives path; watcher reconciles mismatch. Notes: `note→notes/`, `log/decision/reference→notes/{logs,decisions,references}/`, `project→notes/projects/`. Tasks: `open\|claimed→tasks/open/`, `done\|cancelled→tasks/done/`. |
-| Atomic write | `storage/files.py` | temp + `os.replace`. `finish`/`cancel` order write-then-move so a crash mid-op never strands the file in an unrecoverable state (a terminal status must not sit in `tasks/open/` where the idempotent no-op refuses to move it). |
-| Locks | `storage/locks.py` | `O_EXCL` per entity; stale if PID dead or >300s; `mesh status` reports count. **Both** removals are compare-and-swaps, never blind unlinks: reclaiming a peer's stale lock and releasing your own each hold an open descriptor, take an exclusive `flock`, and unlink only if the file at the path is still that same (device, inode) file. An open descriptor is what makes the inode comparison mean something — an inode cannot be recycled while a descriptor refers to it; a swap that predates the descriptor is caught by the second `_is_stale` re-check instead. Both guards are load-bearing, for different windows. The watcher's reconcile move takes the same per-entity lock, non-blocking. |
-| Sandbox | `storage/sandbox.py` | `realpath` must stay in `vault_path` |
-| Exit codes | `cli/` | 0 ok · 1 error · 2 validation · 3 not found · 4 claimed · 5 blocked (`--strict` only, Phase 3). Codes live on the domain exception classes; the CLI boundary maps them once. |
-| Config | `~/.mesh/config.toml` | `[core]` `vault_path`+agent · `[search]` collection, hybrid, threshold · `[tasks]` collections. `vault_path` is `expanduser()`'d **then** `resolve()`'d at the parse boundary; `path` and `tolaria_path` are permanent input aliases (precedence: `vault_path` > `path` > `tolaria_path`, no warning). A non-directory vault root → exit 2; a not-yet-existing one is created lazily by the first write. `$MESH_AGENT` overrides agent. Missing config → exit 2. Test override: `MESH_CONFIG_PATH`. `[search].threshold` applies **only when explicitly set** — `mesh init` therefore omits the key rather than baking in the default, which would re-disable the body/tag tiers of the substring fallback. |
-| Socket | `daemon/server.py`, `client.py` | NDJSON RPC over a `0600` unix socket at `$XDG_RUNTIME_DIR/mesh-<sha256(vault)[:12]>.sock` (else `~/.mesh/run/`). Named per-vault and every reply carries the served vault, so a daemon on another vault can never answer this one's reads. Reads hold a single monotonic deadline (not a per-`recv` timeout) and a reply ceiling. Startup refuses to unlink a socket a live daemon still answers on. Envelope + method table under [Implemented surfaces](#implemented-surfaces) |
+| Contract | Rule |
+|---|---|
+| Config | `~/.mesh/config.toml`. `[core]` `vault_path` + `agent`; `[spaces]` notes/tasks/memories/scratch/assets (relative path, absolute path, `"."`, or `false`; every key optional); `[search]` collection, hybrid, threshold, engine, spaces; `[tasks]` collections, strict. `vault_path` is expanded then canonicalised at the parse boundary; `path` and `tolaria_path` are permanent input aliases. Unknown tables and keys are ignored. Precedence: `--config` > `$MESH_CONFIG_PATH` > default; `--vault` > `$MESH_VAULT` > file; `$MESH_AGENT` > file. Missing config → exit 2. `[search].threshold` applies **only when explicitly set**. |
+| IDs | `n-` / `t-` / `m-` / `a-` + Crockford base32 over `SHA-256(created_iso \0 title)`, 4+ chars, extended on collision. Asset ids digest the content instead, making the id the content address. Never sequential; existing ids are never recomputed. |
+| Folders | Routing is relative to the **space root**. Notes: `note→<notes>/`, `log/decision/reference/project→<notes>/{logs,decisions,references,projects}/`, recursive. Tasks: `open\|claimed→<tasks>/open/`, `done\|cancelled→<tasks>/done/`, non-recursive. Memories: flat, never moved. Scratch: `<scratch>/<agent>/<name>.md`. Assets: blob plus sidecar sharing one stem. |
+| Atomic write | Temp file plus rename, mode-preserving, `fsync`ed; the destination is untouched on any failure before the rename. |
+| Locks | `O_EXCL` per entity under the space's `.locks/`; stale when the PID is dead or older than 300 s; both reclaim and release are `(dev, ino)` compare-and-swaps under an exclusive `flock`. `mesh status` reports stale locks. |
+| Sandbox | Every resolved path must equal or sit beneath one enabled space root. |
+| Exit codes | 0 ok · 1 io/infrastructure or declined confirmation · 2 validation · 3 not found (incl. corrupt frontmatter on read/amend) · 4 claim conflict or contended lock · 5 blocked. Codes live on the error enum; `main` maps them once. |
+| Error envelope | Under `--json`, one JSON object on stderr: `kind`, `message`, `next_action`, the structured fields, plus `candidates` on not-found and `retry_after_ms` on a lock conflict. MCP renders the identical object. |
 
 ### Note fields
 
-`id`, `type` (note|log|decision|reference|project), `title`, `tags`, `owner`, `created`, `updated`, `related`
+`id`, `type` (note|log|decision|reference|project), `title`, `tags`, `owner`, `created`,
+`updated`, `related` — the shared base block for every space, in declaration order.
 
-### Task adds
+### Per-space additions
 
-`status` (open|claimed|done|cancelled), `priority`, `claimed_by` (`~`), `blocks`, `blocked_by` (inert v1), `project` (`str | None`, optional — id of a `type: project` note; round-tripped like any optional key)
+| Space | Adds |
+|---|---|
+| tasks | `status` (open|claimed|done|cancelled), `priority`, `claimed_by`, `project`, `blocks`, `blocked_by` — readiness derived from both directions |
+| memories | `kind`, `scope`, `importance`, `source`, `expires`, `superseded_by` |
+| scratch | `type`, `name`, `agent`, `tags`, `created`, `updated` — name-addressed, no id |
+| assets | `filename`, `media_type`, `bytes`, `sha256`, `blob` on the sidecar; the blob is written first |
 
-**Appends:** finish → `## Outcome` + ISO; cancel → `## Cancelled` + ISO (optional text).
+**Appends:** finish → `## Outcome` + timestamp; cancel → `## Cancelled` + timestamp.
 
 ---
 
 ## Build order
 
-`notes → tasks → daemon → search → memory` — **all implemented (Phase 1–2).** `tasks-graph` deferred to Phase 3.
-
-Implementation is the source of truth: `src/mesh/` + `tests/` (1455 tests, branch coverage on,
-`ty` clean, `ruff` clean).
+`foundation → note → task+graph → memory → scratch → asset → search → lenses → mcp → admin/watch
+→ verify` — the unit sequence in [features/rust-rewrite/plan.md](features/rust-rewrite/plan.md).
+Phases 1–2 shipped in Python and are being re-delivered by the rewrite; Phase 3 (the dependency
+graph) lands with it.
 
 ---
 
 ## Implemented surfaces
 
-Contracts compounded from the (now-deleted) feature specs. Full detail lives in the code + tests cited.
+Contracts compounded from the (now-deleted) feature specs. Full detail lives in the code plus the
+tests cited; the in-flight rewrite's own contracts are in
+[features/rust-rewrite/tech.md](features/rust-rewrite/tech.md).
 
-- **Wikilinks** — `core/wikilinks.py`. `[[Title]]` → id by title match; `[[n-id]]`/`[[t-id]]` passthrough; `related` deduped; unresolvable → dangling, counted by `mesh status`.
-- **RPC** — `daemon/server.py`, `client.py`. NDJSON, one JSON object per line. Request `{id,method,params}` · ok `{id,ok:true,result}` · err `{ok:false,error:{code,message}}`. Connect-then-fallback: every read has a daemon-down fallback, writes bypass the socket entirely. A `503` (reserved-but-unwired method) makes the client run its file-op fallback; a `404` (unknown) propagates. Every reply also names the vault the daemon serves; a mismatch is treated exactly like a transport failure. Methods: `ping`, the four wired reads (`note.list`, `task.list`, `activity.recent`, `vault.status`, `search.tag_pull`) and `vault.touch` — the one *write-side* method, by which a writer tells the daemon which path it just changed so its own next read is not racing inotify delivery. Point reads, ranking and rebuilds are deliberately absent: none gets faster for crossing a socket.
-- **Search** — `index/indexed_client.py`, `fallback.py`, `tagpull.py`. Result `{id,type,title,score,tags?,owner?,updated?,snippet?,path}`; foreign files surface with `id:null`. Hybrid via `indexed` when daemon-up **and** `[search].hybrid`, else the substring fallback scored title-exact 1.0 · title-substring 0.8 · tag 0.6 · body 0.4, sorted score desc then `updated` desc (recency tiebreak within 0.02). `indexed_client.incremental_update` runs on the watcher hook; `mesh reindex` → `full_rebuild`.
-- **MCP** — `mcp/server.py`, launched via `mesh-mcp` (or `python -m mesh.mcp.server`). Typed `mesh_*` tools mirroring the *safe* verbs plus the read-only lenses (`mesh_graph`, `mesh_project`), each carrying an annotation: read-only / idempotent / write / destructive (`task_cancel`). `task_release` **is** exposed (idempotent, no `force` parameter — force is a human's call). Withheld from agents: both delete verbs, `daemon`, `reindex`, `status`, and `init`, which writes the very config every other command depends on. Every tool parameter carries a non-empty description in the generated JSON Schema, enums render domain literals, and the server sends a config-derived `instructions` block on connect (identity, valid-owner roster, vault path, live recall mode) that degrades to naming `mesh init` rather than failing when no config exists. Domain failures cross the boundary as structured `{kind, message, next_action}` payloads (`claim_conflict`, `lock_conflict`, `not_found`, `config_missing`), never stack traces.
-- **Session lenses** — grouped in `core/lenses.py` (re-exporting `core/activity.py` + `core/context.py`), plus `cli/session.py`, `hooks/session_start.json`. `recent-activity` (warm index, or an equivalent folder scan when down); `build-context` (daemon-free BFS over `related` to `--depth`, cycle/diamond-deduped, seed first); **`graph`** (`mesh graph <id>` / `mesh_graph`, `core/context.py::graph_query`) — the same BFS promoted to a first-class "what's connected to X" query, one traversal rendered as JSON `{seed, nodes, edges}` or a readable tree; **`project`** (`mesh project <id>` / `mesh_project`, `core/lenses.py::project_view`) — a `type: project` note plus every task whose `project` field points at it, daemon-free, `{project, tasks}` JSON or text; `session-start` (merge `recent_activity(7d, mine)` with my open/claimed tasks **and inbound mentions of me**, dedupe by id, tasks first then newest-first; `--team` widens only the activity half, `--owner` sets the identity the payload is built for) wired to a `SessionStart` hook.
-
-- **Team awareness** — `core/context.py::inbound_ids` inverts `related` at read time (`_inbound_index` batches it in one vault pass), surfaced as `graph --direction in|out|both` on both CLI and `mesh_graph`. `task append` adds a comment row without rewriting the body; `task release` returns a claim to `open` and is idempotent (releasing an already-open task is a no-op, releasing someone else's is exit 4 unless `--force`). `task list` carries `--status` (CSV), `--stale` (the inverse of `--since`), `--available`, and `--sort priority`. Stamps name the *acting* agent, not the file's owner. Duplicate titles warn at create (slug-normalized, non-blocking).
-
-- **Wikilink dialect** — `[[Title]]`, `[[Title|alias]]`, `[[Title#Heading]]` and `[[Title^block]]` all resolve to the same target: the alias and anchor are stripped at the lookup boundary, so links a host Markdown app resolves are neither missed in `related` nor miscounted as dangling by `mesh status`.
+- **Wikilinks** — `[[Title]]` → id by title match against the notes index; `[[n-id]]`/`[[t-id]]`/
+  `[[m-id]]`/`[[a-id]]` pass through; alias and anchor forms (`|`, `#`, `^`) strip at the lookup
+  boundary; `related` is deduped; unresolvable links are dangling and counted by `mesh status`.
+- **Search** — hit shape `{id,type,title,score,path}` plus conditional `tags`/`owner`/`updated`/
+  `snippet`/`space`; foreign files surface with `id: null`. Routing: `indexed` when hybrid is on,
+  a collection is configured and the binary is on PATH; otherwise a built-in BM25-lite engine
+  whose four legacy tiers (title-exact 1.0, title-substring 0.8, tag 0.6, body 0.4) remain
+  reachable as floors; `--engine substring` restores the legacy scoring exactly. Ordering is
+  score desc, updated desc, path asc, with the ±0.02 recency-tiebreak band kept only on the
+  `indexed` path.
+- **Tasks** — atomic `O_EXCL` claim; idempotent release/finish/cancel that never rewrite a
+  no-op; `--available` unchanged and dependency-blind; `--ready`/`--blocked` are the
+  dependency-aware filters; a strict claim on a blocked task exits 5; `task next` selects and
+  optionally claims in one invocation, retrying across candidates on a race.
+- **MCP** — stdio JSON-RPC, 37 `mesh_*` tools mirroring the safe verbs plus the read-only
+  lenses, each carrying explicit read-only/idempotent/destructive hints with exactly one
+  destructive tool (`mesh_task_cancel`). Withheld: every removal verb, asset ingest and gc, and
+  all admin. Every parameter carries a description; enums render domain literals; a config-derived
+  instructions block is sent on connect and degrades to naming `mesh init`. Failures cross as
+  the structured error envelope, never a trace.
+- **Session lenses** — `recent-activity`, `build-context`, `graph` (`--direction in|out|both`,
+  inbound index inverted at read time), `project` (a `type: project` note plus every task
+  pointing at it), and `session-start` (tasks → mentions → memories → activity, deduped by id,
+  a `reason` on every entry, `--team` widening only the activity half, `--budget` trimming bodies
+  before entries and recording the drop). All are read-only and accept a space filter.
 
 ---
 
@@ -165,12 +208,10 @@ Contracts compounded from the (now-deleted) feature specs. Full detail lives in 
 
 | Risk | Mitigation |
 |---|---|
-| `indexed` drift | **Resolved.** NDJSON hit contract pinned with a shared msgspec schema (`index/indexed_client.py`); `search --health` reports `indexed`-reachable vs. substring-fallback distinctly → `index/indexed_client.py`, `tests/search/test_health.py` |
-| Windows sockets | Loopback TCP / named pipe |
-| Claim race | `O_EXCL`, works daemon-less |
-| Stale locks | TTL + dead PID |
-| Untrusted content | Sandbox + socket `0600` |
-| Python cold-start floor (~150–180ms after the msgspec swap) | **Resolved — no Rust rewrite.** Evaluated and shelved: the ~2–10ms Rust floor is below human-perceptibility for mesh's usage (agent tool calls + human CLI, not a hot loop). Runtime stays Python 3.11+, optimized. Only future fallback (not scheduled): a thin Rust client over the existing daemon socket, if a hot-loop use ever emerges → `.spec/lessons.md` |
-| Warm index diverging from disk (symlinked vault, duplicate ids, in-place id change, directory move) | **Resolved.** The index is keyed by realpath, `vault_path` is canonicalised at the config boundary, reconcile keeps the caller's path space on a no-move, and directory moves evict/re-index the subtree. Pinned by warm-vs-cold parity tests that mutate the vault *while the daemon is up* — the region the original parity suite never covered → `tests/daemon/test_warm_reads.py` |
-| A malformed file killing the watcher thread | **Resolved.** The watchdog adapter is guarded so no exception reaches the observer thread, and every `reconcile.py` guard is pinned by a test that drops a hostile file and asserts the watcher still indexes → `tests/daemon/test_watcher_resilience.py` |
-| msgspec `Struct`s reject unknown keys by default | **Resolved.** Invariant 3 ("unknown frontmatter keys round-trip") is load-bearing; the round-trip-fidelity spike that gated the swap **passed** (a `_Frontmatter` stash preserves unknown keys byte-for-byte), so the swap shipped and was not reverted → `.spec/lessons.md` |
+| YAML compatibility with Python-era vaults | The read side accepts every form PyYAML wrote (sorted keys, space-separated timestamps, bare dates, naive and offset datetimes, quoted scalars, anchors, unknown keys); a byte-frozen Python-written corpus gates the foundation unit on semantic round-trip before any verb work starts → `tests/compat_corpus.rs` |
+| Lock-semantics parity in a new language | The staleness table, the `PermissionError`-means-alive rule and both compare-and-swaps are ported rule-for-rule and pinned by real multi-process race tests (8-way claim, concurrent appends, stale reclaim, release CAS) → `tests/race.rs` |
+| `indexed` contract drift | One wrapper, byte-identical argv, tolerant NDJSON decode, a 30 s wall clock that degrades instead of failing, and a stub engine fixture that pins argv and every decode-tolerance rule; `search --health` reports the branch actually taken |
+| A hostile or huge file in a vault-root notes space | One walk, one skip set: dot components, nested space roots, files over 4 MiB, non-UTF-8; the safe reader yields nothing rather than failing |
+| Windows | Locks and the watcher are POSIX-shaped; POSIX-first, Windows best-effort |
+| Untrusted content | Multi-root sandbox on every resolved path; agent content is never shell input |
+| Unbounded memory growth | Nothing prunes memories by design; expiry and supersession control visibility, and a retention lens can be added later without taking a deletion policy back |
