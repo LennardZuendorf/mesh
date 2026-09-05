@@ -46,6 +46,9 @@ pub enum MeshError {
     SeedNotFound(String),
     #[error("project not found: {0}")]
     ProjectNotFound(String),
+    /// A free-form "nothing matched" outcome (e.g. `task next` with no ready task). Exit 3.
+    #[error("{0}")]
+    Empty(String),
     #[error("ambiguous slug '{slug}'{}", slug_detail(ids))]
     AmbiguousSlug { slug: String, ids: Vec<String> },
     #[error("task {task_id} already claimed by {existing_owner}")]
@@ -129,7 +132,8 @@ impl MeshError {
             | MeshError::AssetNotFound(_)
             | MeshError::ScratchNotFound(_)
             | MeshError::SeedNotFound(_)
-            | MeshError::ProjectNotFound(_) => 3,
+            | MeshError::ProjectNotFound(_)
+            | MeshError::Empty(_) => 3,
             MeshError::ClaimConflict { .. } | MeshError::Lock(_) => 4,
             MeshError::Blocked { .. } => 5,
             MeshError::WithCandidates { .. } => 1,
@@ -149,7 +153,8 @@ impl MeshError {
             | MeshError::AssetNotFound(_)
             | MeshError::ScratchNotFound(_)
             | MeshError::SeedNotFound(_)
-            | MeshError::ProjectNotFound(_) => "not_found",
+            | MeshError::ProjectNotFound(_)
+            | MeshError::Empty(_) => "not_found",
             MeshError::Validation(_) => "validation",
             MeshError::Blocked { .. } => "blocked",
             MeshError::Io(_) => "io_error",

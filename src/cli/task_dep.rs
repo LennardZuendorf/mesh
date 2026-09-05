@@ -1,7 +1,5 @@
 //! `mesh task block | unblock | next` and the `--ready` / `--blocked` plumbing.
 
-use std::io::Write;
-
 use serde_json::{Map, Value as Json};
 
 use crate::cli::task::{identity, strings};
@@ -155,7 +153,7 @@ fn next(
     let claimer = if claim { Some(identity(ctx)?) } else { None };
     let picked = deps::next(cfg, &filter, claim, strict, claimer.as_deref())?;
     let Some(view) = picked else {
-        no_ready_task(ctx);
+        return Err(MeshError::Empty(NO_READY_TASK.into()));
     };
     if ctx.g.json {
         let payload = entry(
@@ -177,30 +175,6 @@ fn next(
         view.item.id, view.item.status, view.item.title
     ));
     Ok(())
-}
-
-/// Nothing ready is exit **3** with `no ready task`, so an agent can branch on the code.
-///
-/// `MeshError` has no exit-3 variant carrying a free-form message, so this renders the same
-/// envelope `out::render_error` would and exits directly. See the change request in
-/// `SCRATCH/design/change-requests/task.md`.
-fn no_ready_task(ctx: &Ctx) -> ! {
-    if ctx.g.json {
-        let mut payload = Map::new();
-        payload.insert("kind".into(), Json::String("not_found".into()));
-        payload.insert("message".into(), Json::String(NO_READY_TASK.into()));
-        payload.insert(
-            "next_action".into(),
-            Json::String(MeshError::TaskNotFound(String::new()).next_action().into()),
-        );
-        let line = out::json_line(&Json::Object(payload));
-        let _ = std::io::stderr().write_all(line.as_bytes());
-    } else {
-        let _ = std::io::stderr().write_all(format!("{NO_READY_TASK}\n").as_bytes());
-    }
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    std::process::exit(3)
 }
 
 /// The stderr line `task next` prints when the queue is empty.
