@@ -1,11 +1,11 @@
 {
   "name": "mesh",
-  "description": "Coordinate notes and tasks with a fleet of agents over one shared Markdown vault: mesh_* MCP tools plus the mesh vault-coherence skill.",
-  "version": "0.1.0",
+  "description": "Coordinate five spaces over one shared Markdown vault — notes, tasks, memories, scratch and assets: mesh_* MCP tools plus the mesh vault-coherence skill.",
+  "version": "0.2.0",
   "author": {
     "name": "Lennard Zundorf"
   },
   "license": "MIT",
   "repository": "https://github.com/LennardZuendorf/mesh",
-  "keywords": ["mcp", "notes", "tasks", "multi-agent", "markdown", "coordination"]
+  "keywords": ["mcp", "notes", "tasks", "memory", "multi-agent", "markdown", "coordination"]
 }
