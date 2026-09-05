@@ -71,35 +71,15 @@ pub fn serve_stdio() -> std::process::ExitCode {
     std::process::ExitCode::from(u8::try_from(serve_stdio_code()).unwrap_or(1))
 }
 
-/// The same loop, as an `i32` the CLI dispatcher can return.
-///
-/// `mesh mcp` is dispatched without its `Ctx` (`cli/mod.rs` is frozen), so the `--config` /
-/// `--vault` this process was started with are recovered from its own argv — the same values
-/// clap already accepted. `mesh-mcp` passes neither and falls back to `$MESH_CONFIG_PATH`.
+/// The same loop, as an `i32`, for the `mesh-mcp` shim, which takes no flags and resolves
+/// its config through `$MESH_CONFIG_PATH`. `mesh mcp` passes the parsed globals instead.
 pub fn serve_stdio_code() -> i32 {
-    let argv: Vec<String> = std::env::args().collect();
-    let config = flag_value(&argv, "--config").map(PathBuf::from);
-    let vault = flag_value(&argv, "--vault").map(PathBuf::from);
     serve(
         &mut std::io::stdin().lock(),
         &mut std::io::stdout(),
-        config,
-        vault,
+        None,
+        None,
     )
-}
-
-/// `--flag value` or `--flag=value`, whichever form the caller used.
-fn flag_value(argv: &[String], flag: &str) -> Option<String> {
-    let mut it = argv.iter();
-    while let Some(arg) = it.next() {
-        if arg == flag {
-            return it.next().cloned();
-        }
-        if let Some(rest) = arg.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
-            return Some(rest.to_string());
-        }
-    }
-    None
 }
 
 /// The loop itself: one request line in, at most one response line out.

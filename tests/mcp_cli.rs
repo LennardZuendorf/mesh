@@ -1249,15 +1249,28 @@ fn no_next_action_reads_as_an_authorization_decision() {
 // ---------------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "asset/lens lane pending"]
+
 fn asset_get_reads_a_sidecar() {
     let f = VaultFixture::new();
-    let payload = structured(&tool(&f, "mesh_asset_get", json!({"asset_id": "a-XXXX"})));
+    let src = f.dir.path().join("pixel.bin");
+    std::fs::write(&src, b"mcp asset bytes").expect("write fixture");
+    let out = f
+        .cmd()
+        .arg("--quiet")
+        .arg("asset")
+        .arg("add")
+        .arg(&src)
+        .output()
+        .expect("run mesh");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let payload = structured(&tool(&f, "mesh_asset_get", json!({"asset_id": id})));
     assert!(payload["path"].is_string());
+    assert_eq!(payload["id"], json!(id));
 }
 
 #[test]
-#[ignore = "asset/lens lane pending"]
+
 fn asset_list_returns_sidecar_rows() {
     let f = VaultFixture::new();
     let rows = list(&tool(&f, "mesh_asset_list", json!({})));
@@ -1265,7 +1278,7 @@ fn asset_list_returns_sidecar_rows() {
 }
 
 #[test]
-#[ignore = "asset/lens lane pending"]
+
 fn recent_activity_returns_the_seven_key_rows() {
     let f = VaultFixture::new();
     seed_note(&f, "Alpha", "a");
@@ -1287,7 +1300,7 @@ fn recent_activity_returns_the_seven_key_rows() {
 }
 
 #[test]
-#[ignore = "asset/lens lane pending"]
+
 fn graph_returns_seed_nodes_and_edges() {
     let f = VaultFixture::new();
     let id = seed_note(&f, "Alpha", "a");

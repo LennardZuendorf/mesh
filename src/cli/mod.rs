@@ -1415,7 +1415,12 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<i32> {
             Some(sub) => admin::config(ctx, sub).map(|()| 0),
         },
         Command::Completions(args) => admin::completions(ctx, args).map(|()| 0),
-        Command::Mcp(_) => Ok(crate::mcp::serve_stdio_code()),
+        Command::Mcp(_) => Ok(crate::mcp::serve(
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout(),
+            ctx.g.config.clone(),
+            ctx.g.vault.clone(),
+        )),
         Command::Daemon(args) => match args.sub {
             None => Ok(help_to_stdout(&["daemon"])),
             Some(sub) => admin::daemon(ctx, sub).map(|()| 0),
