@@ -130,3 +130,27 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** after any bulk rename where the new token can also occur as an ordinary word, grep for the doubled token ("`<new> <new>`", case-insensitive) across every touched file and hand-fix the hits — don't trust the substitution pass alone to leave prose readable.
 **Tags:** rename, prose, review, tooling
 **Date:** 2026-09-01
+
+### A degrade-to-empty helper turns a validation error into a wrong answer
+**Pattern:** `all_paths`/`task_files` swallowed the disabled-space error with `let Ok(root) = … else { return Vec::new() }` so the cross-space search corpus would keep working. Every verb built on those helpers inherited the degrade: `task list` with `tasks = false` printed nothing and exited 0, and `note get` reported not-found (3) instead of the contract's validation error (2) — while `task get`, which resolves through a different path, exited 2 correctly. The inconsistency was invisible in review because each half read as reasonable on its own.
+**Rule:** a helper may degrade only where degrading is the contract. When a scan helper is shared between "this space's own verb" and "every space's corpus", put the error at the verb, not in the helper — and pin it with a test that walks *every* verb of the disabled space, since a per-verb divergence is exactly what a single spot-check misses.
+**Tags:** error-handling, spaces, exit-codes, testing
+**Date:** 2026-09-07
+
+### A writer and its reader must share one definition of what needs quoting
+**Pattern:** the frontmatter emitter decided a plain scalar was safe by testing `parse::<i64>()`, `parse::<f64>()` and the timestamp parser. The reader also resolved `0x`-prefixed hex to an integer. So `mesh note new 0x1F` wrote `title: 0x1F` plain, exited 0 with an id — and every later read of that file failed schema validation, making the entity permanently unaddressable by the id mesh had just handed out. The same shape hit tags (`"tags":[31]` on the JSON surface) and unknown keys.
+**Rule:** never hand-write the write-side quoting rule next to a hand-written read-side resolver. Define "resolves to a non-string" once, in the reader, and have the emitter call it — then a new literal form can only ever be added in one place. The test that catches this is round-trip (write, read, compare), not an assertion about the bytes.
+**Tags:** yaml, frontmatter, round-trip, dry
+**Date:** 2026-09-07
+
+### Locking before resolving makes the lock path an unguarded sandbox hole
+**Pattern:** every mutating task verb did `hold(&entity_lock(root, id))` *before* `resolve(cfg, id)`, so the sandbox check ran on a path the process had already created. An id of `../../../../elsewhere/victim` made `acquire` `create_dir_all` outside the vault and `reclaim_if_stale` unlink an aged `victim.lock` there — reachable over MCP, where the id is untrusted model output.
+**Rule:** anything that becomes part of a path is untrusted, including the derived path of a lock, a temp file or a marker. Validate at the function that builds the path (return `Result`, don't sanitise silently) rather than trusting the caller to have resolved first — the whole point of taking the lock early is that resolution has *not* happened yet.
+**Tags:** security, sandboxing, locks, path-traversal
+**Date:** 2026-09-07
+
+### A sweeper that snapshots one side of an invariant needs the writer's lock
+**Pattern:** `asset add` wrote blob-then-sidecar under the space create lock; `asset gc --apply` took no lock, snapshotted the sidecars, then listed the blobs. A blob written after the snapshot looked like an orphan and was unlinked while its sidecar was still being written — producing the sidecar-with-no-blob state the spec explicitly forbids. Every `add` still reported success. A 24-writer race test did not reproduce it; 40 writers with sweepers *interleaved* rather than appended did.
+**Rule:** garbage collection is a writer. If a two-write sequence is made safe by a lock, the sweep that judges that sequence complete must take the same lock. And verify a race test by breaking the fix and watching it fail — a green race test proves nothing until you have seen it go red.
+**Tags:** concurrency, locks, gc, testing
+**Date:** 2026-09-07

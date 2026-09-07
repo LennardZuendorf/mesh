@@ -5,8 +5,7 @@ children:
   - tech.md
   - design.md
   - plan.md
-  - features/rust-rewrite/product.md
-updated: 2026-09-05
+updated: 2026-09-07
 ---
 
 # Mesh — Product
@@ -37,7 +36,7 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
 2. **Spaces are configuration, not layout.** Each space is a folder relative to the vault root,
    an absolute folder, the vault root itself, or disabled. The notes space may *be* the vault, so
    an existing Markdown vault is exposed as-is; foreign files stay readable and searchable and
-   are never mutated. → [features/rust-rewrite/product.md](features/rust-rewrite/product.md)
+   are never mutated. → [tech.md](tech.md) § Invariants
 3. **Markdown is truth.** Schema-valid frontmatter, unknown keys round-trip, clean bodies. Mesh
    owns the interface, the operator owns the vault.
 4. **Tasks are handoff with a live graph.** `owner` / `claimed_by` / `claim` / `release` /
@@ -64,8 +63,8 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
 |---|---|---|---|
 | **1 MVP** | note, task, search | Three CLI verbs; task claim/finish/cancel/list; hybrid search + fallback | ✅ delivered |
 | **2 Agent** | MCP + SessionStart | Annotated `mesh_*` tools; `session-start` warm hook | ✅ delivered |
-| **3 Graph** | task dependency graph | `ready`, strict gate, unblock report, `task next` | 🚧 delivered inside `rust-rewrite` |
-| **4 Rust** | Rust binary + spaces | One binary, five spaces, memory/scratch/asset families, daemon removed | 🚧 in flight — [features/rust-rewrite/](features/rust-rewrite/product.md) |
+| **3 Graph** | task dependency graph | `ready`, strict gate, unblock report, `task next` | ✅ delivered |
+| **4 Rust** | Rust binary + spaces | One binary, five spaces, memory/scratch/asset families, daemon removed | ✅ delivered |
 
 ---
 
@@ -77,12 +76,11 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
 | tasks | `task` — atomic claim, lifecycle, live dependency graph |
 | search | `search` — `indexed` wrapper, ranked built-in engine, tag-pull |
 | memory | MCP tools, session lenses, warm start |
-| **rust-rewrite** | The Rust binary, the spaces model, the memory/scratch/asset families, the daemon's removal → [features/rust-rewrite/](features/rust-rewrite/product.md) |
+| rust-rewrite | The Rust binary, the spaces model, the memory/scratch/asset families, the task graph, the daemon's removal |
 
-Everything but `rust-rewrite` is implemented and hardened; each landed arc's cross-cutting
-decisions are compounded into this root layer and its per-feature spec deleted. The source of
-truth for delivered behaviour is the implementation plus [tech.md](tech.md) § Implemented
-surfaces.
+Every arc is implemented and hardened; each landed arc's cross-cutting decisions are compounded
+into this root layer and its per-feature spec deleted. The source of truth for delivered
+behaviour is the implementation plus [tech.md](tech.md) § Implemented surfaces.
 
 ---
 
@@ -107,7 +105,7 @@ job). No daemon. No memory store that is not Markdown, and no automatic deletion
   spaces, a live dependency graph and agent hot loops that call mesh many times per turn, where
   that floor is paid per call and the warm daemon that hid it becomes a liability. The rewrite
   also deletes the daemon outright. **Supersedes** the "Rust rewrite shelved" decision recorded
-  in [plan.md](plan.md) § Resolved. → [features/rust-rewrite/](features/rust-rewrite/product.md)
+  in [plan.md](plan.md) § Resolved. → [tech.md](tech.md) § Performance
 - **MCP annotations:** `read-only` / `idempotent` / `write` / `destructive`, now set explicitly on
   every tool. Cancel and release exposed; every removal verb and all admin withheld.
   → [tech.md](tech.md) § Implemented surfaces

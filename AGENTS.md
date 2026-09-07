@@ -23,9 +23,9 @@ Before you touch anything:
      not installed rather than working around it.
 2. **Read the `.spec/` root layer** (`product.md`, `tech.md`, `design.md`, `plan.md`,
    `lessons.md`) before writing code or docs, then the feature layer for whatever arc is in
-   flight — today that is [`.spec/features/rust-rewrite/`](.spec/features/rust-rewrite/). Landed
-   arcs are compounded into the root layer and deleted, so the root files plus `src/` and
-   `tests/` are the whole truth for everything already shipped.
+   flight. No arc is in flight today: every one has landed, and landed arcs are compounded into
+   the root layer and deleted, so the root files plus `src/` and `tests/` are the whole truth.
+   A new arc creates `.spec/features/<name>/` through the `spec` skill.
 3. **Any change that contradicts or extends the spec updates the spec first** — via the `spec`
    skill, with user confirmation — *then* the implementation follows.
 4. Keep the surface honest: the surface is **granular verbs over five spaces**, and that is the
@@ -160,8 +160,7 @@ mesh/
 ├── config.example.toml  # every config key, documented; loaded by tests/bundle.rs
 ├── scripts/             # smoke.sh (verb smoke test), install.sh (cargo install wrapper)
 ├── .spec/               # THE SPEC — source of truth (managed via the `spec` skill)
-│   ├── product.md  tech.md  design.md  plan.md  lessons.md
-│   └── features/rust-rewrite/{product,tech,plan}.md
+│   └── product.md  tech.md  design.md  plan.md  lessons.md
 ├── plugins/mesh/        # the Claude Code plugin: .mcp.json, hooks, skills/mesh/SKILL.md
 └── src/
     ├── main.rs lib.rs ctx.rs        # parse → dispatch → exit code; module surface; invocation ctx

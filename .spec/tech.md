@@ -3,8 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-  - features/rust-rewrite/tech.md
-updated: 2026-09-05
+updated: 2026-09-07
 ---
 
 # Mesh — Technical Architecture
@@ -14,8 +13,6 @@ and write the folder directly, map one error enum onto a fixed exit code, exit. 
 database, no async runtime; ranking is delegated to `indexed` when it is configured and present.
 CLI and MCP are two thin renderers over the same domain.
 
-Feature detail for the in-flight rewrite: [features/rust-rewrite/tech.md](features/rust-rewrite/tech.md).
-
 ---
 
 ## Stack
@@ -24,15 +21,17 @@ Feature detail for the in-flight rewrite: [features/rust-rewrite/tech.md](featur
 |---|---|
 | Runtime | Rust 1.94, edition 2021, single binary, no async runtime |
 | CLI | `clap` 4 (derive) + `clap_complete` |
-| Data | Markdown + `yaml-rust2` (read) + a hand-rolled canonical emitter (write); `serde_json` with `preserve_order` |
+| Data | Markdown + `yaml-rust2` (read) + a hand-rolled canonical emitter (write); `serde_json` with `preserve_order`; `indexmap` |
 | Config | `toml` (read) + `toml_edit` (format-preserving edits) |
 | Time / hashing / syscalls | `chrono`, `sha2`, `rustix` (O_EXCL, flock, fstat, kill, umask) |
-| Walking / watching | `walkdir`, `notify` |
+| Walking / watching | `walkdir`, `notify` + `notify-debouncer-full` |
 | Agents | Hand-rolled JSON-RPC 2.0 over stdio (no MCP SDK) |
 | Search engine | `indexed` (first-party hybrid; mesh wraps its CLI) |
-| Dev | `assert_cmd`, `predicates`, `tempfile`, `serial_test` |
+| Dev | `assert_cmd`, `predicates`, `tempfile`, `serial_test`; `cargo llvm-cov`, `cargo deny` |
 
-Rejected on purpose: `regex`, `anyhow`, any MCP SDK, `mime_guess`. Mesh code stays small —
+Rejected on purpose: `regex` (five hand-written scanners, one needing a negative lookahead),
+`anyhow` (exit codes are a typed contract), any MCP SDK (it would pull an async runtime and cost
+byte control over the tool schemas), `mime_guess`, `insta`, `proptest`. Mesh code stays small —
 wrapper, locks, walk, wikilinks.
 
 **Vault requirement.** Mesh needs only a directory it can write into — no notes application need
@@ -51,7 +50,7 @@ src/
 ├── error.rs config.rs spaces.rs ids.rs timefmt.rs text.rs render.rs
 ├── fm/                          # frontmatter: value, load, canonical emit, doc
 ├── storage/                     # atomic write, O_EXCL locks, sandbox, THE walk
-├── model/                       # per-space typed views + field order (note, task, memory, scratch, asset)
+├── model/                       # per-space typed views + FieldOrder (note, task, memory, scratch, asset)
 ├── domain/                      # verbs + select/tags/owner/wikilinks/deps/activity/context/lenses
 ├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
 ├── cli/                         # one file per verb family + globals, out, admin, watch
@@ -108,7 +107,7 @@ in Rust is milliseconds, which is what let the warm daemon be deleted rather tha
 Rust floor against a ~150–180 ms Python floor for a three-verb CLI a human invoked occasionally.
 What changed is the product shape: a granular multi-space surface (five verb families plus
 lenses, search and MCP) called by agents in hot loops pays that floor on every call, and the
-daemon that used to hide it became the thing most in the way. → [features/rust-rewrite/tech.md](features/rust-rewrite/tech.md)
+daemon that used to hide it became the thing most in the way. → § Stack, § Invariants
 
 ---
 
@@ -164,17 +163,15 @@ families share — never per-verb copies:
 ## Build order
 
 `foundation → note → task+graph → memory → scratch → asset → search → lenses → mcp → admin/watch
-→ verify` — the unit sequence in [features/rust-rewrite/plan.md](features/rust-rewrite/plan.md).
-Phases 1–2 shipped in Python and are being re-delivered by the rewrite; Phase 3 (the dependency
-graph) lands with it.
+→ verify` — the order the rewrite was built in, and the order to re-derive the tree in if it ever
+has to be rebuilt. Phases 1–3 are all delivered; the live sequence is in [plan.md](plan.md).
 
 ---
 
 ## Implemented surfaces
 
 Contracts compounded from the (now-deleted) feature specs. Full detail lives in the code plus the
-tests cited; the in-flight rewrite's own contracts are in
-[features/rust-rewrite/tech.md](features/rust-rewrite/tech.md).
+tests cited.
 
 - **Wikilinks** — `[[Title]]` → id by title match against the notes index; `[[n-id]]`/`[[t-id]]`/
   `[[m-id]]`/`[[a-id]]` pass through; alias and anchor forms (`|`, `#`, `^`) strip at the lookup
