@@ -155,34 +155,17 @@ fn needs_quotes(text: &str) -> bool {
     resolves_to_non_string(text)
 }
 
+/// Would this plain scalar read back as something other than a string?
+///
+/// Delegates to the reader's own plain-scalar resolution — YAML 1.1 booleans included — so the
+/// quoting rule can never drift from what `load` will do with the bytes. A divergence here is a
+/// write that does not round-trip: `0x1F` written plain came back as the integer 31 and the
+/// entity became unreadable.
 fn resolves_to_non_string(text: &str) -> bool {
     matches!(
         text,
-        "null"
-            | "Null"
-            | "NULL"
-            | "~"
-            | "true"
-            | "True"
-            | "TRUE"
-            | "false"
-            | "False"
-            | "FALSE"
-            | "yes"
-            | "Yes"
-            | "YES"
-            | "no"
-            | "No"
-            | "NO"
-            | "on"
-            | "On"
-            | "ON"
-            | "off"
-            | "Off"
-            | "OFF"
-    ) || text.parse::<i64>().is_ok()
-        || text.parse::<f64>().is_ok()
-        || crate::timefmt::parse_iso_lenient(text).is_some()
+        "yes" | "Yes" | "YES" | "no" | "No" | "NO" | "on" | "On" | "ON" | "off" | "Off" | "OFF"
+    ) || !matches!(crate::fm::load::resolve_plain(text), Value::Str(_))
 }
 
 fn double_quote(text: &str) -> String {

@@ -1262,7 +1262,11 @@ fn asset_get_reads_a_sidecar() {
         .arg(&src)
         .output()
         .expect("run mesh");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let payload = structured(&tool(&f, "mesh_asset_get", json!({"asset_id": id})));
     assert!(payload["path"].is_string());

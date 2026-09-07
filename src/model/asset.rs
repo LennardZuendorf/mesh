@@ -84,10 +84,14 @@ pub fn media_type_for(ext: Option<&str>) -> &'static str {
         .map_or(DEFAULT_MEDIA_TYPE, |(_, media)| *media)
 }
 
-/// The extension a blob keeps: the source's own, lowercased, only when it matches
-/// `[a-z0-9]{1,12}` after lowercasing. Anything else — a dotfile, a hostile name, an
-/// extension carrying punctuation or a very long one — gets no extension at all.
-pub fn blob_extension(filename: &str) -> Option<String> {
+/// The sidecar is always `<id>.md`. A blob that kept `md` would resolve to the very same path,
+/// and the sidecar write would overwrite the ingested bytes.
+const SIDECAR_EXTENSION: &str = "md";
+
+/// The source's own extension, lowercased, only when it matches `[a-z0-9]{1,12}` after
+/// lowercasing. Anything else — a dotfile, a hostile name, an extension carrying punctuation
+/// or a very long one — is no extension at all. This is what the media-type table is keyed on.
+pub fn source_extension(filename: &str) -> Option<String> {
     let (stem, ext) = filename.rsplit_once('.')?;
     if stem.is_empty() || ext.is_empty() || ext.chars().count() > MAX_EXTENSION_CHARS {
         return None;
@@ -96,6 +100,13 @@ pub fn blob_extension(filename: &str) -> Option<String> {
         return None;
     }
     Some(ext.to_ascii_lowercase())
+}
+
+/// The extension a blob keeps: [`source_extension`], minus the one value that would collide
+/// with the sidecar. A Markdown source is stored as the extensionless blob `a-XXXX`, so the
+/// "filename is always `<id>.md`" invariant holds and the bytes survive.
+pub fn blob_extension(filename: &str) -> Option<String> {
+    source_extension(filename).filter(|ext| ext != SIDECAR_EXTENSION)
 }
 
 /// The blob's filename: `<id>` plus the kept extension, relative to the assets root.

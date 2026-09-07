@@ -9,6 +9,7 @@ use crate::fm::{read_body, read_doc, read_meta_only, write_doc, Doc, Meta, Row, 
 use crate::ids::generate_id;
 use crate::model::common::{meta_str, meta_strings, optional_str, ts_value};
 use crate::model::note::{ForeignView, Note, NOTE_ID_PREFIX, NOTE_TYPES};
+use crate::model::{ordered, NOTE_FIELDS};
 use crate::spaces::Space;
 use crate::storage::lock::{create_lock, entity_lock, hold};
 use crate::storage::{iter_md, safe_resolve};
@@ -106,6 +107,9 @@ fn candidates(paths: &[PathBuf], target: &str) -> Vec<String> {
 /// note. Several matches are an ambiguous slug (exit 2, ids sorted); none is not-found
 /// (exit 3) carrying the near-miss candidates.
 pub fn resolve(cfg: &Config, target: &str) -> Result<PathBuf> {
+    // A disabled space is a validation error on every verb, not an empty corpus: `all_paths`
+    // degrades to `[]` so the cross-space scans keep working, so the check belongs here.
+    cfg.root(Space::Notes)?;
     let paths = mesh_paths(cfg);
     if let Some(hit) = paths.iter().find(|p| stem(p) == Some(target)) {
         return safe_resolve(&cfg.spaces, hit);
@@ -224,7 +228,7 @@ pub fn create(cfg: &Config, title: &str, o: NewNote) -> Result<Note> {
 
     let path = safe_resolve(&cfg.spaces, &folder.join(format!("{id}.md")))?;
     let doc = Doc::new(meta, o.body);
-    write_doc(&cfg.spaces, &path, &doc)?;
+    write_doc(&cfg.spaces, &path, &ordered(&NOTE_FIELDS, &doc))?;
     Note::from_meta(&doc.meta).ok_or(MeshError::NoteNotFound(id))
 }
 
@@ -244,7 +248,7 @@ pub fn append(cfg: &Config, target: &str, text: &str, o: AppendOpts) -> Result<N
     let actor = o.actor.clone().or_else(|| cfg.agent().map(str::to_string));
     let block = format_block(text, o.timestamp, actor.as_deref());
 
-    let _guard = hold(&entity_lock(&root, &note_id))?;
+    let _guard = hold(&entity_lock(&root, &note_id)?)?;
     let path = resolve(cfg, &note_id)?;
     let Some(mut doc) = read_doc(&path) else {
         return Err(note_not_found(target));
@@ -255,7 +259,7 @@ pub fn append(cfg: &Config, target: &str, text: &str, o: AppendOpts) -> Result<N
     };
     restamp(cfg, &mut doc);
     let note = Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target))?;
-    write_doc(&cfg.spaces, &path, &doc)?;
+    write_doc(&cfg.spaces, &path, &ordered(&NOTE_FIELDS, &doc))?;
     Ok(note)
 }
 
@@ -267,7 +271,7 @@ pub fn update(cfg: &Config, target: &str, o: UpdateNote) -> Result<Note> {
     let note_id = resolve_id(cfg, target)?;
     let root = cfg.root(Space::Notes)?.to_path_buf();
 
-    let _guard = hold(&entity_lock(&root, &note_id))?;
+    let _guard = hold(&entity_lock(&root, &note_id)?)?;
     let path = resolve(cfg, &note_id)?;
     let Some(mut doc) = read_doc(&path) else {
         return Err(note_not_found(target));
@@ -286,7 +290,7 @@ pub fn update(cfg: &Config, target: &str, o: UpdateNote) -> Result<Note> {
     }
     restamp(cfg, &mut doc);
     let note = Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target))?;
-    write_doc(&cfg.spaces, &path, &doc)?;
+    write_doc(&cfg.spaces, &path, &ordered(&NOTE_FIELDS, &doc))?;
 
     if let Some(new_type) = &o.new_type {
         let Some(name) = path.file_name() else {
@@ -366,6 +370,7 @@ pub fn get_foreign(cfg: &Config, target: &str) -> Result<ForeignView> {
 /// [`foreign_rows`] and concatenates them.
 pub fn list(cfg: &Config, f: &Filter, foreign: bool) -> Result<Vec<View<Note>>> {
     let _ = foreign;
+    cfg.root(Space::Notes)?;
     Ok(select(rows(cfg), f))
 }
 
@@ -386,7 +391,7 @@ pub fn foreign_rows(cfg: &Config, f: &Filter) -> Vec<ForeignView> {
 pub fn delete(cfg: &Config, target: &str) -> Result<String> {
     let note_id = resolve_id(cfg, target)?;
     let root = cfg.root(Space::Notes)?.to_path_buf();
-    let _guard = hold(&entity_lock(&root, &note_id))?;
+    let _guard = hold(&entity_lock(&root, &note_id)?)?;
     let path = resolve(cfg, &note_id)?;
     std::fs::remove_file(&path)?;
     Ok(note_id)

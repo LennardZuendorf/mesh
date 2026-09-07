@@ -18,6 +18,7 @@ use crate::model::asset::{
     blob_extension, blob_name, media_type_for, AssetSidecar, AssetSummary, GcReport, ASSET_TYPE,
 };
 use crate::model::common::{meta_str, meta_strings, optional_str, ts_value};
+use crate::model::{ordered, ASSET_FIELDS};
 use crate::spaces::Space;
 use crate::storage::lock::{create_lock, entity_lock, hold};
 use crate::storage::{iter_md, safe_resolve};
@@ -255,6 +256,9 @@ fn store(
     let id = content_id(bytes, &|candidate| taken.iter().any(|t| t == candidate));
     let ext = blob_extension(filename);
     let blob = blob_name(&id, ext.as_deref());
+    // The media type follows the source's own extension: a `.md` source keeps `text/markdown`
+    // even though its blob drops the extension to stay clear of the sidecar path.
+    let media_ext = crate::model::asset::source_extension(filename);
     let blob_dest = safe_resolve(&cfg.spaces, &root.join(&blob))?;
     let sidecar = safe_resolve(&cfg.spaces, &root.join(format!("{id}.md")))?;
 
@@ -277,7 +281,7 @@ fn store(
     meta.insert("filename".to_string(), Value::str(filename));
     meta.insert(
         "media_type".to_string(),
-        Value::str(media_type_for(ext.as_deref())),
+        Value::str(media_type_for(media_ext.as_deref())),
     );
     meta.insert(
         "bytes".to_string(),
@@ -288,7 +292,7 @@ fn store(
 
     write_blob(&blob_dest, bytes)?;
     let doc = Doc::new(meta, o.caption.clone());
-    if let Err(e) = write_doc(&cfg.spaces, &sidecar, &doc) {
+    if let Err(e) = write_doc(&cfg.spaces, &sidecar, &ordered(&ASSET_FIELDS, &doc)) {
         // A sidecar nobody can read is worse than a blob gc can sweep.
         let _ = std::fs::remove_file(&blob_dest);
         return Err(e);
@@ -379,14 +383,14 @@ fn amend_target_related(
     add: bool,
 ) -> Result<()> {
     let root = cfg.root(space)?.to_path_buf();
-    let _guard = hold(&entity_lock(&root, target))?;
+    let _guard = hold(&entity_lock(&root, target)?)?;
     // Re-resolved inside the lock: a task can move between open/ and done/ underneath us.
     let path = target_path(cfg, space, target)?;
     let Some(mut doc) = read_doc(&path) else {
         return Err(asset_not_found(target));
     };
     if edit_related(&mut doc.meta, value, add) {
-        write_doc(&cfg.spaces, &path, &doc)?;
+        write_doc(&cfg.spaces, &path, &ordered(&ASSET_FIELDS, &doc))?;
     }
     Ok(())
 }
@@ -394,7 +398,7 @@ fn amend_target_related(
 /// Amend the sidecar's `related` under the asset's entity lock. A no-op never rewrites.
 fn amend_sidecar_related(cfg: &Config, id: &str, value: &str, add: bool) -> Result<AssetSidecar> {
     let root = root(cfg)?.to_path_buf();
-    let _guard = hold(&entity_lock(&root, id))?;
+    let _guard = hold(&entity_lock(&root, id)?)?;
     let path = resolve(cfg, id)?;
     let Some(mut doc) = read_doc(&path) else {
         return Err(asset_not_found(id));
@@ -402,7 +406,7 @@ fn amend_sidecar_related(cfg: &Config, id: &str, value: &str, add: bool) -> Resu
     let changed = edit_related(&mut doc.meta, value, add);
     let asset = AssetSidecar::from_meta(&doc.meta).ok_or_else(|| asset_not_found(id))?;
     if changed {
-        write_doc(&cfg.spaces, &path, &doc)?;
+        write_doc(&cfg.spaces, &path, &ordered(&ASSET_FIELDS, &doc))?;
     }
     Ok(asset)
 }
@@ -500,7 +504,7 @@ pub fn remove(cfg: &Config, id: &str, force: bool) -> Result<String> {
         check_removable(cfg, &asset_id)?;
     }
     let root = root(cfg)?.to_path_buf();
-    let _guard = hold(&entity_lock(&root, &asset_id))?;
+    let _guard = hold(&entity_lock(&root, &asset_id)?)?;
     let path = resolve(cfg, &asset_id)?;
     let blobs = blob_names_for(&root, &path, &asset_id);
     // Sidecar first: an unreferenced blob is sweepable, a sidecar pointing at nothing is not.
@@ -559,6 +563,16 @@ fn blob_stem(name: &str) -> &str {
 /// — a sidecar is metadata the operator may still want, and mesh never guesses at that.
 pub fn gc(cfg: &Config, apply: bool) -> Result<GcReport> {
     let root = root(cfg)?.to_path_buf();
+    // `add` writes the blob, then the sidecar, under the space's create lock. A sweep that
+    // snapshots the sidecars, then lists the blobs, would see a blob whose sidecar is still
+    // being written and unlink live bytes, leaving a sidecar with no blob — the one state R12
+    // forbids. Holding the same lock across the whole scan makes the two mutually exclusive.
+    // The report-only path takes no lock: it writes nothing, and a stale row is harmless.
+    let _guard = if apply {
+        Some(hold(&create_lock(&root))?)
+    } else {
+        None
+    };
     let stems: Vec<String> = sidecar_paths(cfg)
         .iter()
         .filter_map(|p| stem(p))

@@ -9,6 +9,7 @@ use crate::fm::{read_doc, read_meta_only, write_doc, Doc, Meta, Row, Value, View
 use crate::ids::generate_id;
 use crate::model::common::{meta_str, meta_strings, optional_str, ts_value};
 use crate::model::task::{is_terminal, Task, TASK_PRIORITIES, TASK_STATUSES};
+use crate::model::{ordered, TASK_FIELDS};
 use crate::spaces::Space;
 use crate::storage::{create_lock, entity_lock, hold, iter_md, safe_resolve};
 use crate::text::{
@@ -125,6 +126,9 @@ pub(crate) fn task_files(cfg: &Config) -> Vec<PathBuf> {
 /// A title slug never resolves a task. A corrupt sibling never blocks a different id, because
 /// a non-matching file is never read.
 pub(crate) fn resolve(cfg: &Config, id: &str) -> Result<PathBuf> {
+    // `task_files` degrades to `[]` when the space is disabled so cross-space scans survive;
+    // a verb addressing the space must still fail validation rather than report not-found.
+    root(cfg)?;
     root(cfg)?;
     for path in task_files(cfg) {
         if path.file_stem().and_then(|s| s.to_str()) == Some(id) {
@@ -204,7 +208,7 @@ pub fn parse_status_csv(value: &str) -> Result<Option<Vec<String>>> {
 
 /// Write a document to `path` under the sandbox.
 pub(crate) fn persist(cfg: &Config, path: &Path, doc: &Doc) -> Result<()> {
-    write_doc(&cfg.spaces, path, doc)
+    write_doc(&cfg.spaces, path, &ordered(&TASK_FIELDS, doc))
 }
 
 /// Move a terminal file into `done/` when it is not already there, creating the folder.
@@ -301,7 +305,7 @@ pub fn update(cfg: &Config, id: &str, o: UpdateTask) -> Result<Task> {
     }
 
     let task = {
-        let _guard = hold(&entity_lock(root(cfg)?, id))?;
+        let _guard = hold(&entity_lock(root(cfg)?, id)?)?;
         // Resolution happens again inside the lock (the TOCTOU rule).
         let path = resolve(cfg, id)?;
         let mut doc = read_doc(&path).ok_or_else(|| MeshError::TaskNotFound(id.to_string()))?;
@@ -362,7 +366,7 @@ pub fn append(cfg: &Config, id: &str, text: &str, o: AppendOpts) -> Result<Task>
         .filter(|s| !s.is_empty());
     let block = format_block(text, o.timestamp, actor.as_deref());
 
-    let _guard = hold(&entity_lock(root(cfg)?, id))?;
+    let _guard = hold(&entity_lock(root(cfg)?, id)?)?;
     let path = resolve(cfg, id)?;
     let mut doc = read_doc(&path).ok_or_else(|| MeshError::TaskNotFound(id.to_string()))?;
     doc.body = match &o.section {
@@ -391,7 +395,7 @@ pub fn claim(cfg: &Config, id: &str, claimer: &str, strict: bool) -> Result<(Tas
         });
     }
 
-    let _guard = hold(&entity_lock(root(cfg)?, id))?;
+    let _guard = hold(&entity_lock(root(cfg)?, id)?)?;
     let path = resolve(cfg, id)?;
     let mut doc = read_doc(&path).ok_or_else(|| MeshError::TaskNotFound(id.to_string()))?;
     let status = meta_str(&doc.meta, "status").unwrap_or("open").to_string();
@@ -423,7 +427,7 @@ pub fn claim(cfg: &Config, id: &str, claimer: &str, strict: bool) -> Result<(Tas
 }
 
 pub fn release(cfg: &Config, id: &str, releaser: &str, force: bool) -> Result<Task> {
-    let _guard = hold(&entity_lock(root(cfg)?, id))?;
+    let _guard = hold(&entity_lock(root(cfg)?, id)?)?;
     let path = resolve(cfg, id)?;
     let mut doc = read_doc(&path).ok_or_else(|| MeshError::TaskNotFound(id.to_string()))?;
     let status = meta_str(&doc.meta, "status").unwrap_or("open").to_string();
@@ -460,7 +464,7 @@ pub fn terminate(
 ) -> Result<(Task, Vec<String>)> {
     let done_path = safe_resolve(&cfg.spaces, &folder(cfg, "done")?.join(format!("{id}.md")))?;
     let task = {
-        let _guard = hold(&entity_lock(root(cfg)?, id))?;
+        let _guard = hold(&entity_lock(root(cfg)?, id)?)?;
         let path = resolve(cfg, id)?;
         let mut doc = read_doc(&path).ok_or_else(|| MeshError::TaskNotFound(id.to_string()))?;
         let status = meta_str(&doc.meta, "status").unwrap_or("open").to_string();
@@ -510,6 +514,7 @@ pub fn get(cfg: &Config, id: &str) -> Result<View<Task>> {
 }
 
 pub fn list(cfg: &Config, f: &Filter, av: Availability) -> Result<Vec<View<Task>>> {
+    root(cfg)?;
     let all = rows(cfg);
     // Availability is applied before `select` so it is not defeated by the limit.
     let admitted: Vec<Row> = match av {
@@ -547,7 +552,7 @@ fn is_available(meta: &Meta) -> bool {
 }
 
 pub fn delete(cfg: &Config, id: &str) -> Result<String> {
-    let _guard = hold(&entity_lock(root(cfg)?, id))?;
+    let _guard = hold(&entity_lock(root(cfg)?, id)?)?;
     // No read: a corrupt task is still deletable — that is the repair path.
     let path = resolve(cfg, id)?;
     std::fs::remove_file(&path)?;

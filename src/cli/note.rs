@@ -79,7 +79,10 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
             foreign,
             out,
         } => {
-            ctx.coalesce(out.json, out.quiet, None);
+            // The filter reads the *coalesced* owner: `mesh --owner bob note list` must behave
+            // exactly like `mesh note list --owner bob`.
+            ctx.coalesce(out.json, out.quiet, owner);
+            let owner = ctx.g.owner.clone();
             list(
                 ctx,
                 tags.as_deref(),

@@ -134,6 +134,7 @@ fn next(
     tags: Option<String>,
 ) -> Result<()> {
     let cfg = ctx.cfg()?;
+    crate::domain::tasks::root(cfg)?;
     let strict = strict || cfg.tasks.strict;
     // Selection is the `--sort priority` composition: rank, then FIFO by created, then path.
     let filter = Filter {

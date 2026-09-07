@@ -22,8 +22,24 @@ pub const LOCK_POLL: Duration = Duration::from_millis(10);
 pub const LOCK_RETRY_AFTER_MS: u64 = 250;
 
 /// `<space-root>/.locks/<id>.lock` — named by id, so it survives a folder move.
-pub fn entity_lock(space_root: &Path, id: &str) -> PathBuf {
-    space_root.join(".locks").join(format!("{id}.lock"))
+///
+/// The id is joined into a path, and every mutating verb locks *before* it resolves its
+/// target, so this is the sandbox boundary for the lock file itself: an id that is not a
+/// single, ordinary path component is rejected here rather than creating — or unlinking —
+/// a `.lock` outside every space root.
+pub fn entity_lock(space_root: &Path, id: &str) -> Result<PathBuf> {
+    let plain = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && !id.starts_with('.')
+        && !id.contains(['/', '\\', '\0']);
+    if !plain {
+        return Err(MeshError::Validation(format!(
+            "path escapes sandbox {}: {id}",
+            space_root.display()
+        )));
+    }
+    Ok(space_root.join(".locks").join(format!("{id}.lock")))
 }
 
 /// `<space-root>/.locks/_create.lock` — the per-space allocator lock.
@@ -130,14 +146,21 @@ pub fn acquire(lock_path: &Path) -> Result<LockGuard> {
             .mode(0o600)
             .open(lock_path)
         {
-            Ok(mut file) => {
-                let pid = std::process::id();
-                file.write_all(format!("{pid}\n").as_bytes())?;
-                file.flush()?;
-                return Ok(LockGuard {
+            Ok(file) => {
+                // The guard exists before the pid is written: an error between the `O_EXCL`
+                // create and a durable body must drop the guard, which unlinks the file under
+                // the inode CAS. Otherwise an empty lock reads as held and blocks the entity
+                // for the full TTL with no owning process.
+                let mut guard = LockGuard {
                     path: lock_path.to_path_buf(),
                     file: Some(file),
-                });
+                };
+                let pid = std::process::id();
+                if let Some(file) = guard.file.as_mut() {
+                    file.write_all(format!("{pid}\n").as_bytes())?;
+                    file.flush()?;
+                }
+                return Ok(guard);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if reclaim_if_stale(lock_path) {
@@ -187,7 +210,7 @@ mod tests {
     fn paths_follow_the_convention() {
         let root = Path::new("/vault/tasks");
         assert_eq!(
-            entity_lock(root, "t-1"),
+            entity_lock(root, "t-1").unwrap(),
             Path::new("/vault/tasks/.locks/t-1.lock")
         );
         assert_eq!(
@@ -267,5 +290,34 @@ mod tests {
         // Shrink the budget by measuring: hold() would block 15 s, so assert on acquire instead.
         let err = acquire(&path).unwrap_err();
         assert_eq!(err.code(), 4);
+    }
+
+    #[test]
+    fn a_traversal_id_is_rejected_before_any_path_is_built() {
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["../escape", "a/b", ".", "..", "", ".hidden", "x\\y"] {
+            let err = entity_lock(dir.path(), id).unwrap_err();
+            assert_eq!(err.code(), 2, "{id}");
+            assert!(err.to_string().starts_with("path escapes sandbox "), "{id}");
+        }
+        assert!(entity_lock(dir.path(), "t-1ABC").is_ok());
+    }
+
+    #[test]
+    fn a_guard_dropped_before_the_pid_write_leaves_no_lock_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = entity_lock(dir.path(), "t-1").unwrap();
+        {
+            let _guard = acquire(&path).unwrap();
+            assert!(path.is_file());
+        }
+        assert!(!path.exists(), "the guard must unlink on drop");
+        // And a fresh acquire is not blocked by a previous failed one.
+        let _guard = acquire(&path).unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .is_ok());
     }
 }

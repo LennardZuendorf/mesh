@@ -64,7 +64,9 @@ pub fn run(ctx: &mut Ctx, sub: AssetSub) -> Result<()> {
             out,
         } => {
             ctx.coalesce_mine(mine);
-            ctx.coalesce(out.json, out.quiet, None);
+            // Local wins, else the global `--owner` — the same rule every other listing uses.
+            ctx.coalesce(out.json, out.quiet, owner);
+            let owner = ctx.g.owner.clone();
             list(
                 ctx,
                 tags.as_deref(),

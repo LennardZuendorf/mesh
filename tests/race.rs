@@ -524,3 +524,38 @@ fn concurrent_next_claim_hands_distinct_tasks_to_distinct_agents() {
     owners.dedup();
     assert_eq!(owners.len(), 3, "{owners:?}");
 }
+
+#[test]
+fn concurrent_gc_never_sweeps_a_blob_whose_sidecar_is_mid_write() {
+    let f = VaultFixture::new();
+    let src_dir = f.dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let mut argvs: Vec<Vec<String>> = Vec::new();
+    for n in 0..40 {
+        let src = src_dir.join(format!("f{n}.bin"));
+        std::fs::write(&src, format!("payload-{n}").repeat(64)).expect("write source");
+        argvs.push(vec![
+            "asset".into(),
+            "add".into(),
+            src.to_string_lossy().into_owned(),
+            "--quiet".into(),
+        ]);
+        // Sweepers are interleaved, not appended, so each one starts while adds are still
+        // in flight — the window where a blob exists and its sidecar does not.
+        if n % 2 == 0 {
+            argvs.push(vec!["asset".into(), "gc".into(), "--apply".into()]);
+        }
+    }
+    for code in race(&f, &argvs) {
+        assert_eq!(code, 0, "every add and sweep must succeed");
+    }
+
+    // R12: at most a blob with no sidecar, never a sidecar with no blob.
+    let report = ok(&f, &["--json", "asset", "gc"]);
+    let payload: serde_json::Value = serde_json::from_str(&report).expect("json");
+    assert_eq!(
+        payload["orphan_sidecars"],
+        serde_json::json!([]),
+        "gc deleted a live blob: {report}"
+    );
+}

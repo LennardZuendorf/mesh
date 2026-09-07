@@ -625,14 +625,14 @@ fn the_corpus_blocked_edge_is_honoured_end_to_end() {
 }
 
 #[test]
-fn blocking_a_corpus_task_keeps_its_python_key_order() {
+fn blocking_a_corpus_task_normalises_key_order_and_keeps_its_values() {
     let f = VaultFixture::from_corpus();
     ok(&f, &["task", "block", "t-LEGP", "--on", "t-TCY1"]);
     let text = f.read("tasks/open/t-LEGP.md");
-    assert!(
-        text.starts_with("---\nblocked_by:\n  - t-TCY1\nblocks: []\n"),
-        "{text}"
-    );
+    // A write restores declaration order (overrides.md O7); both edges keep their values.
+    assert!(text.starts_with("---\nid: t-LEGP\ntype: task\n"), "{text}");
+    assert!(text.contains("blocked_by:\n  - t-TCY1\n"), "{text}");
+    assert!(text.contains("blocks: []\n"), "{text}");
     assert!(text.contains("priority: urgent"));
     assert!(f
         .read("tasks/open/t-TCY1.md")

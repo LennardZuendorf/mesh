@@ -51,7 +51,10 @@ pub fn parse_meta(yaml: &str) -> Option<Meta> {
 }
 
 /// Resolve a plain scalar the way YAML 1.2 does, with a lenient timestamp pass on top.
-fn resolve_plain(text: &str) -> Value {
+///
+/// The emitter's quoting rule reads this too: what resolves to a non-string here must be
+/// written quoted, or the write does not round-trip.
+pub(crate) fn resolve_plain(text: &str) -> Value {
     match text {
         "" | "~" | "null" | "Null" | "NULL" => return Value::Null,
         "true" | "True" | "TRUE" => return Value::Bool(true),

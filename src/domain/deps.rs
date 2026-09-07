@@ -420,23 +420,33 @@ pub(crate) fn apply_mirrors(cfg: &Config, edits: Vec<MirrorEdit>) -> Vec<Warning
 
 fn mirror_one(cfg: &Config, other: &str, edits: &[MirrorEdit]) -> std::result::Result<(), String> {
     let root = tasks::root(cfg).map_err(|e| e.to_string())?;
-    let _guard = hold(&entity_lock(root, other)).map_err(|_| "locked".to_string())?;
+    let lock_path = entity_lock(root, other).map_err(|e| e.to_string())?;
+    let _guard = hold(&lock_path).map_err(|_| "locked".to_string())?;
     let path = tasks::resolve(cfg, other).map_err(|_| "missing".to_string())?;
     let mut doc = read_doc(&path).ok_or_else(|| "unreadable".to_string())?;
+    // Validate as read, before any mutation. `meta_strings` yields `[]` for a value that is not
+    // a string list, so mirroring onto a hand-edited `blocks: t-XXXX` scalar would otherwise
+    // rewrite the key from a lossy read and drop the edge — on a file every read verb already
+    // reports corrupt. Mesh owns the interface, not the data: refuse instead.
+    tasks::validated(&doc.meta, other).map_err(|_| "corrupt".to_string())?;
     let mut changed = false;
     for edit in edits {
         let mut list = meta_strings(&doc.meta, edit.key);
+        let mut edited = false;
         if edit.add {
             if !list.iter().any(|x| x == &edit.value) {
                 list.push(edit.value.clone());
-                changed = true;
+                edited = true;
             }
         } else if list.iter().any(|x| x == &edit.value) {
             list.retain(|x| x != &edit.value);
-            changed = true;
+            edited = true;
         }
-        if changed {
+        // Per-edit, never the running `changed`: a second no-op edit must not re-serialise a
+        // key an earlier edit did not touch.
+        if edited {
             doc.meta.insert(edit.key.to_string(), Value::strings(list));
+            changed = true;
         }
     }
     if !changed {
@@ -538,7 +548,7 @@ pub fn unblock(cfg: &Config, id: &str, on: &[String], all: bool) -> Result<(Task
 
 /// Write the authoritative `blocked_by` list under the task's own lock.
 fn write_blocked_by(cfg: &Config, id: &str, list: &[String]) -> Result<Task> {
-    let _guard = hold(&entity_lock(tasks::root(cfg)?, id))?;
+    let _guard = hold(&entity_lock(tasks::root(cfg)?, id)?)?;
     let path = tasks::resolve(cfg, id)?;
     let mut doc = read_doc(&path).ok_or_else(|| MeshError::TaskNotFound(id.to_string()))?;
     doc.meta

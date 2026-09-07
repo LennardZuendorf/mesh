@@ -411,7 +411,10 @@ pub fn reconcile_path(cfg: &Config, path: &Path) -> PathBuf {
             return own;
         }
     }
-    let Ok(_guard) = crate::storage::acquire(&crate::storage::entity_lock(space_root, &id)) else {
+    let Ok(lock_path) = crate::storage::entity_lock(space_root, &id) else {
+        return own;
+    };
+    let Ok(_guard) = crate::storage::acquire(&lock_path) else {
         // A writer holds this entity — heal it on a later event.
         return own;
     };
@@ -584,8 +587,9 @@ mod tests {
         let cfg = config_for(dir.path());
         let src = write(dir.path(), "tasks/open/t-AAAA.md", TASK_DONE);
         let tasks_root = cfg.root(Space::Tasks).unwrap().to_path_buf();
-        let held = crate::storage::acquire(&crate::storage::entity_lock(&tasks_root, "t-AAAA"))
-            .expect("hold the entity lock");
+        let held =
+            crate::storage::acquire(&crate::storage::entity_lock(&tasks_root, "t-AAAA").unwrap())
+                .expect("hold the entity lock");
         assert_eq!(reconcile_path(&cfg, &src), src);
         assert!(src.exists());
         drop(held);

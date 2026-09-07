@@ -1151,8 +1151,12 @@ fn claiming_and_finishing_a_python_written_task_works() {
     let text = f.read("tasks/done/t-TCY1.md");
     assert!(text.contains("status: done"));
     assert!(text.contains("## Outcome"));
-    // The Python key order and the unknown keys survived the rewrite.
-    assert!(text.starts_with("---\nblocked_by: []\nblocks:"), "{text}");
+    // The rewrite normalises the Python-era alphabetical block to declaration order; the
+    // unknown keys survive, last, in their original order (overrides.md O7).
+    assert!(
+        text.starts_with("---\nid: t-TCY1\ntype: task\ntitle: "),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1214,13 +1218,47 @@ fn a_legacy_free_form_priority_sorts_last_and_is_never_dropped() {
 }
 
 #[test]
-fn a_corpus_update_keeps_the_python_key_order_and_unknown_keys() {
+fn a_corpus_update_normalises_key_order_and_keeps_unknown_keys() {
     let f = VaultFixture::from_corpus();
     ok(&f, &["task", "update", "t-LEGP", "--priority", "low"]);
     let text = f.read("tasks/open/t-LEGP.md");
     assert!(text.contains("priority: low"));
-    // Alphabetical Python order is preserved, key for key.
-    assert!(text.starts_with("---\nblocked_by: []\nblocks: []\nclaimed_by: null\ncreated:"));
+    // A rewrite restores declaration order, so disk order and `--json` order agree.
+    assert!(
+        text.starts_with("---\nid: t-LEGP\ntype: task\ntitle: "),
+        "{text}"
+    );
+    let keys: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .take_while(|l| *l != "---")
+        .filter(|l| !l.starts_with(' ') && !l.starts_with('-'))
+        .filter_map(|l| l.split_once(':').map(|(k, _)| k))
+        .collect();
+    let owned = [
+        "id",
+        "type",
+        "title",
+        "tags",
+        "owner",
+        "created",
+        "updated",
+        "related",
+        "status",
+        "priority",
+        "claimed_by",
+        "project",
+        "blocks",
+        "blocked_by",
+    ];
+    let seen: Vec<&str> = keys.iter().copied().filter(|k| owned.contains(k)).collect();
+    let want: Vec<&str> = owned.iter().copied().filter(|k| keys.contains(k)).collect();
+    assert_eq!(seen, want, "{text}");
+    // Unknown keys land after every owned key, and none were dropped.
+    let first_unknown = keys.iter().position(|k| !owned.contains(k));
+    if let Some(i) = first_unknown {
+        assert!(keys[i..].iter().all(|k| !owned.contains(k)), "{text}");
+    }
     assert!(text.contains("tags:\n  - legacy\n"));
 }
 

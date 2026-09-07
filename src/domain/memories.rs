@@ -23,6 +23,7 @@ use crate::model::memory::{
     Memory, MemorySummary, DEFAULT_IMPORTANCE, DEFAULT_KIND, DEFAULT_SCOPE, MAX_IMPORTANCE,
     MEMORY_FIELDS, MEMORY_ID_PREFIX, MEMORY_KINDS, MEMORY_SCOPES, MEMORY_TYPE, MIN_IMPORTANCE,
 };
+use crate::model::ordered;
 use crate::search::{self, Engine, Hit, SearchFilter};
 use crate::spaces::Space;
 use crate::storage::lock::{create_lock, entity_lock, hold};
@@ -346,7 +347,7 @@ pub fn create_with_warnings(
 
         let path = safe_resolve(&cfg.spaces, &root.join(format!("{id}.md")))?;
         let doc = Doc::new(meta, o.body.clone());
-        write_doc(&cfg.spaces, &path, &doc)?;
+        write_doc(&cfg.spaces, &path, &ordered(&MEMORY_FIELDS, &doc))?;
         Memory::from_meta(&doc.meta).ok_or_else(|| memory_not_found(&id))?
     };
 
@@ -389,7 +390,7 @@ fn amend(
 ) -> Result<Memory> {
     let id = resolve_id(cfg, target)?;
     let root = cfg.root(Space::Memories)?.to_path_buf();
-    let _guard = hold(&entity_lock(&root, &id))?;
+    let _guard = hold(&entity_lock(&root, &id)?)?;
     // Resolve again inside the lock (the TOCTOU rule).
     let path = resolve(cfg, &id)?;
     let Some(mut doc) = read_doc(&path) else {
@@ -407,7 +408,7 @@ fn amend(
     }
     doc.meta.insert("updated".to_string(), ts_value(&now_utc()));
     let memory = Memory::from_meta(&doc.meta).ok_or_else(|| memory_not_found(target))?;
-    write_doc(&cfg.spaces, &path, &doc)?;
+    write_doc(&cfg.spaces, &path, &ordered(&MEMORY_FIELDS, &doc))?;
     Ok(memory)
 }
 
@@ -722,7 +723,7 @@ pub fn recall(cfg: &Config, query: &str, f: &Filter, o: &RecallOpts) -> Result<V
 pub fn forget(cfg: &Config, target: &str) -> Result<String> {
     let id = resolve_id(cfg, target)?;
     let root = cfg.root(Space::Memories)?.to_path_buf();
-    let _guard = hold(&entity_lock(&root, &id))?;
+    let _guard = hold(&entity_lock(&root, &id)?)?;
     let path = resolve(cfg, &id)?;
     std::fs::remove_file(&path)?;
     Ok(id)

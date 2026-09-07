@@ -48,6 +48,19 @@ impl FieldOrder {
     }
 }
 
+/// A copy of `doc` whose frontmatter is in `order`'s declaration order.
+///
+/// Every write goes through this: a file that arrived with some other key order (a Python-era
+/// alphabetical block, a hand edit) is normalised on the next write, so disk order, `--json`
+/// order and the model declaration are the same one order. Unknown keys keep their relative
+/// order and land last.
+pub fn ordered(order: &FieldOrder, doc: &crate::fm::doc::Doc) -> crate::fm::doc::Doc {
+    crate::fm::doc::Doc {
+        meta: order.reorder(&doc.meta),
+        body: doc.body.clone(),
+    }
+}
+
 /// The string value of a frontmatter key, when it is a plain string.
 pub fn meta_str<'a>(meta: &'a Meta, key: &str) -> Option<&'a str> {
     meta.get(key).and_then(Value::as_str)

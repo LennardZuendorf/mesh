@@ -130,7 +130,8 @@ fn dispatch(ctx: &Ctx, sub: TaskSub) -> Result<()> {
         } => get(ctx, &task_id, full, meta_only),
         TaskSub::List {
             status,
-            owner,
+            // Folded into `ctx.g.owner` by the coalesce pass above.
+            owner: _,
             tags,
             any_tag,
             project,
@@ -146,7 +147,6 @@ fn dispatch(ctx: &Ctx, sub: TaskSub) -> Result<()> {
             ctx,
             ListArgs {
                 status,
-                owner,
                 tags,
                 any_tag,
                 project,
@@ -316,7 +316,6 @@ fn get(ctx: &Ctx, id: &str, full: bool, meta_only: bool) -> Result<()> {
 /// One `task list` invocation's flags, straight off the parsed enum.
 struct ListArgs {
     status: Option<String>,
-    owner: Option<String>,
     tags: Option<String>,
     any_tag: bool,
     project: Option<String>,
@@ -354,7 +353,9 @@ fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     let filter = Filter {
         tags: args.tags.as_deref().map(parse_csv),
         any_tag: args.any_tag,
-        owner: args.owner.clone(),
+        // `ctx.coalesce` has already folded the local `--owner` into the global one; reading
+        // the raw arg here would drop `mesh --owner bob task list`.
+        owner: ctx.g.owner.clone(),
         mine: ctx.g.mine,
         me: cfg.agent().map(str::to_string),
         cutoff: args.since.as_deref().map(parse_since).transpose()?,
