@@ -344,7 +344,9 @@ scratch clear  NAME [--force] [--agent ID]
 Scratch is name-addressed, not id-addressed: the file lives at
 `<scratch>/<slugify(agent)>/<slugify(name)>.md` and carries a six-key frontmatter block
 (`type`, `name`, `agent`, `tags`, `created`, `updated`) so one reader, one row parser and one
-filter path serve the whole system. A name that slugifies to empty is exit 2.
+filter path serve the whole system. Both path components are validated the same way: a name —
+or an `--agent` identity — that slugifies to empty is exit 2, never a silent collapse to a
+shared file.
 
 `set` is a whole-body overwrite and is idempotent — an identical body leaves the file's bytes
 untouched. `-` reads the body from stdin (the one place mesh reads stdin outside `mesh mcp`).
@@ -395,15 +397,16 @@ an image tool. `asset remove` on a still-referenced asset is exit 2 unless you p
 ### `mesh search`
 
 ```
-mesh search [QUERY] [--type T] [--tags T]... [--owner O] [--status S] [--kind K]
+mesh search [QUERY] [--type T] [--tags CSV]... [--owner O] [--status CSV] [--kind K]
             [--space CSV] [--engine auto|indexed|builtin|substring] [--limit 10]
             [--threshold F] [--meta-only] [--full] [--health]
 ```
 
-Output is **always** one JSON array line on stdout. `--tags` is repeatable and ANDed; with no
-query it becomes an exact tag pull (`score = 1.0`, metadata only). Hit keys, in order: `id`,
-`type`, `title`, `score`, `path` always; then `tags`, `owner`, `updated`, `snippet` and `space`
-when they apply. There is no `body` key — `--full` overloads `snippet`.
+Output is **always** one JSON array line on stdout. `--tags` is comma-split *and* repeatable and
+every tag is ANDed; `--status` is a CSV union whose unknown value is exit 2, exactly as on
+`task list`. With no query it becomes an exact tag pull (`score = 1.0`, metadata only). Hit keys,
+in order: `id`, `type`, `title`, `score`, `path` always; then `tags`, `owner`, `updated`,
+`snippet` and `space` when they apply. There is no `body` key — `--full` overloads `snippet`.
 
 Engines:
 
@@ -464,7 +467,7 @@ liveness. There is no `mesh doctor`: `status` plus `config show` cover it.
 |---|---|
 | 0 | ok |
 | 1 | io / infrastructure (`io error: {e}`); a declined delete prompt; an internal error |
-| 2 | validation: a bad enum value, sort, tag spec or direction; an ambiguous slug; an unknown owner; a sandbox escape; a disabled space; a missing config; no body on a headless path; the delete guard; a referenced `asset remove`; a self-edge or a cycle; a parse failure; the no-args help case |
+| 2 | validation: a bad enum value, sort, tag spec or direction; an ambiguous slug; an unknown owner; a sandbox escape; a disabled space; a missing config; no body on a headless path; the delete guard; a referenced `asset remove`; a self-edge or a cycle; a non-finite `--threshold`; an unknown or wrong-typed `config set` key; a document over the 4 MiB readable limit; a parse failure; the no-args help case |
 | 3 | not found — including any corrupt-frontmatter entity on a read or amend verb (it stays deletable, which is the repair path), and `task next` with nothing ready |
 | 4 | claim conflict, contended lock, a second `mesh watch` |
 | 5 | blocked: `task claim --strict` / `task next --strict --claim` on a task with an unsatisfied blocker |

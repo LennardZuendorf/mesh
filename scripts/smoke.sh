@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# mesh smoke test — ~35 verbs against a throwaway vault, asserting exit codes only.
+# mesh smoke test — 44 steps across every verb family against a throwaway vault,
+# asserting exit codes only.
 #
 #   ./scripts/smoke.sh                 # uses ./target/release/mesh
 #   MESH_BIN=./target/debug/mesh ./scripts/smoke.sh
 #
 # Every step prints PASS or FAIL with the code it got; the script exits non-zero if any
-# step failed. While a verb is still a stub it reports `not implemented: …` at exit 2, so a
-# run against a partial build is expected to fail — the failures name exactly what is left.
+# step failed.
 
 set -uo pipefail
 

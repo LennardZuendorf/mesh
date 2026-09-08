@@ -113,7 +113,7 @@ cargo clippy --all-targets --locked -- -D warnings   # lint gate
 cargo test                                     # the whole suite
 cargo test --test note_cli                     # one integration file
 cargo llvm-cov --locked --fail-under-lines 80  # coverage gate (ratchets up, never down)
-./scripts/smoke.sh                             # ~40 verbs against a throwaway vault
+./scripts/smoke.sh                             # 44 verb steps against a throwaway vault
 cargo run -q -- --help                         # CLI help
 cargo install --path .                         # install `mesh` and `mesh-mcp`
 ```
@@ -176,7 +176,8 @@ mesh/
     ├── cli/                         # one file per verb family + globals, out, admin, watch
     └── mcp/                         # stdio JSON-RPC server, schemas, the 37-tool table
 tests/                               # one integration file per verb family, plus
-                                     #   compat_corpus, race, bundle, foundation_cli
+                                     #   compat_corpus, race, bundle, foundation_cli,
+                                     #   review_regressions
 ```
 
 **One primitive, one implementation, one owner.** Frontmatter round-trip, atomic write, locks, the
