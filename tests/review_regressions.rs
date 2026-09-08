@@ -301,6 +301,13 @@ fn gc_never_sweeps_a_file_mesh_did_not_write() {
             "a-not-an-id.bin",
             "an operator file that merely starts with a-\n",
         ),
+        // The discriminating cases: these are `a-` plus ASCII alphanumerics, so a `is_id_form`
+        // ownership test accepts them as mesh's own and unlinks them. Only the minted
+        // Crockford alphabet (uppercase, no I/L/O/U, >= 4 chars) rejects them.
+        ("a-photo.jpg", "an operator photo\n"),
+        ("a-cover.png", "an operator cover image\n"),
+        ("a-1.txt", "a short operator file\n"),
+        ("a-team2026.pdf", "an operator report\n"),
     ];
     for (name, body) in operator_files {
         f.write(name, body);
@@ -519,7 +526,11 @@ fn an_identity_that_slugifies_to_empty_is_refused() {
 }
 
 #[test]
-fn distinct_identities_never_share_one_scratch_file() {
+fn identities_with_distinct_normal_forms_get_distinct_scratch_files() {
+    // Narrower than it looks, and deliberately so: two identities that NORMALISE differently
+    // get different files. Identities that share a normal form (`Alice` and `alice`) still
+    // share one file — see the Known gaps entry in .spec/plan.md. The real guard for the bug
+    // this file records is `an_identity_that_slugifies_to_empty_is_refused`.
     let f = VaultFixture::new();
     ok(
         &f,
@@ -1038,22 +1049,25 @@ fn reported_cycles(f: &VaultFixture) -> Json {
 #[test]
 fn breaking_a_reported_cycle_that_leaves_the_loop_intact_still_reports_it() {
     let f = VaultFixture::new();
-    // Two simple cycles through one component: a->b->c->a and a->c->a. A back-edge walk
-    // reported one and hid the other, so an operator who fixed the reported cycle saw the
-    // count stay at 1 with no way to tell the graph had not changed shape.
-    hand_task(&f, "t-a", &["t-b", "t-c"]);
-    hand_task(&f, "t-b", &["t-c"]);
-    hand_task(&f, "t-c", &["t-a"]);
+    // a<->b and b<->c: ONE strongly connected component spanning all three, but two distinct
+    // back-edge loops. This fixture is the one that discriminates — a back-edge walk reports
+    // [[t-a,t-b],[t-b,t-c]], hiding that the three are mutually reachable; Tarjan reports the
+    // single component. A fixture like a->b->c->a plus a->c yields the same answer under both
+    // algorithms and so pins nothing.
+    hand_task(&f, "t-a", &["t-b"]);
+    hand_task(&f, "t-b", &["t-a", "t-c"]);
+    hand_task(&f, "t-c", &["t-b"]);
     assert_eq!(
         reported_cycles(&f),
         serde_json::json!([["t-a", "t-b", "t-c"]])
     );
 
-    // Drop a->b. The loop a->c->a survives, and so must the report.
-    hand_task(&f, "t-a", &["t-c"]);
-    assert_eq!(reported_cycles(&f), serde_json::json!([["t-a", "t-c"]]));
+    // Drop a<->b. The loop b<->c survives, and so must the report.
+    hand_task(&f, "t-a", &[]);
+    hand_task(&f, "t-b", &["t-c"]);
+    assert_eq!(reported_cycles(&f), serde_json::json!([["t-b", "t-c"]]));
 
-    // Drop c->a. Now it is really acyclic.
+    // Drop c->b. Now it is really acyclic.
     hand_task(&f, "t-c", &[]);
     assert_eq!(reported_cycles(&f), serde_json::json!([]));
 }
@@ -1190,3 +1204,83 @@ fn a_half_written_link_names_what_committed_and_the_repair() {
         serde_json::from_str(&ok(&f, &["asset", "get", &asset, "--json"])).expect("json object");
     assert_eq!(sidecar["related"], serde_json::json!([note]));
 }
+
+// ---------------------------------------------------------------------------------------
+// second review round: ownership is the minted name, and a symlink is never mesh's own
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn gc_never_follows_a_symlink_out_of_the_assets_space() {
+    let f = VaultFixture::new();
+    let note = ok(
+        &f,
+        &["--quiet", "note", "new", "Victim", "--body", "precious"],
+    );
+    std::fs::create_dir_all(f.vault.join("assets")).expect("assets dir");
+    let victim = f.vault.join("notes").join(format!("{note}.md"));
+    // The name must be one mesh could actually mint, or the ownership test rejects it before
+    // the symlink logic is ever reached and this test passes for the wrong reason. Crockford
+    // excludes I, L, O and U — `a-EVIL` would never be a candidate.
+    std::os::unix::fs::symlink(&victim, f.vault.join("assets/a-3XKP.png")).expect("symlink");
+
+    ok(&f, &["asset", "gc", "--apply"]);
+    assert!(
+        victim.is_file(),
+        "gc followed the symlink and deleted the note"
+    );
+    ok(&f, &["note", "get", &note]);
+}
+
+#[test]
+fn remove_never_follows_a_symlink_out_of_the_assets_space() {
+    let f = VaultFixture::new();
+    let note = ok(
+        &f,
+        &["--quiet", "note", "new", "Victim", "--body", "precious"],
+    );
+    let src = f.dir.path().join("payload.png");
+    std::fs::write(&src, b"PNGDATA").expect("write source");
+    let asset = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()]);
+
+    // Replace the asset's own blob with a symlink to the note, keeping the sidecar honest.
+    let victim = f.vault.join("notes").join(format!("{note}.md"));
+    let blob = f.vault.join("assets").join(format!("{asset}.png"));
+    std::fs::remove_file(&blob).expect("drop the blob");
+    std::os::unix::fs::symlink(&victim, &blob).expect("symlink");
+
+    ok(&f, &["asset", "remove", &asset, "--force"]);
+    assert!(
+        victim.is_file(),
+        "remove followed the symlink and deleted the note"
+    );
+    ok(&f, &["note", "get", &note]);
+}
+
+#[test]
+fn an_update_leaves_a_note_in_the_folder_the_operator_filed_it_in() {
+    let f = VaultFixture::new();
+    let id = ok(&f, &["--quiet", "note", "new", "Filed", "--body", "b"]);
+    let filed = f.vault.join("notes/archive/2026").join(format!("{id}.md"));
+    std::fs::create_dir_all(filed.parent().expect("parent")).expect("mkdir");
+    std::fs::rename(f.vault.join("notes").join(format!("{id}.md")), &filed).expect("file it");
+
+    ok(&f, &["note", "update", &id, "--title", "Renamed"]);
+    assert!(
+        filed.is_file(),
+        "an update flattened the operator's folder layout"
+    );
+    assert!(
+        !f.vault.join("notes").join(format!("{id}.md")).is_file(),
+        "and left a copy at the space root"
+    );
+    // Still addressable and still updated where it lives.
+    assert!(f
+        .read(&format!("notes/archive/2026/{id}.md"))
+        .contains("Renamed"));
+}
+
+// No test for the `dest.exists()` guard in `notes::update`: mesh mints unique ids, so two
+// notes cannot claim one destination path through any supported sequence, and `resolve`
+// finds a hand-made duplicate before the rename is ever reached. The guard mirrors the one
+// `watch.rs` reconciliation carries and stays as cheap insurance — but a test that has to
+// contrive an unreachable state proves nothing, so there isn't one.

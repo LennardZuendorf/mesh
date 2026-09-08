@@ -3,13 +3,20 @@
 use sha2::{Digest, Sha256};
 
 /// Crockford base-32 without I, L, O and U.
-const CROCKFORD: [char; 32] = [
+pub const CROCKFORD: [char; 32] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J',
     'K', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'X', 'Y', 'Z',
 ];
 
 /// The shortest id body an entity gets.
 pub const MIN_LENGTH: usize = 4;
+
+/// Whether every char of `body` is one this module can mint, and there are at least
+/// [`MIN_LENGTH`] of them. The inverse of the namer, for callers that must decide whether a
+/// name on disk is one mesh itself produced.
+pub fn is_minted_body(body: &str) -> bool {
+    body.chars().count() >= MIN_LENGTH && body.chars().all(|c| CROCKFORD.contains(&c))
+}
 
 /// Render a big-endian byte string as a Crockford base-32 integer, MSB first, unpadded.
 fn crockford(bytes: &[u8]) -> String {

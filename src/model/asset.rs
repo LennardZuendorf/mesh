@@ -118,8 +118,14 @@ pub fn blob_name(id: &str, ext: Option<&str>) -> String {
 }
 
 /// Whether `stem` is an asset id mesh itself would mint: `a-` over a Crockford id body.
+///
+/// Deliberately NOT `text::is_id_form`, which accepts `a-` plus any ASCII alphanumerics and so
+/// admits `a-photo`, `a-cover` and `a-1` — ordinary operator filenames that this predicate
+/// would then license `gc --apply` to unlink. Ownership means "a name the id minter could have
+/// produced", so it is tested against the minter's own alphabet.
 pub fn is_asset_id(stem: &str) -> bool {
-    stem.starts_with(ASSET_ID_PREFIX) && crate::text::is_id_form(stem)
+    stem.strip_prefix(ASSET_ID_PREFIX)
+        .is_some_and(crate::ids::is_minted_body)
 }
 
 /// The asset id a filename in the assets root belongs to — `None` when mesh did not write it.

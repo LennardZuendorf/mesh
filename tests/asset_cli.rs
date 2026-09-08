@@ -576,23 +576,25 @@ fn get_on_a_missing_id_is_exit_three_with_candidates() {
 #[test]
 fn a_corrupt_sidecar_is_exit_three_on_read_and_still_removable() {
     let f = VaultFixture::new();
+    // Four characters, the shortest body `ids` mints: the blob ownership test mirrors the
+    // minter, so a shorter fixture names a blob mesh could never have written.
     f.write(
-        "assets/a-BAD.md",
-        "---\nid: a-BAD\ntitle: [oops\n---\n\nx\n",
+        "assets/a-BAD1.md",
+        "---\nid: a-BAD1\ntitle: [oops\n---\n\nx\n",
     );
-    f.write("assets/a-BAD.png", "blobby");
+    f.write("assets/a-BAD1.png", "blobby");
     for args in [
-        vec!["asset", "get", "a-BAD"],
-        vec!["asset", "path", "a-BAD"],
+        vec!["asset", "get", "a-BAD1"],
+        vec!["asset", "path", "a-BAD1"],
     ] {
         let out = f.cmd().args(&args).output().expect("run");
         assert_eq!(out.status.code(), Some(3), "{args:?}");
     }
     f.cmd()
-        .args(["asset", "remove", "a-BAD", "--force"])
+        .args(["asset", "remove", "a-BAD1", "--force"])
         .assert()
         .success();
-    assert!(f.files().iter().all(|p| !p.starts_with("assets/a-BAD")));
+    assert!(f.files().iter().all(|p| !p.starts_with("assets/a-BAD1")));
 }
 
 // ---------------------------------------------------------------------------------------

@@ -297,8 +297,27 @@ pub fn update(cfg: &Config, target: &str, o: UpdateNote) -> Result<Note> {
     // Moving first means a failed rename changes nothing at all, and a failed write leaves
     // the *old* content — which is what `note get` then truthfully reports. The folder is
     // then the only thing out of step, and the repair below heals it on the next update.
-    let dest = destination(cfg, &path, &doc)?;
+    // Two reasons to relocate, and nothing else: the caller changed `--type`, or the note is
+    // sitting directly in the space root when its type says otherwise — the shape an
+    // interrupted move leaves behind, which the next update heals.
+    //
+    // The operator owns the vault's folder layout. A note they filed under
+    // `notes/archive/2026/` is not misfiled, it is organised, so a `--title` edit must leave
+    // it exactly where it is. Relocating on every update flattened that silently.
+    let stranded_at_root = path.parent() == Some(root.as_path());
+    let dest = if o.new_type.is_some() || stranded_at_root {
+        destination(cfg, &path, &doc)?
+    } else {
+        path.clone()
+    };
     if dest != path {
+        if dest.exists() {
+            return Err(MeshError::Validation(format!(
+                "cannot file {note_id} as {}: {} already exists",
+                meta_str(&doc.meta, "type").unwrap_or("note"),
+                dest.display()
+            )));
+        }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }

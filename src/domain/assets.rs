@@ -548,6 +548,12 @@ pub fn remove(cfg: &Config, id: &str, force: bool) -> Result<String> {
         .map(str::to_string)
         .ok_or_else(|| asset_not_found(id))?;
     let root = root(cfg)?.to_path_buf();
+    // Create lock first, then the entity lock — the same order `add` takes them in, so the
+    // two can never deadlock. `add` writes blob-then-sidecar under the create lock alone; a
+    // remove holding only the entity lock is not excluded from it, so a remove that has
+    // already dropped the sidecar can unlink the blob an add just re-wrote for the very same
+    // content address, leaving a sidecar pointing at nothing.
+    let _create = hold(&create_lock(&root))?;
     let _guard = hold(&entity_lock(&root, &asset_id)?)?;
     // Inside the lock, not before it. `attach` records its half of the link under the
     // *target's* lock and only then takes this one, so a guard that ran before the lock can
@@ -561,11 +567,28 @@ pub fn remove(cfg: &Config, id: &str, force: bool) -> Result<String> {
     // Sidecar first: an unreferenced blob is sweepable, a sidecar pointing at nothing is not.
     std::fs::remove_file(&path)?;
     for name in blobs {
-        if let Ok(blob) = safe_resolve(&cfg.spaces, &root.join(name)) {
-            let _ = std::fs::remove_file(blob);
-        }
+        unlink_blob(cfg, &root, &name);
     }
     Ok(asset_id)
+}
+
+/// Unlink `name` from the assets root, judging the name rather than what it points at.
+///
+/// `safe_resolve` canonicalises, so passing its result to `remove_file` unlinks a symlink's
+/// TARGET. A blob mesh wrote is always a regular file, so a symlink here is by definition not
+/// ours: refuse it, and unlink the literal path once the sandbox check has passed.
+fn unlink_blob(cfg: &Config, root: &Path, name: &str) -> bool {
+    let candidate = root.join(name);
+    if !candidate
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.is_file())
+    {
+        return false;
+    }
+    if safe_resolve(&cfg.spaces, &candidate).is_err() {
+        return false;
+    }
+    std::fs::remove_file(&candidate).is_ok()
 }
 
 /// The name of `id`'s own blob, as the sidecar records it — `None` when the sidecar names
@@ -602,7 +625,13 @@ fn blob_entries(root: &Path) -> Vec<String> {
     };
     let mut out: Vec<String> = Vec::new();
     for entry in entries.flatten() {
-        if !entry.path().is_file() {
+        // `symlink_metadata`, not `is_file`: a symlink in the assets root points somewhere mesh
+        // does not own, and following it would make `gc --apply` unlink the target instead of
+        // the link. A blob mesh wrote is always a regular file.
+        let Ok(meta) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -648,8 +677,8 @@ pub fn gc(cfg: &Config, apply: bool) -> Result<GcReport> {
         // A sidecar pointing at some *other* file is a sidecar with no blob: the same
         // ownership test the sweep deletes by, so the two halves cannot disagree.
         let present = recorded_blob(&path, &id)
-            .and_then(|name| safe_resolve(&cfg.spaces, &root.join(name)).ok())
-            .is_some_and(|p| p.is_file());
+            .map(|name| root.join(name))
+            .is_some_and(|p| p.symlink_metadata().is_ok_and(|meta| meta.is_file()));
         if !present {
             orphan_sidecars.push(id);
         }
@@ -659,10 +688,7 @@ pub fn gc(cfg: &Config, apply: bool) -> Result<GcReport> {
     let mut removed = 0u64;
     if apply {
         for name in &orphan_blobs {
-            let Ok(path) = safe_resolve(&cfg.spaces, &root.join(name)) else {
-                continue;
-            };
-            if std::fs::remove_file(path).is_ok() {
+            if unlink_blob(cfg, &root, name) {
                 removed += 1;
             }
         }
@@ -979,17 +1005,20 @@ mod tests {
         let v = vault();
         let root = assets_root(&v);
         std::fs::create_dir_all(&root).unwrap();
+        // A four-character body, because that is the shortest one `ids` mints and the blob
+        // ownership test mirrors the minter exactly. A three-character fixture would be a
+        // name mesh could never produce, and the sweep would rightly disown its blob.
         std::fs::write(
-            root.join("a-BAD.md"),
-            "---\nid: a-BAD\ntitle: [oops\n---\n\nx\n",
+            root.join("a-BAD1.md"),
+            "---\nid: a-BAD1\ntitle: [oops\n---\n\nx\n",
         )
         .unwrap();
-        std::fs::write(root.join("a-BAD.png"), b"blob").unwrap();
-        assert_eq!(get(&v.cfg, "a-BAD").unwrap_err().code(), 3);
-        assert_eq!(blob_path(&v.cfg, "a-BAD").unwrap_err().code(), 3);
-        assert_eq!(remove(&v.cfg, "a-BAD", false).unwrap(), "a-BAD");
-        assert!(!root.join("a-BAD.md").exists());
-        assert!(!root.join("a-BAD.png").exists(), "the blob goes too");
+        std::fs::write(root.join("a-BAD1.png"), b"blob").unwrap();
+        assert_eq!(get(&v.cfg, "a-BAD1").unwrap_err().code(), 3);
+        assert_eq!(blob_path(&v.cfg, "a-BAD1").unwrap_err().code(), 3);
+        assert_eq!(remove(&v.cfg, "a-BAD1", false).unwrap(), "a-BAD1");
+        assert!(!root.join("a-BAD1.md").exists());
+        assert!(!root.join("a-BAD1.png").exists(), "the blob goes too");
     }
 
     #[test]
