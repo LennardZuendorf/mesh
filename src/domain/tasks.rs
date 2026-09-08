@@ -69,6 +69,15 @@ impl Terminal {
             Terminal::Cancel => "cancelled",
         }
     }
+
+    /// The verb for a status already on disk, so a no-op reports the state it found.
+    pub fn verb_for(status: &str) -> Option<&'static str> {
+        match status {
+            "done" => Some(Terminal::Finish.verb()),
+            "cancelled" => Some(Terminal::Cancel.verb()),
+            _ => None,
+        }
+    }
 }
 
 /// What `task new` was asked to create.

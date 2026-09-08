@@ -231,13 +231,25 @@ pub fn compare(a: &Hit, b: &Hit) -> Ordering {
                 Ordering::Greater
             };
         }
-        return Ordering::Equal;
+        // `tech.md`: ordering is score desc, updated desc, **path asc**. The path arm was
+        // missing, so two hits with the same score and the same `updated` kept whatever
+        // order `indexed` emitted them in. It only refines ties; no other result moves.
+        return a.path.cmp(&b.path);
     }
     if a.score > b.score {
         Ordering::Less
     } else {
         Ordering::Greater
     }
+}
+
+/// Whether any post-fetch filter is active, so the fetch must not be pre-truncated.
+fn filters_any(f: &SearchFilter) -> bool {
+    !f.tags.is_empty()
+        || f.type_filter.is_some()
+        || f.status.is_some()
+        || f.kind.is_some()
+        || f.owner.is_some()
 }
 
 /// Query `indexed`, then sandbox-check, re-read and filter every hit it returned.
@@ -251,7 +263,12 @@ pub fn search(
     f: &SearchFilter,
     threshold: f64,
 ) -> Result<Vec<Hit>, Failure> {
-    let raw = run(&search_argv(query, collection, f.limit))?;
+    // Every hit `indexed` returns is re-read and re-filtered below, so asking it for exactly
+    // `--limit N` under an active filter under-returns: the rows that would have filled the
+    // page were never fetched. An active filter forces an unbounded fetch and the limit is
+    // applied afterwards as a display cap — the same shape `recent_activity_in` uses.
+    let fetch_limit = if filters_any(f) { -1 } else { f.limit };
+    let raw = run(&search_argv(query, collection, fetch_limit))?;
     let filter = base_filter(f);
     let fallback = f.spaces.first().copied().unwrap_or(Space::Notes);
     let mut hits: Vec<Hit> = Vec::new();

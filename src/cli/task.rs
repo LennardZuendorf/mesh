@@ -7,7 +7,7 @@ use crate::ctx::Ctx;
 use crate::domain::tasks::{self, Availability, NewTask, Terminal, UpdateTask};
 use crate::domain::{deps, select::parse_csv, AppendOpts, Filter, SortKey};
 use crate::error::{MeshError, Result};
-use crate::fm::{Meta, View};
+use crate::fm::Meta;
 use crate::model::task::{Task, TASK_FIELDS};
 use crate::render::entry;
 use crate::text::preview;
@@ -261,7 +261,15 @@ fn terminate(ctx: &Ctx, id: &str, kind: Terminal, text: Option<&str>) -> Result<
     } else {
         vec![("unblocked", strings(&unblocked))]
     };
-    report(ctx, &task, kind.verb(), &extra);
+    // Report what the task IS, not what this call asked for. `task finish` on an already
+    // cancelled task is an idempotent no-op that writes nothing, but it printed `finished`
+    // while the JSON on the same run said `"status": "cancelled"`.
+    let verb = if task.status == kind.status() {
+        kind.verb()
+    } else {
+        Terminal::verb_for(&task.status).unwrap_or_else(|| kind.verb())
+    };
+    report(ctx, &task, verb, &extra);
     Ok(())
 }
 
@@ -364,32 +372,15 @@ fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         cutoff: args.since.as_deref().map(parse_since).transpose()?,
         stale_cutoff: args.stale.as_deref().map(parse_since).transpose()?,
         sort,
-        // A `--status` union is a membership set, which `Filter::extra` cannot express, so it
-        // is applied here — which means the limit has to be applied here too, or the union
-        // would slice an already-truncated page. Order stays filter → sort → limit.
-        limit: if statuses.is_some() {
-            None
-        } else {
-            Some(args.limit)
-        },
+        limit: Some(args.limit),
         extra: Vec::new(),
     }
+    // The `--status` union is a membership set, which `Filter::extra` now expresses, so the
+    // one select engine applies filter → sort → limit in that order with no second pass.
+    .with_extra_any("status", statuses.as_deref())
     .with_extra("project", args.project.as_deref());
 
     let views = tasks::list(cfg, &filter, availability)?;
-    let views: Vec<View<Task>> = match &statuses {
-        Some(wanted) => {
-            let mut kept: Vec<View<Task>> = views
-                .into_iter()
-                .filter(|v| wanted.iter().any(|s| s == &v.item.status))
-                .collect();
-            if args.limit >= 0 {
-                kept.truncate(usize::try_from(args.limit).unwrap_or(0));
-            }
-            kept
-        }
-        None => views,
-    };
     let entries: Vec<Json> = views
         .iter()
         .map(|v| entry(&v.item.meta, TASK_FIELDS.fields(), None, None))

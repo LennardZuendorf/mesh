@@ -934,7 +934,10 @@ impl Server {
             type_filter: a.str("type_filter")?,
             tags: a.list_or_empty("tags")?,
             owner: a.str("owner")?,
-            status: a.str("status")?,
+            status: match a.str("status")? {
+                Some(value) => crate::domain::tasks::parse_status_csv(&value)?,
+                None => None,
+            },
             kind: a.str("kind")?,
             limit: a.int_or("limit", 10)?,
             threshold: search::resolve_effective_threshold(a.num("threshold")?, cfg),

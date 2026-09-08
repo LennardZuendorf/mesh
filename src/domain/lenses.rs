@@ -72,6 +72,9 @@ pub fn project_view_in(
         Some(&view.path),
     );
     let mut tasks: Vec<Json> = Vec::new();
+    // A disabled tasks space is already filtered out of `spaces` upstream — a lens narrows
+    // its corpus, it does not fail (README §config). Any *other* listing failure is still an
+    // error: `unwrap_or_default` used to report it as "this project has no tasks".
     if spaces.contains(&Space::Tasks) {
         let filter = Filter {
             limit: None,
@@ -79,8 +82,7 @@ pub fn project_view_in(
             ..Filter::default()
         }
         .with_extra("project", Some(project_id));
-        for task in crate::domain::tasks::list(cfg, &filter, Availability::Any).unwrap_or_default()
-        {
+        for task in crate::domain::tasks::list(cfg, &filter, Availability::Any)? {
             tasks.push(render::entry(
                 &task.item.meta,
                 TASK_FIELDS.fields(),

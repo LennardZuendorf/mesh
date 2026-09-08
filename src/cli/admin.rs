@@ -303,7 +303,10 @@ pub fn reindex(ctx: &mut Ctx, args: ReindexArgs) -> Result<()> {
     if cfg.search.collection.is_none() {
         return Ok(());
     }
-    if crate::search::reindex(cfg, &roots).is_err() {
+    // `search::reindex` is infallible by design, so `.is_err()` was statically false and
+    // this notice never fired: an operator got no signal at all that the rebuild failed.
+    // Read the outcome the rebuild actually produced.
+    if crate::search::reindex_status(cfg, &roots).degraded() {
         out::notice(ctx, REINDEX_NOTICE);
     }
     Ok(())

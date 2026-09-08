@@ -754,6 +754,85 @@ fn the_indexed_search_argv_is_byte_exact() {
 }
 
 #[test]
+fn a_filtered_indexed_query_fetches_unbounded_and_caps_after_filtering() {
+    let f = seeded_with(&hybrid_config());
+    // Two notes and one log, ranked note, log, note. Asking `indexed` for `--limit 2` and
+    // filtering afterwards returned one note where two match: the row that would have filled
+    // the page was never fetched.
+    f.write(
+        "notes/n-CCCN.md",
+        "---\nid: n-CCCN\ntype: note\ntitle: Third\ntags: []\n\
+         updated: 2026-05-01T00:00:00Z\n---\n\nzebra\n",
+    );
+    f.fake_indexed(&ndjson_for(
+        &f,
+        &[
+            ("notes/n-AAAA.md", 0.9, None),
+            ("notes/logs/n-BBBB.md", 0.8, None),
+            ("notes/n-CCCN.md", 0.7, None),
+        ],
+    ));
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "zebra",
+                "--limit",
+                "2",
+                "--type",
+                "note",
+                "--threshold",
+                "0"
+            ]
+        )),
+        ["n-AAAA", "n-CCCN"]
+    );
+    // The fetch itself was unbounded, and the cap was applied after the filter.
+    assert!(
+        f.indexed_argv()
+            .iter()
+            .all(|line| line.ends_with("--limit -1")),
+        "{:?}",
+        f.indexed_argv()
+    );
+    // With no filter, the limit still reaches `indexed` verbatim.
+    let bare = seeded_with(&hybrid_config());
+    bare.fake_indexed(&ndjson_for(&bare, &[("notes/n-AAAA.md", 0.9, None)]));
+    hits(&bare, &["search", "zebra", "--limit", "2"]);
+    assert!(
+        bare.indexed_argv()[0].ends_with("--limit 2"),
+        "{:?}",
+        bare.indexed_argv()
+    );
+}
+
+#[test]
+fn indexed_ties_break_on_path_ascending() {
+    let f = seeded_with(&hybrid_config());
+    // Equal score and equal `updated`: `tech.md` pins score desc, updated desc, **path asc**,
+    // and the comparator had no path arm, so the emission order survived instead.
+    f.write(
+        "notes/n-ZZZZ.md",
+        "---\nid: n-ZZZZ\ntype: note\ntitle: Zed\ntags: []\n\
+         updated: 2026-06-01T00:00:00Z\n---\n\nzebra\n",
+    );
+    f.write(
+        "notes/n-YYYY.md",
+        "---\nid: n-YYYY\ntype: note\ntitle: Why\ntags: []\n\
+         updated: 2026-06-01T00:00:00Z\n---\n\nzebra\n",
+    );
+    f.fake_indexed(&ndjson_for(
+        &f,
+        &[
+            ("notes/n-ZZZZ.md", 0.8, None),
+            ("notes/n-YYYY.md", 0.8, None),
+        ],
+    ));
+    assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-YYYY", "n-ZZZZ"]);
+}
+
+#[test]
 fn indexed_hits_carry_the_external_score_and_snippet() {
     let f = seeded_with(&hybrid_config());
     f.fake_indexed(&ndjson_for(
@@ -786,10 +865,22 @@ fn indexed_hits_are_re_filtered_against_the_conjunctive_filters() {
 }
 
 #[test]
-fn the_indexed_path_defaults_to_the_config_threshold_not_the_engine_floor() {
+fn an_unset_config_threshold_never_filters_the_indexed_path() {
     let f = seeded_with(&hybrid_config());
-    // 0.5 clears the built-in engine's 0.4 floor but not `[search].threshold`'s 0.65, which is
-    // what the `indexed` path defaults to when no threshold was made explicit.
+    // `tech.md`: "[search].threshold applies **only when explicitly set**", and `mesh init`
+    // omits the key for exactly this reason. The indexed branch applied the nominal 0.65
+    // anyway, so every indexed hit in the 0.4-0.65 band was dropped at exit 0 — on the
+    // config mesh itself writes. It now uses the same floor the built-in branch uses.
+    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
+    assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-AAAA"]);
+    // The engine's own floor still applies.
+    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.3, None)]));
+    assert!(hits(&f, &["search", "zebra"]).is_empty());
+}
+
+#[test]
+fn an_explicit_config_threshold_does_filter_the_indexed_path() {
+    let f = seeded_with(&format!("{}threshold = 0.65\n", hybrid_config()));
     f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
     assert!(hits(&f, &["search", "zebra"]).is_empty());
     assert_eq!(

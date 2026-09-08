@@ -98,6 +98,19 @@ impl VaultFixture {
         out
     }
 
+    /// Put an executable script on the fixture's PATH under `name`.
+    pub fn write_bin(&self, name: &str, body: &str) -> &Self {
+        let script = self.bin_dir.join(name);
+        std::fs::write(&script, body).expect("write stub binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub binary");
+        }
+        self
+    }
+
     /// Put a stub `indexed` on PATH that echoes `ndjson` and records its argv.
     pub fn fake_indexed(&self, ndjson: &str) -> &Self {
         let script = self.bin_dir.join("indexed");

@@ -163,7 +163,7 @@ pub fn base_filter(f: &SearchFilter) -> Filter {
     };
     filter
         .with_extra("type", f.type_filter.as_deref())
-        .with_extra("status", f.status.as_deref())
+        .with_extra_any("status", f.status.as_deref())
         .with_extra("kind", f.kind.as_deref())
 }
 
@@ -377,7 +377,7 @@ mod tests {
         let f = SearchFilter {
             tags: vec!["a".into()],
             type_filter: Some("log".into()),
-            status: Some("open".into()),
+            status: Some(vec!["open".into()]),
             kind: Some("fact".into()),
             owner: Some("me".into()),
             limit: 3,

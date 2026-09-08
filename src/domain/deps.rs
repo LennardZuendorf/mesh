@@ -145,9 +145,11 @@ pub fn readiness(rows: &[Row], id: &str) -> Readiness {
         .is_some_and(|n| n.status == "open" && !n.claimed && unsatisfied.is_empty());
     // `ready()` never recurses: only the direct blockers' statuses are inspected, so a task
     // inside a cycle simply has a non-terminal blocker and is never ready.
-    let cycle = cycles_in(&adjacency(&nodes))
-        .into_iter()
-        .find(|c| c.iter().any(|n| n == id));
+    // A node is in a cycle exactly when a blocker path leaves it and comes back. One BFS
+    // answers that; enumerating every cycle in the whole graph, once per node, did not —
+    // `tasks::list` calls this per row, so that was a whole-graph pass per task.
+    let adj = adjacency(&nodes);
+    let cycle = cycle_through(&adj, id);
     Readiness {
         ready,
         unsatisfied,
@@ -177,7 +179,14 @@ pub fn newly_ready(rows: &[Row], finished: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every cycle in the blocker graph, found by an iterative DFS with a colour map.
+/// Every **cyclic component** of the blocker graph: one entry per strongly connected
+/// component with more than one member, members sorted ascending.
+///
+/// Not "every cycle". A DFS back-edge walk reports one cycle per back edge and drops any
+/// closing edge into an already-finished node, so a three-task loop with a chord — two
+/// distinct simple cycles — was reported as one, and breaking the reported cycle left the
+/// count at 1 with a different loop hidden behind it. A component is the honest unit: while
+/// one is reported the graph is still cyclic, and it disappears only when it is really gone.
 ///
 /// Cycles cannot be created through `block` / `new` / `update` (they are checked first), but
 /// they can arrive by hand-editing or a merge, so `mesh status` reports them.
@@ -185,77 +194,94 @@ pub fn cycles(rows: &[Row]) -> Vec<Vec<String>> {
     cycles_in(&adjacency(&index(rows)))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Colour {
-    White,
-    Grey,
-    Black,
+/// The cyclic component `id` sits in, or `None`. One BFS, not a whole-graph enumeration.
+fn cycle_through(adj: &BTreeMap<String, Vec<String>>, id: &str) -> Option<Vec<String>> {
+    let members: Vec<String> = adj
+        .get(id)?
+        .iter()
+        .filter_map(|next| path_between(adj, next, id))
+        .flatten()
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    let mut ordered: Vec<String> = members;
+    ordered.sort();
+    ordered.dedup();
+    Some(ordered)
 }
 
-/// Iterative DFS: no recursion, so a pathological graph cannot blow the stack.
+/// Tarjan's strongly connected components, iterative so a pathological graph cannot blow the
+/// stack. Every SCC with two or more members is a cyclic component.
 fn cycles_in(adj: &BTreeMap<String, Vec<String>>) -> Vec<Vec<String>> {
-    let mut colour: HashMap<&str, Colour> =
-        adj.keys().map(|k| (k.as_str(), Colour::White)).collect();
+    let mut index_of: HashMap<&str, usize> = HashMap::new();
+    let mut low: HashMap<&str, usize> = HashMap::new();
+    let mut on_stack: HashSet<&str> = HashSet::new();
+    let mut component: Vec<&str> = Vec::new();
+    let mut next_index = 0usize;
     let mut found: Vec<Vec<String>> = Vec::new();
-    let mut seen: HashSet<Vec<String>> = HashSet::new();
 
     for start in adj.keys() {
-        if colour.get(start.as_str()) != Some(&Colour::White) {
+        if index_of.contains_key(start.as_str()) {
             continue;
         }
         // (node, index of the next neighbour to visit)
         let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
-        colour.insert(start.as_str(), Colour::Grey);
+        index_of.insert(start.as_str(), next_index);
+        low.insert(start.as_str(), next_index);
+        next_index += 1;
+        component.push(start.as_str());
+        on_stack.insert(start.as_str());
+
         while let Some(&mut (node, ref mut cursor)) = stack.last_mut() {
             let neighbours = adj.get(node).map(Vec::as_slice).unwrap_or_default();
-            match neighbours.get(*cursor) {
-                Some(next) => {
-                    *cursor += 1;
-                    match colour.get(next.as_str()).copied() {
-                        Some(Colour::Grey) => {
-                            // A back edge: the cycle is the grey suffix of the stack.
-                            let at = stack.iter().position(|(n, _)| *n == next.as_str());
-                            if let Some(at) = at {
-                                let path: Vec<String> = stack
-                                    .iter()
-                                    .skip(at)
-                                    .map(|(n, _)| (*n).to_string())
-                                    .collect();
-                                if seen.insert(canonical(&path)) {
-                                    found.push(path);
-                                }
-                            }
-                        }
-                        Some(Colour::White) | None => {
-                            colour.insert(next.as_str(), Colour::Grey);
-                            stack.push((next.as_str(), 0));
-                        }
-                        Some(Colour::Black) => {}
+            if let Some(next) = neighbours.get(*cursor) {
+                *cursor += 1;
+                let next = next.as_str();
+                match index_of.get(next).copied() {
+                    None => {
+                        index_of.insert(next, next_index);
+                        low.insert(next, next_index);
+                        next_index += 1;
+                        component.push(next);
+                        on_stack.insert(next);
+                        stack.push((next, 0));
+                    }
+                    Some(seen) if on_stack.contains(next) => {
+                        let current = low.get(node).copied().unwrap_or(seen);
+                        low.insert(node, current.min(seen));
+                    }
+                    Some(_) => {}
+                }
+                continue;
+            }
+            // `node` is finished: fold its low-link into its parent, then close its component.
+            stack.pop();
+            let node_low = low.get(node).copied().unwrap_or(0);
+            if let Some(&(parent, _)) = stack.last() {
+                let parent_low = low.get(parent).copied().unwrap_or(node_low);
+                low.insert(parent, parent_low.min(node_low));
+            }
+            if index_of.get(node).copied() == Some(node_low) {
+                let mut members: Vec<String> = Vec::new();
+                while let Some(member) = component.pop() {
+                    on_stack.remove(member);
+                    members.push(member.to_string());
+                    if member == node {
+                        break;
                     }
                 }
-                None => {
-                    colour.insert(node, Colour::Black);
-                    stack.pop();
+                // A single-member SCC is never cyclic here: `adjacency` drops a task's edge
+                // to itself, so a self-blocking task is ready and reported as no cycle.
+                if members.len() > 1 {
+                    members.sort();
+                    found.push(members);
                 }
             }
         }
     }
+    found.sort();
     found
-}
-
-/// A rotation-independent key for a cycle, so the same loop is reported once.
-fn canonical(path: &[String]) -> Vec<String> {
-    let Some(at) = path
-        .iter()
-        .enumerate()
-        .min_by(|a, b| a.1.cmp(b.1))
-        .map(|(i, _)| i)
-    else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = path.iter().skip(at).cloned().collect();
-    out.extend(path.iter().take(at).cloned());
-    out
 }
 
 /// Blocker ids referenced by some task's `blocked_by` that resolve to no file.
@@ -410,9 +436,7 @@ pub(crate) fn apply_mirrors(cfg: &Config, edits: Vec<MirrorEdit>) -> Vec<Warning
     let mut warnings: Vec<Warning> = Vec::new();
     for (other, edits) in grouped {
         if let Err(reason) = mirror_one(cfg, &other, &edits) {
-            warnings.push(Warning(format!(
-                "task block: could not mirror onto {other} ({reason})"
-            )));
+            warnings.push(Warning(format!("could not mirror onto {other} ({reason})")));
         }
     }
     warnings
@@ -422,7 +446,14 @@ fn mirror_one(cfg: &Config, other: &str, edits: &[MirrorEdit]) -> std::result::R
     let root = tasks::root(cfg).map_err(|e| e.to_string())?;
     let lock_path = entity_lock(root, other).map_err(|e| e.to_string())?;
     let _guard = hold(&lock_path).map_err(|_| "locked".to_string())?;
-    let path = tasks::resolve(cfg, other).map_err(|_| "missing".to_string())?;
+    let path = match tasks::resolve(cfg, other) {
+        Ok(path) => path,
+        // A retraction onto a file that does not exist has nothing to retract, so there is
+        // nothing to warn about: `task unblock A --on t-NOPE` used to report a mirror failure
+        // for an edge that never existed. A dangling *blocker* is still worth reporting.
+        Err(_) if edits.iter().all(|edit| !edit.add) => return Ok(()),
+        Err(_) => return Err("missing".to_string()),
+    };
     let mut doc = read_doc(&path).ok_or_else(|| "unreadable".to_string())?;
     // Validate as read, before any mutation. `meta_strings` yields `[]` for a value that is not
     // a string list, so mirroring onto a hand-edited `blocks: t-XXXX` scalar would otherwise
@@ -902,10 +933,7 @@ mod tests {
         let (task, warnings) = block(&cfg, &b.id, &["t-GONE".into()]).unwrap();
         assert_eq!(task.blocked_by, ["t-GONE"]);
         assert_eq!(warnings.len(), 1);
-        assert_eq!(
-            warnings[0].0,
-            "task block: could not mirror onto t-GONE (missing)"
-        );
+        assert_eq!(warnings[0].0, "could not mirror onto t-GONE (missing)");
         // A dangling blocker fails open.
         assert!(readiness(&crate::domain::tasks::rows(&cfg), &b.id).ready);
     }

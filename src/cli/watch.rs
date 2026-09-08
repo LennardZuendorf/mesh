@@ -128,7 +128,14 @@ fn handle_path(ctx: &Ctx, cfg: &Config, path: &Path, args: &WatchArgs, indexed: 
         moved
     };
     event(ctx, "change", &[("path", path_json(&landed))]);
-    if indexed && crate::search::index_update(cfg, &landed).is_ok() {
+    // `.is_ok()` on the infallible wrapper made this event unconditional, so the watcher
+    // claimed it had indexed a file it had not. Report only a rebuild that actually ran.
+    if indexed
+        && matches!(
+            crate::search::index_update_status(cfg, &landed),
+            crate::search::IndexOutcome::Ran
+        )
+    {
         event(ctx, "index", &[("path", path_json(&landed))]);
     }
 }
@@ -180,9 +187,15 @@ pub fn run(ctx: &mut Ctx, args: WatchArgs) -> Result<()> {
         } else {
             sweep(ctx, &cfg, &roots)
         };
-        // The sweep always attempts the rebuild; `search::reindex` is the one that knows
-        // whether a collection is configured and whether the binary answered.
-        let rebuilt = !args.no_index && crate::search::reindex(&cfg, &roots).is_ok();
+        // `search::reindex` is infallible, so `.is_ok()` made this field a constant
+        // `!--no-index` — it reported `"indexed": true` on the same run whose stderr said
+        // the binary was unavailable. `reindex_status` is the one that knows whether a
+        // collection is configured and whether the binary answered.
+        let rebuilt = !args.no_index
+            && matches!(
+                crate::search::reindex_status(&cfg, &roots),
+                crate::search::IndexOutcome::Ran
+            );
         event(
             ctx,
             "sweep",
@@ -201,8 +214,14 @@ pub fn run(ctx: &mut Ctx, args: WatchArgs) -> Result<()> {
     outcome
 }
 
-/// The blocking debounce loop. `stop` ends it deterministically; a plain SIGINT also works,
-/// because nothing in the loop owns state that needs unwinding.
+/// The blocking debounce loop. `stop` ends it deterministically.
+///
+/// **A SIGINT does not shut this down cleanly.** `run` holds the singleton `LockGuard`, and a
+/// signal skips `Drop`, so the watch lock is left behind and the closing `stop` event is never
+/// emitted — a `start` line with no matching `stop`. The lock self-heals on `LOCK_TTL`, so
+/// this is a protocol and hygiene gap, not a wedge. Closing it needs a signal handler setting
+/// `stop`, which needs a crate (`#![forbid(unsafe_code)]` rules out a hand-written one) — a
+/// dependency change, so it is not made here.
 #[allow(clippy::too_many_arguments)]
 fn watch_loop(
     ctx: &Ctx,

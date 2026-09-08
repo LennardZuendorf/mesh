@@ -80,15 +80,16 @@ impl Value {
         }
     }
 
-    /// The list of strings when this is a list; non-string members are dropped.
+    /// The list of scalars as strings, coerced exactly as [`Value::as_scalar_text`] does.
+    ///
+    /// Dropping a non-string member instead made the readers disagree — `note get --json`
+    /// reported `tags: [1, true, "alpha"]` while `search` reported `["alpha"]`, `--tags 1`
+    /// could never match a tag `note get` says is there, and the additive `--tags` merge
+    /// silently deleted both members it could not read. Coercing is what every other scalar
+    /// filter in the tree already does.
     pub fn as_str_list(&self) -> Option<Vec<String>> {
         match self {
-            Value::List(items) => Some(
-                items
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect(),
-            ),
+            Value::List(items) => Some(items.iter().filter_map(Value::as_scalar_text).collect()),
             _ => None,
         }
     }

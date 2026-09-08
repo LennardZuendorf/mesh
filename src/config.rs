@@ -333,7 +333,10 @@ pub fn render_config_toml(opts: &InitOptions) -> String {
     lines.push(String::new());
     lines.push("[search]".to_string());
     lines.push(format!("hybrid = {}", opts.hybrid));
-    if let Some(t) = opts.threshold {
+    // A non-finite floor renders as Rust's `NaN` / `inf`, which TOML refuses, so the config
+    // this very command writes would be unreadable by every later command. The CLI rejects
+    // one first; this is the second lock on the same door.
+    if let Some(t) = opts.threshold.filter(|t| t.is_finite()) {
         lines.push(format!("threshold = {t}"));
     }
     if let Some(c) = opts.search_collection.as_ref().filter(|c| !c.is_empty()) {

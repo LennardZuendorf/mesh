@@ -23,6 +23,19 @@ impl GlobalOpts {
         self.quiet = self.quiet || quiet;
         if owner.is_some() {
             self.owner = owner;
+            self.normalize();
+        }
+    }
+
+    /// Drop an empty `--owner`, so it reads as absent everywhere.
+    ///
+    /// `Config::agent` already treats `agent = ""` as unset and `init --agent ""` writes the
+    /// default, but `--owner ""` used to survive into `effective_owner` and be written to
+    /// disk as `owner: ""` — an identity no roster, filter or `--mine` can ever match. One
+    /// rule, applied where the flags enter.
+    pub fn normalize(&mut self) {
+        if self.owner.as_deref().is_some_and(str::is_empty) {
+            self.owner = None;
         }
     }
 

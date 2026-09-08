@@ -280,7 +280,7 @@ mod tests {
             ids(&pull(
                 &cfg,
                 SearchFilter {
-                    status: Some("open".into()),
+                    status: Some(vec!["open".into()]),
                     ..base.clone()
                 }
             )),
@@ -306,7 +306,7 @@ mod tests {
             &cfg,
             SearchFilter {
                 spaces: vec![Space::Notes],
-                status: Some("open".into()),
+                status: Some(vec!["open".into()]),
                 limit: -1,
                 ..SearchFilter::default()
             },

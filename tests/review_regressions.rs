@@ -824,3 +824,275 @@ fn a_note_update_files_the_note_where_its_type_says_it_lives() {
     assert!(logs.is_file(), "an update heals a misfiled note");
     assert!(!root.is_file(), "and leaves nothing behind");
 }
+
+// ---------------------------------------------------------------------------------------
+// a score floor is a number, and a config mesh writes is a config mesh can read
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_non_finite_threshold_is_refused_by_every_flag_that_takes_one() {
+    let f = VaultFixture::new();
+    for args in [
+        vec!["search", "q", "--threshold", "nan"],
+        vec!["search", "q", "--threshold", "inf"],
+        vec!["memory", "recall", "q", "--threshold", "nan"],
+    ] {
+        let (_, stderr, code) = run(&f, &args);
+        assert_eq!(code, 2, "{args:?} -> {stderr}");
+    }
+
+    // `init --threshold nan` used to render Rust's `NaN`, which TOML refuses: one flag left a
+    // config every later command exited 2 on.
+    let bare = VaultFixture::new();
+    let (_, _, code) = run(
+        &bare,
+        &[
+            "init",
+            "--path",
+            &bare.vault.to_string_lossy(),
+            "--threshold",
+            "nan",
+            "--force",
+        ],
+    );
+    assert_eq!(code, 2, "init must refuse a non-finite floor");
+    // A finite one still writes, and the config still loads.
+    ok(
+        &bare,
+        &[
+            "init",
+            "--path",
+            &bare.vault.to_string_lossy(),
+            "--threshold",
+            "0.4",
+            "--force",
+        ],
+    );
+    ok(&bare, &["config", "show"]);
+}
+
+// ---------------------------------------------------------------------------------------
+// every reader reports the same tag list, and a merge never deletes one
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_non_string_tag_reads_the_same_everywhere_and_survives_a_merge() {
+    let f = VaultFixture::new();
+    f.write(
+        "notes/n-MIX.md",
+        "---\nid: n-MIX\ntype: note\ntitle: Mixed\ntags: [1, true, alpha]\n\
+         owner: test-agent\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+         related: []\n---\n\nzebra body\n",
+    );
+    // `note get` rendered the raw list while `search` dropped every non-string member, so the
+    // two readers disagreed about the same file.
+    let got: Json =
+        serde_json::from_str(&ok(&f, &["note", "get", "n-MIX", "--json"])).expect("json object");
+    assert_eq!(got["tags"], serde_json::json!([1, true, "alpha"]));
+    let hit: Json =
+        serde_json::from_str(&ok(&f, &["search", "zebra", "--json"])).expect("json array");
+    assert_eq!(hit[0]["tags"], serde_json::json!(["1", "true", "alpha"]));
+
+    // And a filter can reach a tag the reader says is there.
+    for tag in ["1", "true", "alpha"] {
+        assert_eq!(
+            ids(&ok(&f, &["note", "list", "--tags", tag, "--json"])),
+            ["n-MIX"],
+            "--tags {tag}"
+        );
+    }
+
+    // The documented merge is additive: it used to delete both members it could not read.
+    ok(&f, &["note", "update", "n-MIX", "--tags", "gamma"]);
+    let after: Json =
+        serde_json::from_str(&ok(&f, &["note", "get", "n-MIX", "--json"])).expect("json object");
+    assert_eq!(
+        after["tags"],
+        serde_json::json!(["1", "true", "alpha", "gamma"])
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// `--status` means the same thing on every verb that takes one
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn search_validates_and_unions_a_status_csv_like_task_list() {
+    let f = VaultFixture::new();
+    ok(&f, &["task", "new", "zebra open"]);
+    let done = ok(&f, &["--quiet", "task", "new", "zebra done"]);
+    ok(&f, &["task", "finish", &done]);
+
+    // An unknown value is exit 2 on both, never a silent empty result.
+    for verb in [
+        vec!["task", "list", "--status", "bogus"],
+        vec!["search", "zebra", "--status", "bogus"],
+    ] {
+        let (_, stderr, code) = run(&f, &verb);
+        assert_eq!(code, 2, "{verb:?}");
+        assert_eq!(
+            stderr,
+            "unknown status: bogus (use open, claimed, done, cancelled)"
+        );
+    }
+
+    // And a CSV is a union on both; `search` compared it as one literal string.
+    assert_eq!(
+        ids(&ok(
+            &f,
+            &["search", "zebra", "--status", "open,done", "--json"]
+        ))
+        .len(),
+        2
+    );
+    assert_eq!(
+        ids(&ok(&f, &["search", "zebra", "--status", "done", "--json"])),
+        [done]
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// a report of the index says what the index did
+// ---------------------------------------------------------------------------------------
+
+/// A config with a search collection, so the index paths are live.
+fn indexed_config() -> String {
+    format!(
+        "{}\n[search]\ncollection = \"regressions\"\nhybrid = true\n",
+        common::DEFAULT_CONFIG
+    )
+}
+
+#[test]
+fn a_failing_indexed_is_reported_by_reindex_and_by_watch() {
+    let f = VaultFixture::with(&indexed_config());
+    // A stub that exits non-zero: the rebuild fails on every root.
+    f.write_bin("indexed", "#!/bin/sh\nexit 7\n");
+
+    // `mesh reindex` tested an infallible call with `.is_err()`, so its notice never fired.
+    let (_, stderr, code) = run(&f, &["reindex"]);
+    assert_eq!(code, 0, "reindex always exits 0");
+    assert_eq!(
+        stderr,
+        "search index unavailable (indexed binary missing or failed)"
+    );
+
+    // `watch --once --json` reported `"indexed": true` on the same run.
+    let sweep: Json =
+        serde_json::from_str(&ok(&f, &["--json", "watch", "--once"])).expect("json object");
+    assert_eq!(sweep["indexed"], Json::Bool(false));
+}
+
+// ---------------------------------------------------------------------------------------
+// an empty identity is no identity, everywhere
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn an_empty_owner_is_never_written_to_disk() {
+    let f = VaultFixture::new();
+    // `Config::agent` already reads `agent = ""` as unset; `--owner ""` used to survive into
+    // the write and land as `owner: ""` — an identity no filter or roster can ever match.
+    for space in ["note", "task", "memory"] {
+        let id = ok(
+            &f,
+            &[
+                "--quiet", "--owner", "", space, "new", "empty", "--body", "b",
+            ],
+        );
+        let row: Json =
+            serde_json::from_str(&ok(&f, &[space, "get", &id, "--json"])).expect("json object");
+        assert_eq!(
+            row["owner"],
+            Json::String("test-agent".into()),
+            "{space}: an empty --owner must read as absent"
+        );
+    }
+    // And it does not block a verb that needs an identity.
+    let t = ok(&f, &["--quiet", "task", "new", "claimable"]);
+    ok(&f, &["--owner", "", "task", "claim", &t]);
+}
+
+// ---------------------------------------------------------------------------------------
+// a cycle report an operator can act on
+// ---------------------------------------------------------------------------------------
+
+/// A hand-written open task whose `blocked_by` is `blockers`.
+fn hand_task(f: &VaultFixture, id: &str, blockers: &[&str]) {
+    f.write(
+        &format!("tasks/open/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: task\ntitle: {id}\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n\
+             status: open\npriority: null\nclaimed_by: null\nproject: null\nblocks: []\n\
+             blocked_by: [{}]\n---\n\nb\n",
+            blockers.join(", ")
+        ),
+    );
+}
+
+fn reported_cycles(f: &VaultFixture) -> Json {
+    let status: Json = serde_json::from_str(&ok(f, &["--json", "status"])).expect("json object");
+    status["deps"]["cycles"].clone()
+}
+
+#[test]
+fn breaking_a_reported_cycle_that_leaves_the_loop_intact_still_reports_it() {
+    let f = VaultFixture::new();
+    // Two simple cycles through one component: a->b->c->a and a->c->a. A back-edge walk
+    // reported one and hid the other, so an operator who fixed the reported cycle saw the
+    // count stay at 1 with no way to tell the graph had not changed shape.
+    hand_task(&f, "t-a", &["t-b", "t-c"]);
+    hand_task(&f, "t-b", &["t-c"]);
+    hand_task(&f, "t-c", &["t-a"]);
+    assert_eq!(
+        reported_cycles(&f),
+        serde_json::json!([["t-a", "t-b", "t-c"]])
+    );
+
+    // Drop a->b. The loop a->c->a survives, and so must the report.
+    hand_task(&f, "t-a", &["t-c"]);
+    assert_eq!(reported_cycles(&f), serde_json::json!([["t-a", "t-c"]]));
+
+    // Drop c->a. Now it is really acyclic.
+    hand_task(&f, "t-c", &[]);
+    assert_eq!(reported_cycles(&f), serde_json::json!([]));
+}
+
+// ---------------------------------------------------------------------------------------
+// a warning names work that needed doing
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn unblocking_an_edge_that_never_existed_warns_about_nothing() {
+    let f = VaultFixture::new();
+    let t = ok(&f, &["--quiet", "task", "new", "A"]);
+    // There is no mirror to retract from a file that does not exist, so there is nothing to
+    // report — and the warning that was printed was labelled `task block:` besides.
+    let (_, stderr, code) = run(&f, &["task", "unblock", &t, "--on", "t-NOPE"]);
+    assert_eq!(code, 0);
+    assert_eq!(stderr, "", "an unblock of a non-edge must be silent");
+
+    // A missing *blocker* is still worth reporting, under its own name.
+    let (_, stderr, code) = run(&f, &["task", "block", &t, "--on", "t-GONE"]);
+    assert_eq!(code, 0);
+    assert_eq!(stderr, "could not mirror onto t-GONE (missing)");
+}
+
+// ---------------------------------------------------------------------------------------
+// a mutation reports the state it left behind
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_terminal_no_op_reports_the_status_it_found() {
+    let f = VaultFixture::new();
+    let t = ok(&f, &["--quiet", "task", "new", "X"]);
+    ok(&f, &["task", "cancel", &t, "--reason", "nope"]);
+    // The human line said `finished` while the JSON on the same run said `cancelled`.
+    assert_eq!(
+        ok(&f, &["task", "finish", &t, "--outcome", "no really"]),
+        format!("cancelled {t}")
+    );
+    let payload: Json =
+        serde_json::from_str(&ok(&f, &["--json", "task", "finish", &t])).expect("json object");
+    assert_eq!(payload["status"], Json::String("cancelled".into()));
+}

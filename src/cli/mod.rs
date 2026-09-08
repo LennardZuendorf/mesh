@@ -39,6 +39,24 @@ const TIMESTAMP_HELP: &str = "Prefix the appended block with an attribution stam
 const FORCE_DELETE_HELP: &str = "Delete without the confirmation prompt.";
 const SPACE_HELP: &str = "Comma-separated spaces to read (default: [search].spaces).";
 
+/// A score floor clap accepts: a finite `f64`.
+///
+/// `NaN` disables the floor entirely, because every comparison against it is false, and
+/// `init --threshold nan` renders Rust's `NaN` into the config, which TOML then refuses to
+/// parse — one flag leaving a config no mesh command can read. An infinity is a floor no
+/// score can clear. All three are rejected here, once, for every `--threshold` in the
+/// surface.
+fn finite_score(raw: &str) -> std::result::Result<f64, String> {
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| format!("invalid float literal: '{raw}'"))?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(format!("expected a finite number, got '{raw}'"))
+    }
+}
+
 /// `--json` / `--quiet`, redeclared on every non-admin subcommand.
 #[derive(Args, Debug, Clone, Default)]
 pub struct OutFlags {
@@ -774,7 +792,12 @@ pub enum MemorySub {
             help = "Cap the number of hits."
         )]
         limit: i64,
-        #[arg(long, value_name = "FLOAT", help = "Min score to keep.")]
+        #[arg(
+            long,
+            value_name = "FLOAT",
+            value_parser = finite_score,
+            help = "Min score to keep."
+        )]
         threshold: Option<f64>,
         #[arg(
             long = "no-decay",
@@ -1065,6 +1088,7 @@ pub struct SearchArgs {
     #[arg(
         long,
         value_name = "FLOAT",
+        value_parser = finite_score,
         help = "Min score to keep (unset: [search].threshold if explicit, else the engine's own floor)."
     )]
     pub threshold: Option<f64>,
@@ -1239,6 +1263,7 @@ pub struct InitArgs {
     #[arg(
         long,
         value_name = "FLOAT",
+        value_parser = finite_score,
         help = "Score floor ([search].threshold). Default: unset — the key is omitted so the engine keeps its own floor."
     )]
     pub threshold: Option<f64>,

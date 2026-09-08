@@ -90,7 +90,7 @@ pub struct SearchFilter {
     pub type_filter: Option<String>,
     pub tags: Vec<String>,
     pub owner: Option<String>,
-    pub status: Option<String>,
+    pub status: Option<Vec<String>>,
     pub kind: Option<String>,
     pub limit: i64,
     pub threshold: Option<f64>,
@@ -153,7 +153,12 @@ pub fn query(cfg: &Config, q: &str, f: &SearchFilter) -> Result<(Vec<Hit>, Mode)
     if wants_indexed(cfg, f.engine) {
         if let Some(collection) = cfg.search.collection.clone() {
             if indexed::available() {
-                let threshold = f.threshold.unwrap_or(cfg.search.threshold);
+                // `resolve_effective_threshold` already folded an explicit `[search].threshold`
+                // into `f.threshold`, so this fallback fires exactly when no threshold was
+                // configured — where the nominal 0.65 must NOT apply, or every hit in the
+                // 0.4–0.65 band is dropped at exit 0. Use the same floor the builtin branch
+                // uses below.
+                let threshold = f.threshold.unwrap_or(builtin::DEFAULT_THRESHOLD_FLOOR);
                 if let Ok(mut hits) = indexed::search(cfg, &collection, q, f, threshold) {
                     apply_limit(&mut hits, f.limit);
                     return Ok((hits, Mode::Indexed));
@@ -220,13 +225,11 @@ pub fn indexed_available(cfg: &Config) -> bool {
 
 /// Rebuild the index for each root. **Never fails the process**: an unreachable or failing
 /// `indexed` is a degradation the caller reports, not an error.
-pub fn reindex(cfg: &Config, roots: &[PathBuf]) -> Result<()> {
-    reindex_status(cfg, roots);
-    Ok(())
-}
-
-/// `reindex`, with the outcome the caller needs to decide whether to print the
-/// `search index unavailable (indexed binary missing or failed)` notice.
+///
+/// There is no infallible `-> Result<()>` wrapper over this on purpose. One existed, and
+/// both its callers tested it with `.is_err()` / `.is_ok()` — a constant — so `mesh reindex`
+/// never printed its unavailable notice and `watch --once --json` always reported
+/// `"indexed": true`. The outcome has to reach the caller to be reported.
 pub fn reindex_status(cfg: &Config, roots: &[PathBuf]) -> IndexOutcome {
     let Some(collection) = cfg.search.collection.as_deref() else {
         return IndexOutcome::NoCollection;
@@ -240,13 +243,7 @@ pub fn reindex_status(cfg: &Config, roots: &[PathBuf]) -> IndexOutcome {
     outcome
 }
 
-/// Refresh one path in the index. Never fails the process.
-pub fn index_update(cfg: &Config, path: &Path) -> Result<()> {
-    index_update_status(cfg, path);
-    Ok(())
-}
-
-/// `index_update`, with the outcome.
+/// Refresh one path in the index, with the outcome. Never fails the process.
 pub fn index_update_status(cfg: &Config, path: &Path) -> IndexOutcome {
     let Some(collection) = cfg.search.collection.as_deref() else {
         return IndexOutcome::NoCollection;
@@ -543,18 +540,18 @@ mod tests {
     }
 
     #[test]
-    fn reindex_and_index_update_never_fail_the_process() {
+    fn an_unreachable_indexed_reports_a_degradation_not_a_success() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = config_for(dir.path());
-        assert!(reindex(&cfg, &[dir.path().to_path_buf()]).is_ok());
-        assert_eq!(
-            reindex_status(&cfg, &[dir.path().to_path_buf()]),
-            IndexOutcome::NoCollection
-        );
-        assert!(index_update(&cfg, &dir.path().join("notes/n-1.md")).is_ok());
+        let roots = [dir.path().to_path_buf()];
+        let path = dir.path().join("notes/n-1.md");
+        // No collection: nothing to do, and nothing to complain about.
+        assert_eq!(reindex_status(&cfg, &roots), IndexOutcome::NoCollection);
+        assert_eq!(index_update_status(&cfg, &path), IndexOutcome::NoCollection);
+        // A collection with no reachable `indexed`: a degradation the caller must see.
         cfg.search.collection = Some("c".into());
-        assert!(reindex(&cfg, &[dir.path().to_path_buf()]).is_ok());
-        assert!(index_update(&cfg, &dir.path().join("notes/n-1.md")).is_ok());
+        assert!(reindex_status(&cfg, &roots).degraded());
+        assert!(index_update_status(&cfg, &path).degraded());
     }
 
     #[test]

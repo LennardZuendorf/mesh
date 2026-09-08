@@ -75,7 +75,7 @@ pub struct Filter {
     pub sort: SortKey,
     pub limit: Option<i64>,
     /// Exact string equality against raw frontmatter, e.g. `("type", "log")`.
-    pub extra: Vec<(String, String)>,
+    pub extra: Vec<(String, Vec<String>)>,
 }
 
 impl Default for Filter {
@@ -107,7 +107,19 @@ impl Filter {
     /// Add an exact-match predicate against a raw frontmatter key.
     pub fn with_extra(mut self, key: &str, value: Option<&str>) -> Filter {
         if let Some(v) = value {
-            self.extra.push((key.to_string(), v.to_string()));
+            self.extra.push((key.to_string(), vec![v.to_string()]));
+        }
+        self
+    }
+
+    /// An extra predicate the row passes when the key holds **any** of `values`.
+    ///
+    /// One mechanism for `--status open,done`, so `task list` and `search` cannot answer the
+    /// same CSV differently — `search` used to compare it as the literal string "open,done"
+    /// and return nothing.
+    pub fn with_extra_any(mut self, key: &str, values: Option<&[String]>) -> Filter {
+        if let Some(values) = values.filter(|v| !v.is_empty()) {
+            self.extra.push((key.to_string(), values.to_vec()));
         }
         self
     }
@@ -188,9 +200,10 @@ pub fn matches_filters(meta: &Meta, f: &Filter) -> bool {
             _ => return false,
         }
     }
-    for (key, want) in &f.extra {
-        if meta_text(meta, key).as_deref() != Some(want.as_str()) {
-            return false;
+    for (key, wanted) in &f.extra {
+        match meta_text(meta, key) {
+            Some(got) if wanted.iter().any(|w| w == &got) => {}
+            _ => return false,
         }
     }
     true

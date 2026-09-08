@@ -21,6 +21,8 @@ impl Ctx {
     /// A context for these global flags, detecting whether stdin is a terminal.
     pub fn new(g: GlobalOpts) -> Ctx {
         let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        let mut g = g;
+        g.normalize();
         Ctx {
             cfg: OnceCell::new(),
             g,
@@ -32,6 +34,8 @@ impl Ctx {
     pub fn with_config(g: GlobalOpts, config: Config, tty: bool) -> Ctx {
         let cell = OnceCell::new();
         let _ = cell.set(config);
+        let mut g = g;
+        g.normalize();
         Ctx { cfg: cell, g, tty }
     }
 

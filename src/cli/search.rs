@@ -35,7 +35,13 @@ pub fn run(ctx: &mut Ctx, args: SearchArgs) -> Result<()> {
         // one literal tag named "alpha,beta".
         tags: parse_csv(&args.tags.join(",")),
         owner,
-        status: args.status,
+        // `design.md` pins the same rule on every `--status`: a CSV union, and an unknown
+        // value is exit 2, never a silent empty result. `search` used to compare the whole
+        // CSV as one literal string and answer `[]` to both a typo and `open,done`.
+        status: match args.status.as_deref() {
+            Some(value) => crate::domain::tasks::parse_status_csv(value)?,
+            None => None,
+        },
         kind: args.kind,
         limit: args.limit,
         threshold: search::resolve_effective_threshold(args.threshold, cfg),

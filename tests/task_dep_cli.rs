@@ -166,10 +166,7 @@ fn block_warns_when_the_mirror_target_is_missing() {
     let (stdout, stderr, code) = run(&f, &["task", "block", &b, "--on", "t-GONE"]);
     assert_eq!(code, 0);
     assert_eq!(stdout.trim_end(), format!("blocked {b} by t-GONE"));
-    assert_eq!(
-        stderr.trim_end(),
-        "task block: could not mirror onto t-GONE (missing)"
-    );
+    assert_eq!(stderr.trim_end(), "could not mirror onto t-GONE (missing)");
     // A dangling blocker fails open, so the task is still ready.
     assert!(ok(&f, &["task", "get", &b]).contains("ready: true"));
     // The warning is a notice: suppressed by --quiet, never in the payload.
