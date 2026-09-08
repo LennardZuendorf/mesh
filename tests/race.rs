@@ -701,3 +701,92 @@ fn a_concurrently_attached_asset_is_never_removed_unforced() {
          sidecar_gone={sidecar_gone})"
     );
 }
+
+#[test]
+fn concurrent_block_calls_never_lose_an_edge() {
+    // `block` derives the new `blocked_by` from an unlocked scan and then writes it whole.
+    // Two calls that scan the same `[]` each compute their own one-element list, and the
+    // second write drops the first edge from the authoritative side of the graph.
+    let f = VaultFixture::new();
+    let target = new_task(&f, "Target");
+    let blockers: Vec<String> = (0..16)
+        .map(|n| new_task(&f, &format!("Blocker {n}")))
+        .collect();
+
+    let argvs: Vec<Vec<String>> = blockers
+        .iter()
+        .map(|b| {
+            vec![
+                "task".into(),
+                "block".into(),
+                target.clone(),
+                "--on".into(),
+                b.clone(),
+                "--quiet".into(),
+            ]
+        })
+        .collect();
+    for code in race(&f, &argvs) {
+        assert_eq!(code, 0, "every block must succeed");
+    }
+
+    let text = f.read(&task_path(&f, &target));
+    let listed: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim().trim_start_matches("- ").trim())
+        .collect();
+    let missing: Vec<&String> = blockers
+        .iter()
+        .filter(|b| !listed.contains(&b.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} of {} edges are missing from the authoritative blocked_by: {missing:?}\n{text}",
+        missing.len(),
+        blockers.len()
+    );
+}
+
+#[test]
+fn concurrent_add_and_remove_never_leave_a_sidecar_without_a_blob() {
+    // `add` writes blob-then-sidecar under the space create lock; `remove` unlinks
+    // sidecar-then-blob under the *entity* lock. The two are not mutually exclusive, so a
+    // remove that has already dropped the sidecar can unlink the blob an add just re-wrote
+    // for the very same content address — leaving a sidecar pointing at nothing, the one
+    // state R12 forbids. b2a9503 made `gc --apply` take the create lock for exactly this
+    // reason; `remove` unlinks blobs too and needs the same exclusion.
+    let f = VaultFixture::new();
+    let src_dir = f.dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+
+    let mut argvs: Vec<Vec<String>> = Vec::new();
+    for n in 0..24 {
+        let src = src_dir.join(format!("p{n}.bin"));
+        std::fs::write(&src, format!("payload-{n}").repeat(48)).expect("write source");
+        let id = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()]);
+        // Re-adding identical bytes takes the dedupe branch, or re-mints the same content
+        // address when the remove got there first.
+        argvs.push(vec![
+            "asset".into(),
+            "add".into(),
+            src.to_string_lossy().into_owned(),
+            "--quiet".into(),
+        ]);
+        argvs.push(vec![
+            "asset".into(),
+            "remove".into(),
+            id,
+            "--force".into(),
+            "--quiet".into(),
+        ]);
+    }
+    race(&f, &argvs);
+
+    let report = ok(&f, &["--json", "asset", "gc"]);
+    let payload: serde_json::Value = serde_json::from_str(&report).expect("json");
+    assert_eq!(
+        payload["orphan_sidecars"],
+        serde_json::json!([]),
+        "a remove unlinked a blob whose sidecar survived: {report}"
+    );
+}

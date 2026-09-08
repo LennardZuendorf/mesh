@@ -496,19 +496,19 @@ pub fn block(cfg: &Config, id: &str, on: &[String]) -> Result<(Task, Vec<Warning
             next.push(target.clone());
         }
     }
-    if next == blocked_by {
-        // Adding an existing edge writes nothing and exits 0.
-        return Ok((tasks::get(cfg, id)?.item, Vec::new()));
-    }
     let added: Vec<(String, String)> = on
         .iter()
         .filter(|t| !blocked_by.contains(t))
         .map(|t| (id.to_string(), t.clone()))
         .collect();
+    // The cycle check needs the whole graph, and a scan is the only way to see it. The *list*
+    // is a different matter: `amend_blocked_by` replays `on` against the value its own locked
+    // read returns, so the edge is added to whatever is authoritative rather than to a
+    // snapshot. Adding an existing edge is still a no-op that writes nothing and exits 0.
     check_acyclic(&overlay(&before, id, &blocks, &next), &added)?;
 
-    let task = write_blocked_by(cfg, id, &next)?;
-    let warnings = apply_mirrors(cfg, mirror_edits(id, &[], &[], &blocked_by, &next));
+    let (task, was, now) = amend_blocked_by(cfg, id, on, &[])?;
+    let warnings = apply_mirrors(cfg, mirror_edits(id, &[], &[], &was, &now));
     Ok((task, warnings))
 }
 
@@ -523,41 +523,62 @@ pub fn unblock(cfg: &Config, id: &str, on: &[String], all: bool) -> Result<(Task
         }
     }
     tasks::resolve(cfg, id)?;
-    let before = tasks::rows(cfg);
-    let (_, blocked_by) = tasks::node_lists(&before, id);
+    // The scan names the targets; it no longer derives the list that gets written.
     // `--all` reaches every mirror, including one-sided edges declared only on the other side.
     let targets: Vec<String> = if all {
-        effective_blockers(&before, id)
+        effective_blockers(&tasks::rows(cfg), id)
     } else {
         on.to_vec()
     };
-    let next: Vec<String> = blocked_by
-        .iter()
-        .filter(|b| !targets.contains(b))
-        .cloned()
-        .collect();
-
-    let task = if next == blocked_by {
-        tasks::get(cfg, id)?.item
-    } else {
-        write_blocked_by(cfg, id, &next)?
-    };
+    let (task, _, _) = amend_blocked_by(cfg, id, &[], &targets)?;
+    // The mirrors are retracted for every named target, not just the ones this side listed:
+    // `--all` must also reach a one-sided edge declared only on the other task's `blocks`,
+    // which this task's `blocked_by` never held.
     let warnings = apply_mirrors(cfg, mirror_edits(id, &[], &[], &targets, &[]));
     Ok((task, warnings))
 }
 
-/// Write the authoritative `blocked_by` list under the task's own lock.
-fn write_blocked_by(cfg: &Config, id: &str, list: &[String]) -> Result<Task> {
+/// Amend `blocked_by` under the task's own lock, replaying the edit against the list the
+/// locked read returns rather than one the caller derived from an unlocked scan.
+///
+/// A list derived from a scan is a claim about the past. Two concurrent `task block T` calls
+/// both read `[]`, each compute their own one-element list, and the second wholesale write
+/// drops the first edge — with both calls reporting success. Replaying `add` and `remove`
+/// here is what makes concurrent edits compose.
+///
+/// Returns the task plus the before/after lists *as written*, so a caller diffs its mirrors
+/// from what actually landed. A no-op never rewrites the file.
+fn amend_blocked_by(
+    cfg: &Config,
+    id: &str,
+    add: &[String],
+    remove: &[String],
+) -> Result<(Task, Vec<String>, Vec<String>)> {
     let _guard = hold(&entity_lock(tasks::root(cfg)?, id)?)?;
+    // Re-resolved inside the lock: a task can move between open/ and done/ underneath us.
     let path = tasks::resolve(cfg, id)?;
     let mut doc = read_doc(&path).ok_or_else(|| MeshError::TaskNotFound(id.to_string()))?;
+    let was = meta_strings(&doc.meta, "blocked_by");
+    let mut now_list: Vec<String> = was
+        .iter()
+        .filter(|b| !remove.iter().any(|r| r == *b))
+        .cloned()
+        .collect();
+    for target in add {
+        if !now_list.iter().any(|x| x == target) {
+            now_list.push(target.clone());
+        }
+    }
+    if now_list == was {
+        return Ok((tasks::validated(&doc.meta, id)?, was, now_list));
+    }
     doc.meta
-        .insert("blocked_by".into(), Value::strings(list.to_vec()));
+        .insert("blocked_by".into(), Value::strings(now_list.clone()));
     let now = now_utc();
     doc.meta.insert("updated".into(), ts_value(&now));
     let task = tasks::validated(&doc.meta, id)?;
     tasks::persist(cfg, &path, &doc)?;
-    Ok(task)
+    Ok((task, was, now_list))
 }
 
 /// A copy of `rows` in which `id` carries the given lists.
