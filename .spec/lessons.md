@@ -154,3 +154,21 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** garbage collection is a writer. If a two-write sequence is made safe by a lock, the sweep that judges that sequence complete must take the same lock. And verify a race test by breaking the fix and watching it fail — a green race test proves nothing until you have seen it go red.
 **Tags:** concurrency, locks, gc, testing
 **Date:** 2026-09-07
+
+### "Nothing names it" is not an ownership test in a shared space
+**Pattern:** `asset gc --apply` decided a file was its own by asking whether any sidecar named it, and `asset remove` treated the sidecar's `blob` key as a path. Both inferences hold only in a folder mesh alone writes. With the documented `assets = "."` layout the space is the vault root, so the sweep unlinked `important-spreadsheet.csv`, `family-photo.jpg` and the vault's own `mesh.toml` — `removed:3`, hard unlink, no trash. And because `blob` is agent- and editor-writable frontmatter, `blob: ../notes/n-XXXX.md` passed `safe_resolve` (which only proves membership in the union of space roots) and deleted a note, exit 0. The create lock added for the previous gc finding cannot help either bug: the other writer is the operator, who holds no mesh lock at all.
+**Rule:** when a space can be shared, ownership is a property of the *name mesh itself wrote*, not of what is missing elsewhere. Derive the test as the inverse of the namer (`owned_blob_id` is the inverse of `blob_name`) so the two cannot drift, and require it to match *this* entity's id before any unlink. A path that passes the sandbox check is still the wrong file to touch; sandboxing answers "inside the vault", never "mine".
+**Tags:** assets, ownership, gc, sandboxing, shared-spaces, delete
+**Date:** 2026-09-08
+
+### A list derived from an unlocked scan is a claim about the past
+**Pattern:** `task block` read `blocked_by` from a scan, appended its target, then wrote the whole list under the lock. Sixteen concurrent blocks on one task left **3 of 16** edges — each writer replayed its own stale snapshot over the previous winner, every call exit 0. `memory forget --expired` had the same shape one step further on: it deleted from a pre-lock scan and never re-read inside the lock, so a memory whose `expires` a writer had just extended was unlinked anyway and the renewal's reported success was a lie. `asset remove` ran its reference guard before the lock, so a concurrent `attach` slipped past the `--force` refusal.
+**Rule:** taking the lock is not enough — what you write inside it must be *recomputed* inside it. Carry the edit (add/remove, or a predicate) into the locked section and replay it against the value the locked read returns; never carry a precomputed result. A scan may still feed a decision that genuinely needs the whole graph, such as a cycle check, but never the list that gets written.
+**Tags:** concurrency, locks, toctou, lost-update, deps, memories, assets
+**Date:** 2026-09-08
+
+### A hardcoded date in a test fixture is a gate that expires
+**Pattern:** `tests/fixtures/python-vault/tasks/open/t-D0YQ.md` was stamped `updated: 2026-09-05` and `STATUS_STALE_WINDOW` is `"2d"`, so two `status` tests asserting `stale_claims: 0` passed for exactly two days and then failed on every later run. The handover notes recorded "1248 pass / 0 fail" in good faith; by the time the next session read them the suite was already red at that same commit, for a reason no code change had caused.
+**Rule:** a fixture that encodes an absolute date silently couples the suite to the calendar. Stamp time-relative fixtures from `now` when the fixture is materialised, or assert the derived property rather than a count that ages. And treat an inherited "gates green" claim as a timestamp, not a fact — re-run the gates on the base commit before trusting them, so a pre-existing failure is not mistaken for one you introduced.
+**Tags:** testing, fixtures, time-dependence, handover, gates
+**Date:** 2026-09-08
