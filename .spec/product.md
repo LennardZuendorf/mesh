@@ -5,7 +5,7 @@ children:
   - tech.md
   - design.md
   - plan.md
-updated: 2026-09-07
+updated: 2026-09-08
 ---
 
 # Mesh — Product
@@ -53,7 +53,9 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
 8. **No background process.** Every command works on its own; `mesh watch` is optional and only
    keeps the external index and folder routing fresh.
 9. **Sandboxed vault.** Every path stays inside the union of the enabled space roots; agent
-   content is data, never shell input.
+   content is data, never shell input. The sandbox answers "inside the vault", never "mine": in a
+   space the operator also writes, mesh deletes only files it named itself.
+   → [tech.md](tech.md) § Invariants
 
 ---
 

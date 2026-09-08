@@ -3,7 +3,7 @@ type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
 children: []
-updated: 2026-09-07
+updated: 2026-09-08
 ---
 
 # Mesh — Plan
@@ -13,8 +13,10 @@ updated: 2026-09-07
 spaces, shipped the deferred dependency graph (phase 3), and removed the daemon. All arcs are
 compounded into this root layer and their feature folders deleted.
 
-**Focus:** none in flight. The next arc starts with `/spec feature <name>`. The one open item is
-the product-positioning review below.
+**Focus:** none in flight. The next arc starts with `/spec feature <name>`. Two adversarial
+review sweeps over the landed Rust surface are closed and compounded into
+[tech.md](tech.md) § Invariants and § Implemented surfaces; the open items are the
+product-positioning review and the two known gaps below.
 
 ---
 
@@ -53,6 +55,20 @@ and § Invariants, not in a feature folder — there are none.
   name collisions; differentiation vs GBrain / Mem0 / Basic Memory; consistency across
   `product.md`, `tech.md`, `design.md`, `README.md`, `AGENTS.md`, CLI help. Run in a fresh
   thread, adversarial; may reopen root `product.md`. Findings → `file:line` + concrete fix.
+  **One finding is already banked:** the clap `about` strings still describe the Python-era
+  three-verb surface — the root command says "Three verbs, one folder" and `search` says "Recall
+  across notes + tasks", where the live surface is five spaces and the default corpus is notes,
+  tasks, memories and assets. They are user-visible copy in `src/cli/mod.rs`, so the fix belongs
+  to this review, not to a docs pass.
+
+## Known gaps
+
+- **`mesh watch` leaks its lock on SIGINT.** `run` holds the singleton `LockGuard` and a signal
+  skips `Drop`, so an interrupted watcher leaves the lock behind and never emits its closing
+  `stop` event. The lock self-heals on its TTL, so this is a protocol and hygiene gap, not a
+  wedge. Closing it needs a signal handler setting the existing `stop` flag, which needs a crate
+  (`#![forbid(unsafe_code)]` rules out a hand-written one) — a **dependency change**, so it waits
+  on a decision rather than being fixed in passing. → [tech.md](tech.md) § Stack
 
 ---
 

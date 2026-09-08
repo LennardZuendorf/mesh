@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-09-07
+updated: 2026-09-08
 ---
 
 # Mesh — Technical Architecture
@@ -55,7 +55,7 @@ src/
 ├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
 ├── cli/                         # one file per verb family + globals, out, admin, watch
 └── mcp/                         # stdio JSON-RPC server, schemas, 37-tool table, instructions
-tests/                           # one integration file per verb family + compat corpus, race, bundle
+tests/                           # one per verb family + compat corpus, race, bundle, review regressions
 ```
 
 ---
@@ -80,19 +80,35 @@ tests/                           # one integration file per verb family + compat
    machine JSON pins key *order*, not whitespace.
 5. **One walk, one skip set.** Every scan goes through a single walk that skips dot-prefixed path
    components, nested space roots, files over 4 MiB and non-UTF-8 files, and through a single safe
-   reader that yields nothing rather than failing.
+   reader that yields nothing rather than failing. The **writer is bounded by the same constant**:
+   a document that would exceed it is refused (exit 2) rather than written into permanent
+   unaddressability.
 6. **Writes are atomic and single-entity.** Temp file plus rename, preserving an existing file's
    mode; every mutation holds that entity's lock and re-resolves its target inside it; lock
-   removal is always a compare-and-swap on `(dev, ino)`, never a blind unlink.
+   removal is always a compare-and-swap on `(dev, ino)`, never a blind unlink. Whatever the write
+   commits — an edge list, a deletion predicate, a reference guard — is **recomputed inside the
+   lock**: the edit is replayed against the value the locked read returns, never a result derived
+   from an earlier unlocked scan. A scan may still feed a decision that needs the whole graph
+   (the cycle check), never the list that gets written.
 7. **Identity is validated across every space** at one core write boundary — notes, tasks,
    memories, assets and the scratch namespace. A spelling check, never authorisation; every
-   identity that becomes part of a path is normalised first.
+   identity that becomes part of a path is normalised first **and rejected when the normal form
+   is empty** (exit 2), so no identity can collapse the layout it is a component of. An empty
+   `--owner` reads as absent everywhere rather than landing on disk as an identity no roster,
+   filter or `--mine` can match.
 8. **No panics on user input.** `unwrap`/`expect`/`panic` are lint-denied in the library; `main`
    catches anything that escapes and prints one line instead of a trace.
 9. **Agent content is inert data**, never instructions or shell input.
 10. **Mesh owns the interface, not the vault** — versioning, sync and backup are the vault
     owner's job. That is the basis for hard delete (no trash, no promised recovery) and for
     skipping and round-tripping any file or key mesh did not write.
+11. **A shared space is not mesh's to delete.** A space may resolve to a folder the operator also
+    writes (`assets = "."` puts one at the vault root), so "nothing else names this file" is not
+    an ownership test. A file is mesh's exactly when its **name is one mesh itself would have
+    minted**, and that test is derived as the inverse of the namer so the two cannot drift; it
+    must match *this* entity's id before any unlink. Frontmatter an agent or an editor can write
+    (an asset's `blob`) names a file only through that test — passing the sandbox check answers
+    "inside the vault", never "mine".
 
 ---
 
@@ -133,14 +149,14 @@ families share — never per-verb copies:
 
 | Contract | Rule |
 |---|---|
-| Config | `~/.mesh/config.toml`. `[core]` `vault_path` + `agent`; `[spaces]` notes/tasks/memories/scratch/assets (relative path, absolute path, `"."`, or `false`; every key optional); `[search]` collection, hybrid, threshold, engine, spaces; `[tasks]` collections, strict. `vault_path` is expanded then canonicalised at the parse boundary; `path` and `tolaria_path` are permanent input aliases. Unknown tables and keys are ignored. Precedence: `--config` > `$MESH_CONFIG_PATH` > default; `--vault` > `$MESH_VAULT` > file; `$MESH_AGENT` > file. Missing config → exit 2. `[search].threshold` applies **only when explicitly set**. |
+| Config | `~/.mesh/config.toml`. `[core]` `vault_path` + `agent`; `[spaces]` notes/tasks/memories/scratch/assets (relative path, absolute path, `"."`, or `false`; every key optional); `[search]` collection, hybrid, threshold, engine, spaces; `[tasks]` collections, strict. `vault_path` is expanded then canonicalised at the parse boundary; `path` and `tolaria_path` are permanent input aliases. Unknown tables and keys are ignored. Precedence: `--config` > `$MESH_CONFIG_PATH` > default; `--vault` > `$MESH_VAULT` > file; `$MESH_AGENT` > file. Missing config → exit 2. `[search].threshold` applies **only when explicitly set**, on the `indexed` branch as well as the built-in one; every `--threshold` takes a finite number (`nan`/`inf` are exit 2, on `search`, `memory recall` and `init` alike). `config set` writes only keys a reader consumes and parses each as **that reader's own type** — string, boolean, finite float, string list (CSV or a TOML array), or a space path / `false`; an unknown key or a wrong type is exit 2 rather than a silent no-op. |
 | IDs | `n-` / `t-` / `m-` / `a-` + Crockford base32 over `SHA-256(created_iso \0 title)`, 4+ chars, extended on collision. Asset ids digest the content instead, making the id the content address. Never sequential; existing ids are never recomputed. |
-| Folders | Routing is relative to the **space root**. Notes: `note→<notes>/`, `log/decision/reference/project→<notes>/{logs,decisions,references,projects}/`, recursive. Tasks: `open\|claimed→<tasks>/open/`, `done\|cancelled→<tasks>/done/`, non-recursive. Memories: flat, never moved. Scratch: `<scratch>/<agent>/<name>.md`. Assets: blob plus sidecar sharing one stem. |
+| Folders | Routing is relative to the **space root**. Notes: `note→<notes>/`, `log/decision/reference/project→<notes>/{logs,decisions,references,projects}/`, recursive. Tasks: `open\|claimed→<tasks>/open/`, `done\|cancelled→<tasks>/done/`, non-recursive. Memories: flat, never moved. Scratch: `<scratch>/<agent>/<name>.md`, both components rejected when they normalise to empty. Assets: blob plus sidecar sharing one stem; a file in the assets root is one of mesh's blobs **only when its name is one mesh would mint for that id** (§ Invariants 11), which is what `asset gc`, `asset remove` and `asset path` decide by — never the sidecar's `blob` key read as a bare path. |
 | Atomic write | Temp file plus rename, mode-preserving, `fsync`ed; the destination is untouched on any failure before the rename. |
 | Locks | `O_EXCL` per entity under the space's `.locks/`; stale when the PID is dead or older than 300 s; both reclaim and release are `(dev, ino)` compare-and-swaps under an exclusive `flock`. `mesh status` reports stale locks. |
 | Sandbox | Every resolved path must equal or sit beneath one enabled space root. |
 | Exit codes | 0 ok · 1 io/infrastructure or declined confirmation · 2 validation · 3 not found (incl. corrupt frontmatter on read/amend) · 4 claim conflict or contended lock · 5 blocked. Codes live on the error enum; `main` maps them once. |
-| Error envelope | Under `--json`, one JSON object on stderr: `kind`, `message`, `next_action`, the structured fields, plus `candidates` on not-found and `retry_after_ms` on a lock conflict. MCP renders the identical object. |
+| Error envelope | Under `--json`, one JSON object on stderr: `kind`, `message`, `next_action`, the structured fields, plus `candidates` on not-found and `retry_after_ms` on a lock conflict. MCP renders the identical object. A verb that spans several transactions names **what already committed** and the exact command that repairs it; that wrapper changes the message only — `kind`, `code` and `candidates` read through to the wrapped error. |
 
 ### Note fields
 
@@ -182,11 +198,35 @@ tests cited.
   whose four legacy tiers (title-exact 1.0, title-substring 0.8, tag 0.6, body 0.4) remain
   reachable as floors; `--engine substring` restores the legacy scoring exactly. Ordering is
   score desc, updated desc, path asc, with the ±0.02 recency-tiebreak band kept only on the
-  `indexed` path.
+  `indexed` path, and the path arm is what breaks a score-and-`updated` tie on both engines.
+  `--tags` and `--status` speak the CSV mesh itself writes — `--tags` is repeatable *and*
+  comma-split and ANDed, `--status` is a membership union whose unknown value is exit 2, the same
+  rule `task list` obeys. Under an active filter the `indexed` fetch is unbounded and `--limit` is
+  a display cap applied after filtering, so a filtered page is never short of rows that were
+  simply never fetched.
 - **Tasks** — atomic `O_EXCL` claim; idempotent release/finish/cancel that never rewrite a
-  no-op; `--available` unchanged and dependency-blind; `--ready`/`--blocked` are the
-  dependency-aware filters; a strict claim on a blocked task exits 5; `task next` selects and
-  optionally claims in one invocation, retrying across candidates on a race.
+  no-op and that report the status they *found*, not the one asked for; `--available` unchanged
+  and dependency-blind; `--ready`/`--blocked` are the dependency-aware filters; a strict claim on
+  a blocked task exits 5; `task next` selects and optionally claims in one invocation, retrying
+  across candidates on a race. `block`/`unblock` carry the add and remove sets into the task's
+  own lock and replay them against the locked read (§ Invariants 6), so concurrent edits compose;
+  the cycle check keeps using the whole-graph scan, and a retraction onto a task that does not
+  exist has nothing to retract and warns about nothing.
+- **Assets** — ingest is copy-only and idempotent by content, and `--attach` resolves its target
+  **before** any I/O, so a refused target writes nothing. `attach`/`detach` span three and two
+  transactions; both are idempotent, so re-running one heals every partial state, and a failure
+  names which halves committed. `remove`'s reference guard runs inside the asset's lock.
+- **Scratch and memories** — the scratch agent is validated exactly like the name beside it, so
+  no identity can collapse `<scratch>/<agent>/<name>.md` to a shared file and lock; the agent
+  census counts only a real `<agent>/<name>.md` pair. `memory forget --expired` re-reads each
+  memory under its own lock and keeps whatever is no longer expired, so a renewal that reported
+  success is never contradicted; one unreadable memory is skipped, not fatal.
+- **Admin and watch** — `mesh reindex` and `mesh watch` report the rebuild that actually ran
+  rather than a constant, so a degradation reaches the operator and `watch --json` never claims
+  an index update it did not make. Reconciliation *moves* a file and never destroys one: an
+  occupied destination leaves the source in place. `status.deps.cycles` reports **strongly
+  connected components**, not one entry per DFS back edge — while a component is listed the
+  graph is still cyclic, and it disappears only when it is really gone.
 - **MCP** — stdio JSON-RPC, 37 `mesh_*` tools mirroring the safe verbs plus the read-only
   lenses, each carrying explicit read-only/idempotent/destructive hints with exactly one
   destructive tool (`mesh_task_cancel`). Withheld: every removal verb, asset ingest and gc, and
@@ -197,7 +237,10 @@ tests cited.
   inbound index inverted at read time), `project` (a `type: project` note plus every task
   pointing at it), and `session-start` (tasks → mentions → memories → activity, deduped by id,
   a `reason` on every entry, `--team` widening only the activity half, `--budget` trimming bodies
-  before entries and recording the drop). All are read-only and accept a space filter.
+  before entries and recording the drop). All are read-only and accept a space filter. `--mine`
+  resolves against the **acting** identity — `--owner` when given, else `[core].agent` — on every
+  lens and list verb, the same identity a claim would be written as. A lens narrows its corpus
+  when a space is disabled; any other listing failure is still an error, never an empty result.
 
 ---
 

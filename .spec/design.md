@@ -4,7 +4,7 @@ scope: design
 design_format: google-labs-code/design.md-compatible
 children:
   - plan.md
-updated: 2026-09-05
+updated: 2026-09-08
 ---
 
 # Mesh — Design
@@ -21,7 +21,7 @@ strict JSON. Nothing runs in the background, so behaviour never depends on what 
 | Flag | Effect |
 |---|---|
 | `--json` / `--quiet` | Machine output / IDs only |
-| `--owner` / `--mine` | Set or filter by agent (`--mine` = owner or claimed_by) |
+| `--owner` / `--mine` | Set or filter by agent (`--mine` = owner or claimed_by). An empty `--owner` reads as absent, never as an identity |
 | `--config PATH` | Config file location; wins over `$MESH_CONFIG_PATH` and the default |
 | `--vault PATH` | Vault root; wins over `$MESH_VAULT` and the config file |
 | `--space CSV` | Which spaces a search or lens reads. Defaults to the configured search spaces |
@@ -29,7 +29,7 @@ strict JSON. Nothing runs in the background, so behaviour never depends on what 
 | `--tags` / `--any-tag` | Tag filter (AND / OR). On `update`, `--tags` is a *grammar*: bare `x,y` **merges** (additive, idempotent), `=x,y` replaces the whole list, `+x,-y` is a per-token delta. A mixed spec is rejected (exit 2) rather than guessed at |
 | `--meta-only` / `--full` | Token budget vs full body |
 | `--since` / `--stale` | Recency floor (`7d`, ISO) and its exact inverse |
-| `--status`, `--type`, `--kind`, `--limit`, `--threshold` | Task / note / memory / search filters (`--status` takes a CSV; an unknown value is exit 2, never a silent empty result) |
+| `--status`, `--type`, `--kind`, `--limit`, `--threshold` | Task / note / memory / search filters (`--status` takes a CSV union on *every* verb that has one; an unknown value is exit 2, never a silent empty result. `--threshold` takes a finite number) |
 | `--available` / `--ready` / `--blocked` | Open-and-unclaimed / also unblocked / has an unsatisfied blocker. `--available` is deliberately dependency-blind |
 | `--direction in\|out\|both` | `graph` traversal: `out` follows `related`, `in` walks backlinks, `both` either |
 | `--team` | `session-start` only: widens the *activity* half to every agent. The task-ownership and mention halves always stay yours |
@@ -43,7 +43,9 @@ JSON surfaces alike — one field never has two spellings.
 **Flag placement:** `--json`, `--quiet`, `--owner` and `--mine` are accepted both *before* and
 *after* the command name on every non-admin command, with identical effect. `--owner` is the
 identity the invocation acts as: it defaults the written `owner` on create and filters on list,
-and is left alone by verbs that already read it.
+and is left alone by verbs that already read it. `--mine` resolves against that same acting
+identity everywhere — never `[core].agent` while `--owner` says otherwise — so selection and the
+claim it feeds can never disagree about who is asking.
 
 ---
 
