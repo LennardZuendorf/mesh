@@ -172,3 +172,9 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** a fixture that encodes an absolute date silently couples the suite to the calendar. Stamp time-relative fixtures from `now` when the fixture is materialised, or assert the derived property rather than a count that ages. And treat an inherited "gates green" claim as a timestamp, not a fact — re-run the gates on the base commit before trusting them, so a pre-existing failure is not mistaken for one you introduced.
 **Tags:** testing, fixtures, time-dependence, handover, gates
 **Date:** 2026-09-08
+
+### A test can pin the bug it is supposed to catch
+**Pattern:** `the_indexed_path_defaults_to_the_config_threshold_not_the_engine_floor` asserted that the `indexed` branch applies `[search].threshold`'s nominal `0.65` when no threshold is configured. `tech.md` says the opposite in one line — "`[search].threshold` applies **only when explicitly set**" — and `mesh init` omits the key precisely so the tag and body tiers stay reachable (README §config). So every indexed hit scoring 0.4–0.65 was dropped at exit 0, on the config mesh itself writes, and the bug survived a 123-agent adversarial review because the test covering it was green and its name asserted the wrong behaviour as intended. The same sweep found a second instance of the shape: two `status` tests encoding a `stale_claims: 0` count no spec sentence promises.
+**Rule:** a green test is evidence about the assertion, not about the spec. When a test and the spec disagree the spec wins — so read a test's assertion against the spec sentence it claims to cover before trusting it, especially one whose *name* states a behaviour. Treat a test encoding a behaviour no spec line supports as a finding in its own right, and fix the test in the same commit as the code, or the next reviewer will read it as the contract.
+**Tags:** testing, spec-conformance, search, threshold, review, gates
+**Date:** 2026-09-08
