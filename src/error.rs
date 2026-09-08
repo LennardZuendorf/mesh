@@ -74,6 +74,16 @@ pub enum MeshError {
         inner: Box<MeshError>,
         candidates: Vec<String>,
     },
+    /// A wrapper naming what a failed multi-file verb **already wrote**, and how to repair it.
+    ///
+    /// Without it a half-applied write reports only why the second half failed, which reads
+    /// as "nothing happened" — the caller never learns that the first half committed.
+    /// Delegates code, kind and candidates to `inner`, so the exit status is unchanged.
+    #[error("{inner} ({detail})")]
+    Partial {
+        inner: Box<MeshError>,
+        detail: String,
+    },
 }
 
 impl MeshError {
@@ -103,10 +113,20 @@ impl MeshError {
         }
     }
 
+    /// Name what this failure already wrote, and how to repair it. The exit status is
+    /// unchanged: `code` and `kind` both read through to the wrapped error.
+    pub fn partial(self, detail: impl Into<String>) -> Self {
+        MeshError::Partial {
+            inner: Box::new(self),
+            detail: detail.into(),
+        }
+    }
+
     /// The candidates attached by [`MeshError::with_candidates`], if any.
     pub fn candidates(&self) -> &[String] {
         match self {
             MeshError::WithCandidates { candidates, .. } => candidates,
+            MeshError::Partial { inner, .. } => inner.candidates(),
             _ => &[],
         }
     }
@@ -114,7 +134,9 @@ impl MeshError {
     /// Peel the `candidates` wrapper.
     pub fn inner(&self) -> &MeshError {
         match self {
-            MeshError::WithCandidates { inner, .. } => inner.inner(),
+            MeshError::WithCandidates { inner, .. } | MeshError::Partial { inner, .. } => {
+                inner.inner()
+            }
             other => other,
         }
     }
@@ -136,7 +158,9 @@ impl MeshError {
             | MeshError::Empty(_) => 3,
             MeshError::ClaimConflict { .. } | MeshError::Lock(_) => 4,
             MeshError::Blocked { .. } => 5,
-            MeshError::WithCandidates { .. } => 1,
+            // Both wrappers are unwrapped by `inner()` above; these arms exist only for
+            // exhaustiveness.
+            MeshError::WithCandidates { .. } | MeshError::Partial { .. } => 1,
         }
     }
 
@@ -159,7 +183,7 @@ impl MeshError {
             MeshError::Blocked { .. } => "blocked",
             MeshError::Io(_) => "io_error",
             MeshError::Aborted => "error",
-            MeshError::WithCandidates { .. } => "error",
+            MeshError::WithCandidates { .. } | MeshError::Partial { .. } => "error",
         }
     }
 

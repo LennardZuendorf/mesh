@@ -213,6 +213,16 @@ pub fn add(cfg: &Config, src: &Path, o: NewAsset) -> Result<AddOutcome> {
         .map_err(|e| MeshError::Validation(format!("cannot read {}: {e}", src.display())))?;
     validate_owner(cfg, o.owner.as_deref())?;
 
+    // Resolve `--attach` BEFORE the ingest. Both checks are pure reads, and running them
+    // after the create lock had committed blob + sidecar meant a bad target exited 2 or 3
+    // with a message that reads as "nothing happened" — while a complete asset was on disk
+    // whose generated id appeared nowhere in the output. `asset gc` cannot recover it
+    // either: an unattached asset is consistent, so it is not an orphan.
+    if let Some(target) = &o.attach {
+        let space = target_space(target)?;
+        target_path(cfg, space, target)?;
+    }
+
     let filename = source_basename(src);
     let title = o
         .title
@@ -432,6 +442,7 @@ pub fn attach(cfg: &Config, id: &str, target: &str, section: Option<&str>) -> Re
 
     // Attaching twice must not duplicate the embed: the body is the agent's, not ours.
     let body = read_doc(&path).map(|d| d.body).unwrap_or_default();
+    let mut wrote_embed = false;
     if !body.contains(&block) {
         append_embed(
             cfg,
@@ -443,9 +454,32 @@ pub fn attach(cfg: &Config, id: &str, target: &str, section: Option<&str>) -> Re
                 ..AppendOpts::default()
             },
         )?;
+        wrote_embed = true;
     }
-    amend_target_related(cfg, space, target, id, true)?;
+    // Three separate transactions. A failure in a later one leaves an asymmetric edge that
+    // nothing detects, and the bare error reads as "nothing happened" — so each failure
+    // names what already committed and the repair. `attach` is idempotent, so re-running it
+    // heals every partial state below.
+    amend_target_related(cfg, space, target, id, true).map_err(|e| {
+        e.partial(link_repair(
+            wrote_embed.then_some("the embed is in the body"),
+            id,
+            target,
+        ))
+    })?;
     amend_sidecar_related(cfg, id, target, true)
+        .map_err(|e| e.partial(link_repair(Some("the target already links it"), id, target)))
+}
+
+/// The "what committed, and how to repair it" detail for a half-applied attach or detach.
+fn link_repair(already: Option<&str>, id: &str, target: &str) -> String {
+    let verb = "attach";
+    match already {
+        Some(what) => {
+            format!("{what}; re-run 'mesh asset {verb} {id} {target}' to repair")
+        }
+        None => format!("re-run 'mesh asset {verb} {id} {target}' to repair"),
+    }
 }
 
 /// Detach an asset from an entity: both `related` lists drop the link, and the body is left
@@ -455,7 +489,12 @@ pub fn detach(cfg: &Config, id: &str, target: &str) -> Result<AssetSidecar> {
     let space = target_space(target)?;
     target_path(cfg, space, target)?;
     amend_target_related(cfg, space, target, id, false)?;
-    amend_sidecar_related(cfg, id, target, false)
+    // Same asymmetry on the way out: the target has dropped the link, the sidecar has not.
+    amend_sidecar_related(cfg, id, target, false).map_err(|e| {
+        e.partial(format!(
+            "the target no longer links it; re-run 'mesh asset detach {id} {target}' to repair"
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------------------

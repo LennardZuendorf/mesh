@@ -1096,3 +1096,97 @@ fn a_terminal_no_op_reports_the_status_it_found() {
         serde_json::from_str(&ok(&f, &["--json", "task", "finish", &t])).expect("json object");
     assert_eq!(payload["status"], Json::String("cancelled".into()));
 }
+
+// ---------------------------------------------------------------------------------------
+// a failed verb does not commit half of itself in silence
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_refused_attach_target_leaves_no_asset_behind() {
+    let f = VaultFixture::new();
+    let blob = f.dir.path().join("f.txt");
+    std::fs::write(&blob, "hello\n").expect("write source");
+    let src = blob.to_string_lossy().to_string();
+
+    // The target checks ran *after* the create lock had committed blob + sidecar, so both
+    // of these exited with a message that reads as "nothing happened" while a complete
+    // asset sat on disk whose id was printed nowhere — and `asset gc` cannot see it,
+    // because an unattached asset is consistent, not an orphan.
+    for (target, code) in [("garbage", 2), ("n-NOPE", 3)] {
+        let (_, stderr, got) = run(&f, &["asset", "add", &src, "--attach", target]);
+        assert_eq!(got, code, "--attach {target}: {stderr}");
+        assert!(
+            ids(&ok(&f, &["asset", "list", "--json"])).is_empty(),
+            "--attach {target} wrote an asset the caller cannot address"
+        );
+        assert!(
+            !f.vault.join("assets").exists()
+                || std::fs::read_dir(f.vault.join("assets"))
+                    .expect("read assets")
+                    .flatten()
+                    .all(|e| e.file_name() == ".locks"),
+            "--attach {target} left a blob behind"
+        );
+    }
+
+    // A good target still attaches, and both sides of the link are written.
+    let note = ok(&f, &["--quiet", "note", "new", "Target", "--body", "b"]);
+    let asset = ok(&f, &["--quiet", "asset", "add", &src, "--attach", &note]);
+    let note_row: Json =
+        serde_json::from_str(&ok(&f, &["note", "get", &note, "--json"])).expect("json object");
+    let sidecar: Json =
+        serde_json::from_str(&ok(&f, &["asset", "get", &asset, "--json"])).expect("json object");
+    assert_eq!(note_row["related"], serde_json::json!([asset]));
+    assert_eq!(sidecar["related"], serde_json::json!([note]));
+}
+
+#[test]
+fn a_half_written_link_names_what_committed_and_the_repair() {
+    let f = VaultFixture::new();
+    let blob = f.dir.path().join("f.txt");
+    std::fs::write(&blob, "hello\n").expect("write source");
+    let src = blob.to_string_lossy().to_string();
+    let note = ok(&f, &["--quiet", "note", "new", "Target", "--body", "b"]);
+    let asset = ok(&f, &["--quiet", "asset", "add", &src]);
+
+    // Hold the asset's own lock with this live pid, so the sidecar half of the link fails
+    // after the target half has already committed. `attach` writes three files in three
+    // transactions; the bare lock error used to read as "nothing happened".
+    f.write(
+        &format!("assets/.locks/{asset}.lock"),
+        &std::process::id().to_string(),
+    );
+    // One conflicting run: the lock wait is a 15 s budget, so do not spend it twice.
+    let (_, stderr, code) = run(&f, &["--json", "asset", "attach", &asset, &note]);
+    assert_eq!(code, 4, "the exit status must stay lock_conflict: {stderr}");
+    let envelope: Json = serde_json::from_str(&stderr).expect("json envelope");
+    // The kind is unchanged, so a machine caller still routes on lock_conflict...
+    assert_eq!(envelope["kind"], Json::String("lock_conflict".into()));
+    let message = envelope["message"].as_str().unwrap_or_default();
+    // ...and the message now says what committed, and how to repair it.
+    assert!(
+        message.contains("the target already links it"),
+        "must name what committed: {message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "re-run 'mesh asset attach {asset} {note}' to repair"
+        )),
+        "must name the repair: {message}"
+    );
+
+    // The asymmetry the message describes is real...
+    std::fs::remove_file(f.vault.join(format!("assets/.locks/{asset}.lock"))).expect("unlock");
+    let note_row: Json =
+        serde_json::from_str(&ok(&f, &["note", "get", &note, "--json"])).expect("json object");
+    let sidecar: Json =
+        serde_json::from_str(&ok(&f, &["asset", "get", &asset, "--json"])).expect("json object");
+    assert_eq!(note_row["related"], serde_json::json!([asset]));
+    assert_eq!(sidecar["related"], serde_json::json!([]));
+
+    // ...and the repair it names actually heals it.
+    ok(&f, &["asset", "attach", &asset, &note]);
+    let sidecar: Json =
+        serde_json::from_str(&ok(&f, &["asset", "get", &asset, "--json"])).expect("json object");
+    assert_eq!(sidecar["related"], serde_json::json!([note]));
+}
