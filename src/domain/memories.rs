@@ -742,11 +742,34 @@ pub fn expired_ids(cfg: &Config) -> Result<Vec<String>> {
 }
 
 /// Hard-delete every expired memory. Returns the ids actually removed, in listing order.
+///
+/// `expired_ids` scans unlocked, so every id it yields is a claim about the past. `forget` is
+/// the repair path and never validates, so the sweep cannot borrow it: it re-resolves and
+/// re-reads under each entity's own lock and keeps only the memories that are *still* expired.
+/// A writer that clears or extends `expires` inside that window reported success, and a sweep
+/// that deleted the memory anyway would make that report a lie.
+///
+/// One memory that is locked, gone or unreadable is skipped rather than fatal. Aborting would
+/// discard the ids already removed, leaving the caller a list that does not match the disk.
 pub fn forget_expired(cfg: &Config) -> Result<Vec<String>> {
+    let root = cfg.root(Space::Memories)?.to_path_buf();
     let mut removed: Vec<String> = Vec::new();
     for id in expired_ids(cfg)? {
-        forget(cfg, &id)?;
-        removed.push(id);
+        let Ok(_guard) = hold(&entity_lock(&root, &id)?) else {
+            continue;
+        };
+        let Ok(path) = resolve(cfg, &id) else {
+            continue;
+        };
+        let still_expired = read_doc(&path)
+            .and_then(|doc| Memory::from_meta(&doc.meta))
+            .is_some_and(|memory| memory.is_expired(now_utc()));
+        if !still_expired {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed.push(id);
+        }
     }
     Ok(removed)
 }

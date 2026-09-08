@@ -28,6 +28,22 @@ fn require_name_slug(name: &str) -> Result<String> {
     Ok(slug)
 }
 
+/// Slugify `agent`; an identity that slugifies to empty is `invalid agent identity: '{agent}'`.
+///
+/// `slugify` keeps ASCII alphanumerics only, so an emoji, `...`, or any all-non-ASCII name —
+/// Japanese, Cyrillic, Chinese — slugifies to the empty string. `root.join("")` is a no-op, so
+/// an unchecked empty slug collapses the whole `<scratch>/<agent>/` layout: every such identity
+/// would share one file at `<scratch>/<name>.md` and one lock, silently overwriting each other.
+fn require_agent_slug(agent: &str) -> Result<String> {
+    let slug = slugify(agent);
+    if slug.is_empty() {
+        return Err(MeshError::validation(format!(
+            "invalid agent identity: '{agent}'"
+        )));
+    }
+    Ok(slug)
+}
+
 /// `<scratch-root>/<agent-slug>/<name-slug>.md`.
 fn scratch_path(root: &Path, agent_slug: &str, name_slug: &str) -> PathBuf {
     root.join(agent_slug).join(format!("{name_slug}.md"))
@@ -79,7 +95,7 @@ fn stamp_meta(existing: Option<&Meta>, name_slug: &str, agent_slug: &str, stamps
 pub fn set(cfg: &Config, agent: &str, name: &str, body: &str) -> Result<Scratch> {
     let root = cfg.root(Space::Scratch)?.to_path_buf();
     let name_slug = require_name_slug(name)?;
-    let agent_slug = slugify(agent);
+    let agent_slug = require_agent_slug(agent)?;
     validate_owner(cfg, Some(agent))?;
     let path = scratch_path(&root, &agent_slug, &name_slug);
     let _guard = hold(&lock_path(&root, &agent_slug, &name_slug))?;
@@ -109,7 +125,7 @@ pub fn set(cfg: &Config, agent: &str, name: &str, body: &str) -> Result<Scratch>
 pub fn append(cfg: &Config, agent: &str, name: &str, text: &str, o: AppendOpts) -> Result<Scratch> {
     let root = cfg.root(Space::Scratch)?.to_path_buf();
     let name_slug = require_name_slug(name)?;
-    let agent_slug = slugify(agent);
+    let agent_slug = require_agent_slug(agent)?;
     validate_owner(cfg, Some(agent))?;
     let path = scratch_path(&root, &agent_slug, &name_slug);
     let _guard = hold(&lock_path(&root, &agent_slug, &name_slug))?;
@@ -131,7 +147,7 @@ pub fn append(cfg: &Config, agent: &str, name: &str, text: &str, o: AppendOpts) 
 pub fn get(cfg: &Config, agent: &str, name: &str) -> Result<View<Scratch>> {
     let root = cfg.root(Space::Scratch)?.to_path_buf();
     let name_slug = require_name_slug(name)?;
-    let agent_slug = slugify(agent);
+    let agent_slug = require_agent_slug(agent)?;
     validate_owner(cfg, Some(agent))?;
     let path = scratch_path(&root, &agent_slug, &name_slug);
     let doc = read_doc(&path).ok_or_else(|| MeshError::ScratchNotFound(name.to_string()))?;
@@ -157,9 +173,14 @@ pub fn list(
     let scan_root = if all {
         root.clone()
     } else {
-        let agent_slug = agent.map(slugify).ok_or_else(|| {
-            MeshError::validation("no agent identity: set [core].agent or pass --owner")
-        })?;
+        let agent_slug = match agent {
+            Some(a) => require_agent_slug(a)?,
+            None => {
+                return Err(MeshError::validation(
+                    "no agent identity: set [core].agent or pass --owner",
+                ))
+            }
+        };
         root.join(agent_slug)
     };
     let recursive = all;
@@ -200,7 +221,7 @@ pub fn list(
 pub fn clear(cfg: &Config, agent: &str, name: &str) -> Result<String> {
     let root = cfg.root(Space::Scratch)?.to_path_buf();
     let name_slug = require_name_slug(name)?;
-    let agent_slug = slugify(agent);
+    let agent_slug = require_agent_slug(agent)?;
     validate_owner(cfg, Some(agent))?;
     let path = scratch_path(&root, &agent_slug, &name_slug);
     let _guard = hold(&lock_path(&root, &agent_slug, &name_slug))?;
@@ -220,12 +241,18 @@ pub fn summary(cfg: &Config) -> ScratchSummary {
     let mut files: u64 = 0;
     for path in iter_md(root, true, excl) {
         files += 1;
-        if let Some(agent) = path
-            .strip_prefix(root)
-            .ok()
-            .and_then(|rel| rel.components().next())
-            .and_then(|c| c.as_os_str().to_str())
-        {
+        // The agent is the first path component *of a `<agent>/<name>.md` pair*. A stray file
+        // directly in the root — an editor's, or one an older mesh wrote under an empty agent
+        // slug — has only one component, and counting it would report the note's own name as
+        // an agent.
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let mut parts = rel.components();
+        let (Some(first), true) = (parts.next(), parts.next().is_some()) else {
+            continue;
+        };
+        if let Some(agent) = first.as_os_str().to_str() {
             agents.insert(agent.to_string());
         }
     }

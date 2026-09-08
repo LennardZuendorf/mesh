@@ -421,6 +421,14 @@ pub fn reconcile_path(cfg: &Config, path: &Path) -> PathBuf {
     if !src.exists() {
         return own;
     }
+    // `dest` is the correct folder plus the source's own basename, which two files in different
+    // subfolders can share — `notes/Ideas.md` and `notes/logs/Ideas.md` both reconcile to the
+    // latter. `rename` is unconditional and would unlink the occupant, and the occupant is a
+    // different entity, so this lock does not exclude its writers either. Reconciliation moves
+    // a file; it never destroys one, so an occupied destination leaves the source in place.
+    if dest.exists() {
+        return own;
+    }
     if std::fs::rename(&src, &dest).is_err() {
         return own;
     }

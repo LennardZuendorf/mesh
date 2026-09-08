@@ -15,7 +15,8 @@ use crate::error::{MeshError, Result};
 use crate::fm::{read_doc, read_meta_only, write_doc, Doc, Meta, Row, Value, View};
 use crate::ids::{content_id, sha256_hex};
 use crate::model::asset::{
-    blob_extension, blob_name, media_type_for, AssetSidecar, AssetSummary, GcReport, ASSET_TYPE,
+    blob_extension, blob_name, media_type_for, owned_blob_id, AssetSidecar, AssetSummary, GcReport,
+    ASSET_TYPE,
 };
 use crate::model::common::{meta_str, meta_strings, optional_str, ts_value};
 use crate::model::{ordered, ASSET_FIELDS};
@@ -129,9 +130,16 @@ pub fn get(cfg: &Config, id: &str) -> Result<View<AssetSidecar>> {
 }
 
 /// The absolute path of an asset's blob. Exit 3 when either the sidecar or the blob is gone.
+///
+/// `blob` is frontmatter, so it only names this asset's blob when it passes the ownership
+/// test; otherwise the asset has no readable blob and this is exit 3, not a path to whatever
+/// file the key happened to name.
 pub fn blob_path(cfg: &Config, id: &str) -> Result<PathBuf> {
     let view = get(cfg, id)?;
     let root = root(cfg)?.to_path_buf();
+    if owned_blob_id(&view.item.blob) != Some(view.item.id.as_str()) {
+        return Err(asset_not_found(id));
+    }
     let path = safe_resolve(&cfg.spaces, &root.join(&view.item.blob))?;
     if !path.is_file() {
         return Err(asset_not_found(id));
@@ -500,11 +508,15 @@ pub fn remove(cfg: &Config, id: &str, force: bool) -> Result<String> {
     let asset_id = stem(&path)
         .map(str::to_string)
         .ok_or_else(|| asset_not_found(id))?;
+    let root = root(cfg)?.to_path_buf();
+    let _guard = hold(&entity_lock(&root, &asset_id)?)?;
+    // Inside the lock, not before it. `attach` records its half of the link under the
+    // *target's* lock and only then takes this one, so a guard that ran before the lock can
+    // miss an attach already in flight — and the CLI parks an operator's confirmation prompt
+    // in that same window. Re-checking here is what makes the refusal mean anything.
     if !force {
         check_removable(cfg, &asset_id)?;
     }
-    let root = root(cfg)?.to_path_buf();
-    let _guard = hold(&entity_lock(&root, &asset_id)?)?;
     let path = resolve(cfg, &asset_id)?;
     let blobs = blob_names_for(&root, &path, &asset_id);
     // Sidecar first: an unreferenced blob is sweepable, a sidecar pointing at nothing is not.
@@ -517,21 +529,34 @@ pub fn remove(cfg: &Config, id: &str, force: bool) -> Result<String> {
     Ok(asset_id)
 }
 
-/// The blob a sidecar points at, or — when the sidecar is corrupt — every sibling file that
-/// shares its stem. Removing a corrupt asset is the repair path, so it takes both.
+/// The name of `id`'s own blob, as the sidecar records it — `None` when the sidecar names
+/// something that is not this asset's blob.
+///
+/// `blob` is frontmatter, so an agent or an editor can point it anywhere. `owned_blob_id`
+/// accepts it only as a bare filename in the assets root whose stem is this very id, which
+/// rules out both `../notes/n-XXXX.md` and another asset's bytes.
+fn recorded_blob(sidecar: &Path, id: &str) -> Option<String> {
+    let name = read_meta_only(sidecar).and_then(|m| meta_str(&m, "blob").map(str::to_string))?;
+    (owned_blob_id(&name) == Some(id)).then_some(name)
+}
+
+/// The blob a sidecar points at, or — when the sidecar is corrupt or names a file that is not
+/// its blob — every sibling mesh wrote for this id. Removing a corrupt asset is the repair
+/// path, so it takes both.
 fn blob_names_for(root: &Path, sidecar: &Path, id: &str) -> Vec<String> {
-    if let Some(name) =
-        read_meta_only(sidecar).and_then(|m| meta_str(&m, "blob").map(str::to_string))
-    {
+    if let Some(name) = recorded_blob(sidecar, id) {
         return vec![name];
     }
     blob_entries(root)
         .into_iter()
-        .filter(|name| blob_stem(name) == id)
+        .filter(|name| owned_blob_id(name).is_some_and(|stem| stem == id))
         .collect()
 }
 
-/// Every non-Markdown file directly in the assets root, sorted: the blob candidates.
+/// Every file directly in the assets root that **mesh itself wrote as a blob**, sorted.
+///
+/// The ownership test is the filename, not the absence of a sidecar: with `assets = "."` the
+/// space is shared with the operator, and `gc --apply` unlinks from this list.
 fn blob_entries(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -542,21 +567,13 @@ fn blob_entries(root: &Path) -> Vec<String> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || name.ends_with(".md") {
+        if owned_blob_id(&name).is_none() {
             continue;
         }
         out.push(name);
     }
     out.sort();
     out
-}
-
-/// A blob filename's stem: everything before the last dot.
-fn blob_stem(name: &str) -> &str {
-    match name.rsplit_once('.') {
-        Some((stem, _)) if !stem.is_empty() => stem,
-        _ => name,
-    }
 }
 
 /// Report blobs with no sidecar and sidecars with no blob. `apply` deletes orphan blobs only
@@ -581,7 +598,7 @@ pub fn gc(cfg: &Config, apply: bool) -> Result<GcReport> {
 
     let orphan_blobs: Vec<String> = blob_entries(&root)
         .into_iter()
-        .filter(|name| !stems.iter().any(|s| s == blob_stem(name)))
+        .filter(|name| !owned_blob_id(name).is_some_and(|s| stems.iter().any(|k| k == s)))
         .collect();
 
     let mut orphan_sidecars: Vec<String> = Vec::new();
@@ -589,9 +606,9 @@ pub fn gc(cfg: &Config, apply: bool) -> Result<GcReport> {
         let Some(id) = stem(&path).map(str::to_string) else {
             continue;
         };
-        let blob = read_meta_only(&path).and_then(|m| meta_str(&m, "blob").map(str::to_string));
-        let present = blob
-            .as_ref()
+        // A sidecar pointing at some *other* file is a sidecar with no blob: the same
+        // ownership test the sweep deletes by, so the two halves cannot disagree.
+        let present = recorded_blob(&path, &id)
             .and_then(|name| safe_resolve(&cfg.spaces, &root.join(name)).ok())
             .is_some_and(|p| p.is_file());
         if !present {
@@ -941,7 +958,10 @@ mod tests {
         let v = vault();
         let asset = add_file(&v, "photo.png", b"bytes");
         let root = assets_root(&v);
-        std::fs::write(root.join("stray.bin"), b"junk").unwrap();
+        // An orphan is a blob *mesh wrote* whose sidecar is gone, so it is named like one.
+        // `stray.bin` next to it is the operator's own file and is never a candidate.
+        std::fs::write(root.join("a-STRY.bin"), b"junk").unwrap();
+        std::fs::write(root.join("stray.bin"), b"operator").unwrap();
         std::fs::write(
             root.join("a-GHOST.md"),
             "---\nid: a-GHOST\ntype: asset\ntitle: g\ntags: []\nowner: null\n\
@@ -952,14 +972,19 @@ mod tests {
         .unwrap();
 
         let report = gc(&v.cfg, false).unwrap();
-        assert_eq!(report.orphan_blobs, ["stray.bin"]);
+        assert_eq!(report.orphan_blobs, ["a-STRY.bin"]);
         assert_eq!(report.orphan_sidecars, ["a-GHOST"]);
         assert_eq!(report.removed, 0);
-        assert!(root.join("stray.bin").is_file());
+        assert!(root.join("a-STRY.bin").is_file());
 
         let applied = gc(&v.cfg, true).unwrap();
         assert_eq!(applied.removed, 1);
-        assert!(!root.join("stray.bin").exists());
+        assert!(!root.join("a-STRY.bin").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("stray.bin")).unwrap(),
+            "operator",
+            "gc swept a file mesh did not write"
+        );
         assert!(
             root.join("a-GHOST.md").is_file(),
             "sidecars are never swept"
@@ -972,10 +997,12 @@ mod tests {
         let v = vault();
         add_file(&v, "a.txt", b"12345");
         add_file(&v, "b.txt", b"123");
-        std::fs::write(assets_root(&v).join("stray.bin"), b"junk").unwrap();
+        std::fs::write(assets_root(&v).join("a-STRY.bin"), b"junk").unwrap();
+        std::fs::write(assets_root(&v).join("stray.bin"), b"operator").unwrap();
         let s = summary(&v.cfg);
         assert_eq!(s.count, 2);
         assert_eq!(s.bytes, 8);
+        // The operator's own `stray.bin` is not an orphan blob; `a-STRY.bin` is.
         assert_eq!(s.orphan_blobs, 1);
     }
 

@@ -559,3 +559,145 @@ fn concurrent_gc_never_sweeps_a_blob_whose_sidecar_is_mid_write() {
         "gc deleted a live blob: {report}"
     );
 }
+
+/// `race`, but the caller learns which argv produced which exit code.
+fn race_indexed(f: &VaultFixture, argvs: &[Vec<String>]) -> Vec<(usize, i32)> {
+    race(f, argvs).into_iter().enumerate().collect()
+}
+
+#[test]
+fn a_renewed_memory_survives_a_concurrent_expiry_sweep() {
+    // `forget --expired` scans the whole space for expired ids, then deletes them one at a
+    // time. The scan is the sweep's only look at `expires`; a memory renewed after it — under
+    // the very lock the delete then takes — is still unlinked. The renewal reported success,
+    // so the operator has no way to know the memory is gone.
+    let f = VaultFixture::new();
+    let mut ids: Vec<String> = Vec::new();
+    for n in 0..40 {
+        ids.push(ok(
+            &f,
+            &[
+                "--quiet",
+                "memory",
+                "new",
+                &format!("Expired memory {n}"),
+                "--body",
+                "payload",
+                "--expires",
+                "2020-01-01T00:00:00Z",
+            ],
+        ));
+    }
+
+    // Sweepers are interleaved, not appended: each starts while renewals are still in flight,
+    // which is the window between the sweep's scan and its unlink.
+    let mut argvs: Vec<Vec<String>> = Vec::new();
+    let mut renewals: Vec<(usize, String)> = Vec::new();
+    for (n, id) in ids.iter().enumerate() {
+        if n % 4 == 0 {
+            argvs.push(vec![
+                "memory".into(),
+                "forget".into(),
+                "--expired".into(),
+                "--force".into(),
+                "--quiet".into(),
+            ]);
+        }
+        renewals.push((argvs.len(), id.clone()));
+        argvs.push(vec![
+            "memory".into(),
+            "update".into(),
+            id.clone(),
+            "--expires".into(),
+            "3650d".into(),
+            "--quiet".into(),
+        ]);
+    }
+
+    let codes = race_indexed(&f, &argvs);
+    let files = f.files();
+    let mut lost: Vec<String> = Vec::new();
+    for (slot, id) in renewals {
+        let renewed = codes.iter().any(|(i, code)| *i == slot && *code == 0);
+        if !renewed {
+            // The sweep won the race outright and the renewal found nothing. Legitimate.
+            continue;
+        }
+        if !files.iter().any(|p| p.ends_with(&format!("{id}.md"))) {
+            lost.push(id);
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "the sweep deleted {} memories that had been renewed to a future expiry: {lost:?}",
+        lost.len()
+    );
+}
+
+#[test]
+fn a_concurrently_attached_asset_is_never_removed_unforced() {
+    // `remove` ran `references()` *before* it took the asset's lock and never re-checked
+    // inside it. `attach` records its half of the link under the *target's* lock and only
+    // then takes the asset's, so a reference landing in that window bypassed the --force
+    // refusal and left the note with a live embed pointing at bytes that no longer exist.
+    //
+    // The CLI cannot host this race: an unforced `asset remove` on a non-interactive path
+    // refuses outright, and the window it really parks in is the operator's confirmation
+    // prompt — seconds or minutes wide. So the contenders here are threads over the library,
+    // and the asset's own lock is the gate that makes the interleaving exact rather than
+    // lucky: `remove` blocks on it *after* its guard would have run, the reference lands
+    // while it waits, and only then is the lock released.
+    let f = VaultFixture::new();
+    let src = f.dir.path().join("payload.bin");
+    std::fs::write(&src, b"payload bytes").expect("write source");
+    let asset = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()]);
+    let note = ok(
+        &f,
+        &["--quiet", "note", "new", "Referrer", "--body", "body"],
+    );
+
+    let cfg = mesh::config::load_config(Some(&f.config), None).expect("load config");
+    let assets_root = cfg
+        .root(mesh::spaces::Space::Assets)
+        .expect("assets root")
+        .to_path_buf();
+    let gate = mesh::storage::entity_lock(&assets_root, &asset).expect("entity lock path");
+    let held = mesh::storage::acquire(&gate).expect("hold the asset lock");
+
+    let contender = {
+        let config = f.config.clone();
+        let id = asset.clone();
+        std::thread::spawn(move || {
+            let cfg = mesh::config::load_config(Some(&config), None).expect("load config");
+            mesh::domain::assets::remove(&cfg, &id, false)
+        })
+    };
+
+    // Let the contender reach the lock it now blocks on.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // What `attach` does to the target, under the target's own lock: record the reference.
+    // The asset half of the link is what blocks behind `held`, so only this half can land.
+    let rel = task_path(&f, &note);
+    let note_path = f.vault.join(&rel);
+    let text = f.read(&rel);
+    let patched = text.replacen("related: []", &format!("related:\n  - {asset}"), 1);
+    assert_ne!(
+        patched, text,
+        "the note fixture must carry an empty related"
+    );
+    std::fs::write(&note_path, &patched).expect("record the reference");
+
+    drop(held);
+    let outcome = contender.join().expect("contender thread");
+
+    let sidecar_gone = !f
+        .files()
+        .into_iter()
+        .any(|p| p.ends_with(&format!("{asset}.md")));
+    assert!(
+        outcome.is_err() && !sidecar_gone,
+        "unforced remove deleted an asset the note references (outcome={outcome:?}, \
+         sidecar_gone={sidecar_gone})"
+    );
+}

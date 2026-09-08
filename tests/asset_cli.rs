@@ -1189,7 +1189,11 @@ fn remove_on_a_missing_id_is_exit_three() {
 fn gc_reports_orphan_blobs_and_orphan_sidecars() {
     let f = VaultFixture::new();
     let id = add_fixture(&f, "pixel.png");
-    f.write("assets/stray.bin", "junk");
+    // An orphan blob is one mesh itself wrote, so it carries an asset id. `stray.bin` beside
+    // it is the operator's own file — with `assets = "."` the space is shared — and the sweep
+    // never claims it.
+    f.write("assets/a-STRY.bin", "junk");
+    f.write("assets/stray.bin", "operator");
     f.write(
         "assets/a-GHOST.md",
         "---\nid: a-GHOST\ntype: asset\ntitle: g\ntags: []\nowner: null\n\
@@ -1201,9 +1205,10 @@ fn gc_reports_orphan_blobs_and_orphan_sidecars() {
     assert!(out.status.success());
     assert_eq!(
         stdout_of(&out),
-        "orphan_blobs: stray.bin\norphan_sidecars: a-GHOST\nremoved: 0\n"
+        "orphan_blobs: a-STRY.bin\norphan_sidecars: a-GHOST\nremoved: 0\n"
     );
     // Read-only: nothing moved.
+    assert!(f.files().contains(&"assets/a-STRY.bin".to_string()));
     assert!(f.files().contains(&"assets/stray.bin".to_string()));
     assert!(f.files().contains(&format!("assets/{id}.png")));
 }
@@ -1212,7 +1217,8 @@ fn gc_reports_orphan_blobs_and_orphan_sidecars() {
 fn gc_json_is_orphan_blobs_orphan_sidecars_removed() {
     let f = VaultFixture::new();
     add_fixture(&f, "pixel.png");
-    f.write("assets/stray.bin", "junk");
+    f.write("assets/a-STRY.bin", "junk");
+    f.write("assets/stray.bin", "operator");
     let payload = json_stdout(
         &f.cmd()
             .args(["asset", "gc", "--json"])
@@ -1223,7 +1229,7 @@ fn gc_json_is_orphan_blobs_orphan_sidecars_removed() {
         keys(&payload),
         ["orphan_blobs", "orphan_sidecars", "removed"]
     );
-    assert_eq!(payload["orphan_blobs"], Json::from(vec!["stray.bin"]));
+    assert_eq!(payload["orphan_blobs"], Json::from(vec!["a-STRY.bin"]));
     assert_eq!(payload["orphan_sidecars"], Json::from(Vec::<String>::new()));
     assert_eq!(payload["removed"], Json::from(0));
 }
@@ -1232,7 +1238,8 @@ fn gc_json_is_orphan_blobs_orphan_sidecars_removed() {
 fn gc_apply_removes_orphan_blobs_only() {
     let f = VaultFixture::new();
     let id = add_fixture(&f, "pixel.png");
-    f.write("assets/stray.bin", "junk");
+    f.write("assets/a-STRY.bin", "junk");
+    f.write("assets/stray.bin", "operator");
     f.write(
         "assets/a-GHOST.md",
         "---\nid: a-GHOST\ntype: asset\ntitle: g\ntags: []\nowner: null\n\
@@ -1248,7 +1255,12 @@ fn gc_apply_removes_orphan_blobs_only() {
     );
     assert_eq!(payload["removed"], Json::from(1));
     let files = f.files();
-    assert!(!files.contains(&"assets/stray.bin".to_string()));
+    assert!(!files.contains(&"assets/a-STRY.bin".to_string()));
+    assert_eq!(
+        f.read("assets/stray.bin"),
+        "operator",
+        "gc swept a file mesh did not write"
+    );
     assert!(
         files.contains(&"assets/a-GHOST.md".to_string()),
         "sidecars stay"

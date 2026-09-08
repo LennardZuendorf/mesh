@@ -117,6 +117,35 @@ pub fn blob_name(id: &str, ext: Option<&str>) -> String {
     }
 }
 
+/// Whether `stem` is an asset id mesh itself would mint: `a-` over a Crockford id body.
+pub fn is_asset_id(stem: &str) -> bool {
+    stem.starts_with(ASSET_ID_PREFIX) && crate::text::is_id_form(stem)
+}
+
+/// The asset id a filename in the assets root belongs to — `None` when mesh did not write it.
+///
+/// This is the **ownership test**, and it is the inverse of [`blob_name`]: a file is mesh's own
+/// blob exactly when its name is one `blob_name` could have produced — an asset id, plus at
+/// most the lowercase extension [`blob_extension`] keeps. Two callers need it and neither may
+/// guess:
+///
+/// * `assets = "."` puts the assets space in a folder the operator also uses, so `asset gc`
+///   sees `family-photo.jpg` and `mesh.toml` next to its blobs. "No sidecar names it" is not
+///   ownership; those files are not mesh's to unlink.
+/// * A sidecar's `blob` key is agent- and editor-writable frontmatter. Used as a bare path it
+///   names any file in the sandbox — another space's note, or another asset's bytes. It names
+///   a blob only when it passes this test *for that asset's own id*.
+pub fn owned_blob_id(name: &str) -> Option<&str> {
+    let stem = match name.rsplit_once('.') {
+        // Mesh writes the extension lowercased, so a raw-`ext` compare rejects `a-XXXX.PNG`
+        // as well as every shape `blob_extension` refuses.
+        Some((stem, ext)) if blob_extension(name).as_deref() == Some(ext) => stem,
+        Some(_) => return None,
+        None => name,
+    };
+    is_asset_id(stem).then_some(stem)
+}
+
 /// A validated asset sidecar.
 #[derive(Clone, Debug)]
 pub struct AssetSidecar {

@@ -275,3 +275,268 @@ fn a_rewrite_restores_declaration_key_order_and_keeps_unknown_keys() {
         "unknown keys must land last: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// a shared space belongs to the operator: mesh deletes only the files it wrote
+// ---------------------------------------------------------------------------------------
+
+/// A config whose assets space is the vault root — the layout `config.example.toml` documents.
+fn shared_assets() -> String {
+    "[core]\nvault_path = \"{VAULT}\"\nagent = \"test-agent\"\n\n\
+     [tasks]\ncollections = []\n\n[spaces]\nassets = \".\"\n"
+        .to_string()
+}
+
+#[test]
+fn gc_never_sweeps_a_file_mesh_did_not_write() {
+    // With `assets = "."` the assets space is a folder the operator also keeps files in.
+    // "No sidecar names it" is not an ownership test, and `gc --apply` unlinks hard, with no
+    // trash and no recovery.
+    let f = VaultFixture::with(&shared_assets());
+    let operator_files = [
+        ("important-spreadsheet.csv", "col1,col2\n1,2\n"),
+        ("family-photo.jpg", "\u{fffd}JPEGDATA"),
+        ("notes.txt", "do not delete\n"),
+        (
+            "a-not-an-id.bin",
+            "an operator file that merely starts with a-\n",
+        ),
+    ];
+    for (name, body) in operator_files {
+        f.write(name, body);
+    }
+    // One real asset, so the sweep has something of its own to look at.
+    let src = f.dir.path().join("payload.png");
+    std::fs::write(&src, b"PNGDATA").expect("write source");
+    let asset = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()])
+        .trim()
+        .to_string();
+
+    let report = ok(&f, &["--json", "asset", "gc", "--apply"]);
+    let payload: Json = serde_json::from_str(&report).expect("json");
+    assert_eq!(payload["orphan_blobs"], serde_json::json!([]), "{report}");
+    assert_eq!(payload["removed"], serde_json::json!(0), "{report}");
+
+    for (name, body) in operator_files {
+        assert_eq!(f.read(name), body, "gc deleted the operator's {name}");
+    }
+    // The asset mesh does own still round-trips.
+    assert!(!ok(&f, &["--quiet", "asset", "path", &asset])
+        .trim()
+        .is_empty());
+}
+
+#[test]
+fn gc_still_sweeps_a_blob_mesh_wrote_whose_sidecar_is_gone() {
+    // The ownership test must not turn `gc --apply` into a no-op: a blob mesh itself wrote,
+    // whose sidecar the operator deleted by hand, is exactly what the sweep is for.
+    let f = VaultFixture::new();
+    let src = f.dir.path().join("payload.png");
+    std::fs::write(&src, b"PNGDATA").expect("write source");
+    let asset = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()])
+        .trim()
+        .to_string();
+    std::fs::remove_file(f.vault.join(format!("assets/{asset}.md"))).expect("drop the sidecar");
+
+    let report = ok(&f, &["--json", "asset", "gc", "--apply"]);
+    let payload: Json = serde_json::from_str(&report).expect("json");
+    assert_eq!(payload["removed"], serde_json::json!(1), "{report}");
+    assert!(
+        !f.vault.join(format!("assets/{asset}.png")).exists(),
+        "the orphan blob survived"
+    );
+}
+
+#[test]
+fn remove_deletes_this_assets_own_blob_and_nothing_else() {
+    // `blob` is frontmatter: agent- and editor-writable. Used as a bare path it names any
+    // file in the sandbox, and `safe_resolve` only proves the file is inside the union of the
+    // space roots — not that it is this asset's blob.
+    let f = VaultFixture::new();
+    let src = f.dir.path().join("payload.bin");
+    std::fs::write(&src, b"asset bytes").expect("write source");
+    let asset = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()])
+        .trim()
+        .to_string();
+    let victim = ok(
+        &f,
+        &["--quiet", "note", "new", "Victim", "--body", "precious"],
+    )
+    .trim()
+    .to_string();
+
+    let sidecar = format!("assets/{asset}.md");
+    let text = f.read(&sidecar);
+    f.write(
+        &sidecar,
+        &text.replace(
+            &format!("blob: {asset}.bin"),
+            &format!("blob: ../notes/{victim}.md"),
+        ),
+    );
+    assert!(f.read(&sidecar).contains("blob: ../notes/"), "fixture");
+
+    ok(&f, &["--quiet", "asset", "remove", &asset, "--force"]);
+
+    let victim_text = f.read(&format!("notes/{victim}.md"));
+    assert!(
+        victim_text.contains("precious"),
+        "remove deleted a note in another space: {victim_text}"
+    );
+    assert!(
+        !f.vault.join(format!("assets/{asset}.bin")).exists(),
+        "the asset's real blob was left orphaned"
+    );
+}
+
+#[test]
+fn remove_never_deletes_another_assets_blob() {
+    // The in-space variant: `blob` pointing at a sibling asset's bytes would destroy them
+    // while that sibling's sidecar still records a sha256 for content mesh no longer holds.
+    let f = VaultFixture::new();
+    let mut ids: Vec<String> = Vec::new();
+    for (n, body) in [(0, "first bytes"), (1, "second bytes")] {
+        let src = f.dir.path().join(format!("p{n}.bin"));
+        std::fs::write(&src, body).expect("write source");
+        ids.push(
+            ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()])
+                .trim()
+                .to_string(),
+        );
+    }
+    let (doomed, bystander) = (&ids[0], &ids[1]);
+    let sidecar = format!("assets/{doomed}.md");
+    let text = f.read(&sidecar);
+    f.write(
+        &sidecar,
+        &text.replace(
+            &format!("blob: {doomed}.bin"),
+            &format!("blob: {bystander}.bin"),
+        ),
+    );
+
+    ok(&f, &["--quiet", "asset", "remove", doomed, "--force"]);
+
+    assert_eq!(
+        f.read(&format!("assets/{bystander}.bin")),
+        "second bytes",
+        "remove destroyed a bystander asset's bytes"
+    );
+    let report = ok(&f, &["--json", "asset", "gc"]);
+    let payload: Json = serde_json::from_str(&report).expect("json");
+    assert_eq!(
+        payload["orphan_sidecars"],
+        serde_json::json!([]),
+        "the bystander was left as a sidecar with no blob: {report}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// reconciliation moves a file; it never destroys one
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn reconciliation_never_renames_over_an_occupied_destination() {
+    // The destination is the correct folder plus the *source's own basename*, which two files
+    // in different subfolders can share. `rename` is unconditional, so one sweep unlinked the
+    // occupant — a different entity, whose writers this lock never excluded either.
+    let f = VaultFixture::new();
+    std::fs::create_dir_all(f.vault.join("notes/logs")).expect("logs dir");
+    f.write(
+        "notes/logs/Ideas.md",
+        "---\nid: n-VICT\ntype: log\ntitle: Victim log\n---\n\nVICTIM CONTENT\n",
+    );
+    f.write(
+        "notes/Ideas.md",
+        "---\nid: n-INTR\ntype: log\ntitle: Intruder log\n---\n\nINTRUDER CONTENT\n",
+    );
+
+    ok(&f, &["watch", "--once", "--no-index"]);
+
+    assert!(
+        f.read("notes/logs/Ideas.md").contains("VICTIM CONTENT"),
+        "reconciliation overwrote the occupant"
+    );
+    assert!(
+        f.read("notes/Ideas.md").contains("INTRUDER CONTENT"),
+        "the source must stay put when its destination is taken"
+    );
+}
+
+#[test]
+fn reconciliation_still_files_a_misplaced_note() {
+    // The occupied-destination guard must not stop reconciliation doing its job.
+    let f = VaultFixture::new();
+    std::fs::create_dir_all(f.vault.join("notes")).expect("notes dir");
+    f.write(
+        "notes/Stray.md",
+        "---\nid: n-STRY\ntype: log\ntitle: Stray log\n---\n\nSTRAY CONTENT\n",
+    );
+
+    ok(&f, &["watch", "--once", "--no-index"]);
+
+    assert!(
+        f.read("notes/logs/Stray.md").contains("STRAY CONTENT"),
+        "a misfiled note was not reconciled"
+    );
+    assert!(
+        !f.vault.join("notes/Stray.md").exists(),
+        "the source stayed"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// an agent identity is an address component, never an empty one
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn an_identity_that_slugifies_to_empty_is_refused() {
+    // `slugify` keeps ASCII alphanumerics only, so an emoji, "..." or any all-non-ASCII name
+    // slugifies to "". `root.join("")` is a no-op, so every such identity shared one file at
+    // `<scratch>/<name>.md` and one lock — silently overwriting each other's state.
+    let f = VaultFixture::with(
+        "[core]\nvault_path = \"{VAULT}\"\nagent = \"test-agent\"\n\n[tasks]\ncollections = []\n",
+    );
+    for identity in [
+        "\u{3051}\u{3093}\u{304d}\u{3087}",
+        "\u{1f916}\u{1f916}",
+        "...",
+        "---",
+    ] {
+        let (_, stderr, code) = run(
+            &f,
+            &[
+                "scratch", "set", "plan", "--agent", identity, "--body", "state",
+            ],
+        );
+        assert_eq!(code, 2, "identity {identity:?} was accepted");
+        assert_eq!(stderr, format!("invalid agent identity: '{identity}'"));
+    }
+    assert!(
+        !f.vault.join("scratch/plan.md").exists(),
+        "a refused identity still wrote to the namespace root"
+    );
+}
+
+#[test]
+fn distinct_identities_never_share_one_scratch_file() {
+    let f = VaultFixture::new();
+    ok(
+        &f,
+        &[
+            "--quiet", "scratch", "set", "plan", "--agent", "alpha", "--body", "ALPHA",
+        ],
+    );
+    ok(
+        &f,
+        &[
+            "--quiet", "scratch", "set", "plan", "--agent", "beta", "--body", "BETA",
+        ],
+    );
+    assert!(f.read("scratch/alpha/plan.md").contains("ALPHA"));
+    assert!(f.read("scratch/beta/plan.md").contains("BETA"));
+    assert!(
+        !f.vault.join("scratch/plan.md").exists(),
+        "a scratch file landed in the namespace root"
+    );
+}
