@@ -27,15 +27,9 @@ fn default_vault_path() -> PathBuf {
         .join("vault")
 }
 
-/// Trimmed CSV, empties dropped.
+/// Trimmed CSV, empties dropped, duplicates dropped — the one CSV split every flag uses.
 fn parse_csv(value: Option<&str>) -> Vec<String> {
-    value
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect()
+    crate::domain::select::parse_csv(value.unwrap_or(""))
 }
 
 // --------------------------------------------------------------------------------------------
@@ -457,15 +451,78 @@ fn lookup(value: &Json, key: &str) -> Option<Json> {
     Some(current.clone())
 }
 
-/// Parse a `config set` value: a TOML fragment when it parses as one, else a plain string.
-fn parse_set_value(raw: &str) -> toml_edit::Value {
-    let fragment = format!("x = {raw}");
-    if let Ok(doc) = fragment.parse::<toml_edit::DocumentMut>() {
-        if let Some(found) = doc.get("x").and_then(toml_edit::Item::as_value) {
-            return found.clone();
-        }
+/// `raw` read as a TOML fragment, when it is one.
+fn toml_fragment(raw: &str) -> Option<toml_edit::Value> {
+    let doc = format!("x = {raw}")
+        .parse::<toml_edit::DocumentMut>()
+        .ok()?;
+    doc.get("x").and_then(toml_edit::Item::as_value).cloned()
+}
+
+/// The truthy and falsy spellings `config set` accepts for a boolean key.
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
     }
-    toml_edit::Value::from(raw)
+}
+
+/// A TOML *string* fragment unwrapped, else the raw argument stored verbatim.
+fn quoted_or_raw(raw: &str) -> toml_edit::Value {
+    toml_fragment(raw)
+        .filter(toml_edit::Value::is_str)
+        .unwrap_or_else(|| toml_edit::Value::from(raw))
+}
+
+fn wrong_type(key: &str, want: &str, raw: &str) -> MeshError {
+    MeshError::Validation(format!("config set {key}: expected {want}, got '{raw}'"))
+}
+
+/// Parse a `config set` value **as the type its reader accepts**.
+///
+/// The kind comes from [`config::value_kind`], beside the readers themselves, so the writer
+/// can never emit a TOML type `load_config` then discards — which used to exit 0 while the
+/// setting stayed off.
+fn parse_set_value(key: &str, kind: config::ValueKind, raw: &str) -> Result<toml_edit::Value> {
+    use config::ValueKind;
+    match kind {
+        // A quoted TOML string unwraps; everything else is stored verbatim, so an agent
+        // named `true` or `0x1F` stays a string instead of becoming a bool or an integer.
+        ValueKind::Str => Ok(quoted_or_raw(raw)),
+        ValueKind::Bool => parse_bool(raw)
+            .map(toml_edit::Value::from)
+            .ok_or_else(|| wrong_type(key, "a boolean (true/false)", raw)),
+        ValueKind::Float => raw
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite())
+            .map(toml_edit::Value::from)
+            .ok_or_else(|| wrong_type(key, "a finite number", raw)),
+        ValueKind::Strings => {
+            // A TOML array wins when it is one; otherwise the CSV every other flag speaks.
+            if let Some(found) = toml_fragment(raw) {
+                if let Some(array) = found.as_array() {
+                    if array.iter().all(toml_edit::Value::is_str) {
+                        return Ok(found.clone());
+                    }
+                    return Err(wrong_type(key, "an array of strings", raw));
+                }
+            }
+            let mut array = toml_edit::Array::new();
+            for item in parse_csv(Some(raw)) {
+                array.push(item);
+            }
+            Ok(toml_edit::Value::Array(array))
+        }
+        // `false` disables the space; `true` means the default folder; anything else is a path.
+        ValueKind::SpacePath => match raw.trim() {
+            "false" => Ok(toml_edit::Value::from(false)),
+            "true" => Ok(toml_edit::Value::from(true)),
+            other => Ok(quoted_or_raw(other)),
+        },
+    }
 }
 
 /// `mesh config path|show|get|set`.
@@ -511,11 +568,18 @@ fn set_key(ctx: &mut Ctx, cfg_path: &Path, key: &str, value: &str) -> Result<()>
             "config set expects a dotted key like core.agent, got '{key}'"
         )));
     };
+    // A key no reader consumes is a silent no-op, so it is an error, exactly as `config get`
+    // treats one.
+    let Some(kind) = config::value_kind(key) else {
+        return Err(MeshError::Validation(format!(
+            "unknown config key: '{key}'"
+        )));
+    };
     let text = std::fs::read_to_string(cfg_path)?;
     let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| {
         MeshError::Validation(format!("invalid config at {}: {e}", cfg_path.display()))
     })?;
-    let parsed = parse_set_value(value);
+    let parsed = parse_set_value(key, kind, value)?;
     let rendered = parsed.to_string().trim().to_string();
     let entry = doc
         .entry(table)
@@ -785,14 +849,116 @@ mod tests {
     }
 
     #[test]
-    fn set_values_parse_as_toml_when_they_can() {
-        assert_eq!(parse_set_value("true").as_bool(), Some(true));
-        assert_eq!(parse_set_value("7").as_integer(), Some(7));
-        assert!(parse_set_value("[\"a\", \"b\"]").as_array().is_some());
-        assert_eq!(parse_set_value("bob").as_str(), Some("bob"));
-        assert_eq!(parse_set_value("\"quoted\"").as_str(), Some("quoted"));
-        // A bare path is not TOML, so it stays a string.
-        assert_eq!(parse_set_value("/tmp/vault").as_str(), Some("/tmp/vault"));
+    fn set_values_parse_as_the_type_their_reader_accepts() {
+        use crate::config::ValueKind;
+        let parse = parse_set_value;
+
+        // A string key never re-parses as another TOML type: these all used to become a
+        // bool / an integer / an array that `table_str` then dropped on the floor.
+        for raw in ["true", "0", "7", "bob", "0x1F", "[1]"] {
+            assert_eq!(
+                parse("core.agent", ValueKind::Str, raw).unwrap().as_str(),
+                Some(raw),
+                "core.agent = {raw}"
+            );
+        }
+        // A quoted TOML string still unwraps, and a bare path stays a path.
+        assert_eq!(
+            parse("core.agent", ValueKind::Str, "\"quoted\"")
+                .unwrap()
+                .as_str(),
+            Some("quoted")
+        );
+        assert_eq!(
+            parse("core.vault_path", ValueKind::Str, "/tmp/vault")
+                .unwrap()
+                .as_str(),
+            Some("/tmp/vault")
+        );
+
+        // Booleans take every spelling an operator types, and nothing else.
+        for (raw, want) in [
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            ("on", true),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+            ("off", false),
+        ] {
+            assert_eq!(
+                parse("tasks.strict", ValueKind::Bool, raw)
+                    .unwrap()
+                    .as_bool(),
+                Some(want),
+                "tasks.strict = {raw}"
+            );
+        }
+        let err = parse("tasks.strict", ValueKind::Bool, "maybe").unwrap_err();
+        assert_eq!(err.code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "config set tasks.strict: expected a boolean (true/false), got 'maybe'"
+        );
+
+        // Floats widen an integer and refuse a non-finite score floor.
+        assert_eq!(
+            parse("search.threshold", ValueKind::Float, "0.4")
+                .unwrap()
+                .as_float(),
+            Some(0.4)
+        );
+        assert_eq!(
+            parse("search.threshold", ValueKind::Float, "1")
+                .unwrap()
+                .as_float(),
+            Some(1.0)
+        );
+        for raw in ["nan", "inf", "high"] {
+            assert_eq!(
+                parse("search.threshold", ValueKind::Float, raw)
+                    .unwrap_err()
+                    .code(),
+                2,
+                "search.threshold = {raw}"
+            );
+        }
+
+        // A roster takes the CSV `mesh init --collections` documents, and a TOML array.
+        let strings = |raw: &str| -> Vec<String> {
+            parse("tasks.collections", ValueKind::Strings, raw)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(strings("alice,bob"), ["alice", "bob"]);
+        assert_eq!(strings(" alice , bob ,, alice "), ["alice", "bob"]);
+        assert_eq!(strings("[\"a\", \"b\"]"), ["a", "b"]);
+        assert!(strings("").is_empty());
+        assert_eq!(
+            parse("tasks.collections", ValueKind::Strings, "[1, 2]")
+                .unwrap_err()
+                .code(),
+            2
+        );
+
+        // A space takes a path or `false`; `true` means the default folder.
+        assert_eq!(
+            parse("spaces.notes", ValueKind::SpacePath, "false")
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            parse("spaces.notes", ValueKind::SpacePath, ".")
+                .unwrap()
+                .as_str(),
+            Some(".")
+        );
     }
 
     #[test]

@@ -540,3 +540,287 @@ fn distinct_identities_never_share_one_scratch_file() {
         "a scratch file landed in the namespace root"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// `--owner` is the acting identity everywhere, not only where it filters
+// ---------------------------------------------------------------------------------------
+
+/// Ids of the rows in a JSON array.
+fn ids(payload: &str) -> Vec<String> {
+    serde_json::from_str::<Json>(payload)
+        .expect("json array")
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Json::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn the_global_owner_is_the_identity_mine_resolves_in_every_space() {
+    let f = VaultFixture::new();
+    ok(&f, &["task", "new", "mine-task", "--owner", "test-agent"]);
+    let bob_task = ok(&f, &["--quiet", "--owner", "bob", "task", "new", "bobs"]);
+    let bob_note = ok(
+        &f,
+        &[
+            "--quiet", "--owner", "bob", "note", "new", "bobs", "--body", "b",
+        ],
+    );
+
+    // memory list was already right; task list and recent-activity read `[core].agent`
+    // and answered empty for anyone but the configured agent.
+    assert_eq!(
+        ids(&ok(
+            &f,
+            &["--owner", "bob", "--mine", "task", "list", "--json"]
+        )),
+        std::slice::from_ref(&bob_task),
+        "task list --mine must follow --owner"
+    );
+    let seen = ids(&ok(
+        &f,
+        &["--owner", "bob", "--mine", "recent-activity", "--json"],
+    ));
+    assert!(
+        seen.contains(&bob_task) && seen.contains(&bob_note),
+        "recent-activity --mine must follow --owner, got {seen:?}"
+    );
+
+    // And the configured agent still sees only its own row.
+    assert_eq!(
+        ids(&ok(&f, &["--mine", "task", "list", "--json"])).len(),
+        1,
+        "[core].agent stays the default identity"
+    );
+}
+
+#[test]
+fn task_new_records_the_global_owner_like_every_other_space() {
+    let f = VaultFixture::new();
+    // `mesh --owner bob X new` and `mesh X new --owner bob` are the same invocation.
+    for space in ["task", "note", "memory"] {
+        let pre = ok(
+            &f,
+            &[
+                "--quiet", "--owner", "bob", space, "new", "pre", "--body", "b",
+            ],
+        );
+        let post = ok(
+            &f,
+            &[
+                "--quiet", space, "new", "post", "--owner", "bob", "--body", "b",
+            ],
+        );
+        for id in [&pre, &post] {
+            let row: Json =
+                serde_json::from_str(&ok(&f, &[space, "get", id, "--json"])).expect("json object");
+            assert_eq!(
+                row["owner"],
+                Json::String("bob".into()),
+                "{space} {id}: flag placement changed the recorded owner"
+            );
+        }
+    }
+}
+
+#[test]
+fn task_next_claims_for_the_same_identity_it_selected_for() {
+    let f = VaultFixture::new();
+    let alice = ok(&f, &["--quiet", "task", "new", "alice work"]);
+    ok(&f, &["--owner", "bob", "task", "new", "bob work"]);
+
+    // Selection read `[core].agent` while the claim wrote `--owner`, so bob was handed
+    // alice's task with his own name in `claimed_by`.
+    let picked: Json = serde_json::from_str(&ok(
+        &f,
+        &[
+            "--owner", "bob", "task", "next", "--mine", "--claim", "--json",
+        ],
+    ))
+    .expect("json object");
+    assert_eq!(picked["owner"], Json::String("bob".into()));
+    assert_eq!(picked["claimed_by"], Json::String("bob".into()));
+    assert_ne!(
+        picked["id"],
+        Json::String(alice),
+        "bob must never be handed alice's task"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// `config set` writes the TOML type the config reader accepts
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn config_set_writes_a_value_the_reader_then_honours() {
+    let f = VaultFixture::new();
+    // Each of these used to land as an integer, a boolean or a bare string that
+    // `load_config` dropped: `config set` exited 0 and the setting never took effect.
+    for (key, value, want) in [
+        ("tasks.strict", "1", serde_json::json!(true)),
+        ("search.hybrid", "0", serde_json::json!(false)),
+        ("core.agent", "true", serde_json::json!("true")),
+        (
+            "tasks.collections",
+            "alice,bob",
+            serde_json::json!(["alice", "bob"]),
+        ),
+    ] {
+        ok(&f, &["config", "set", key, value]);
+        let shown: Json =
+            serde_json::from_str(&ok(&f, &["--json", "config", "show"])).expect("json object");
+        let (table, leaf) = key.split_once('.').expect("dotted key");
+        assert_eq!(shown[table][leaf], want, "config set {key} {value}");
+    }
+
+    // The roster the operator just typed is enforced on the next write.
+    let (_, stderr, code) = run(&f, &["task", "new", "t", "--owner", "mallory"]);
+    assert_eq!(code, 2);
+    assert_eq!(stderr, "unknown owner: 'mallory'");
+}
+
+#[test]
+fn config_set_refuses_a_value_its_reader_cannot_use() {
+    let f = VaultFixture::new();
+    for (key, value, want) in [
+        (
+            "tasks.strict",
+            "maybe",
+            "config set tasks.strict: expected a boolean (true/false), got 'maybe'",
+        ),
+        (
+            "search.threshold",
+            "nan",
+            "config set search.threshold: expected a finite number, got 'nan'",
+        ),
+        (
+            "tasks.collections",
+            "[1, 2]",
+            "config set tasks.collections: expected an array of strings, got '[1, 2]'",
+        ),
+        ("core.nope", "x", "unknown config key: 'core.nope'"),
+    ] {
+        let (_, stderr, code) = run(&f, &["config", "set", key, value]);
+        assert_eq!(code, 2, "config set {key} {value}");
+        assert_eq!(stderr, want, "config set {key} {value}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// a section heading the writer emits is one the reader can find again
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn two_appends_to_one_section_share_one_heading() {
+    let f = VaultFixture::new();
+    let id = ok(&f, &["--quiet", "note", "new", "sec", "--body", "start"]);
+    // The writer built `## {section}` untrimmed while the reader matched on `line.trim()`,
+    // so a padded name never matched the heading it had just written.
+    for name in ["Outcome ", " Outcome", "Outcome\n", "Outcome"] {
+        ok(&f, &["note", "append", &id, "x", "--section", name]);
+    }
+    let body = ok(&f, &["note", "get", &id, "--full"]);
+    assert_eq!(
+        body.lines().filter(|l| l.trim() == "## Outcome").count(),
+        1,
+        "one section, four appends:\n{body}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// nothing is written that the walk would then refuse to read
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_write_past_the_readable_size_cap_is_refused_not_stranded() {
+    let f = VaultFixture::new();
+    let big = f.dir.path().join("big.md");
+    // Just under the 4 MiB walk cap, so the note is created and addressable.
+    std::fs::write(&big, "x".repeat(4 * 1024 * 1024 - 4096)).expect("write body");
+    let id = ok(
+        &f,
+        &[
+            "--quiet",
+            "note",
+            "new",
+            "big",
+            "--file",
+            &big.to_string_lossy(),
+        ],
+    );
+    ok(&f, &["note", "get", &id]);
+
+    // The append that would cross the cap must fail, not exit 0 into unaddressability.
+    let (_, stderr, code) = run(&f, &["note", "append", &id, &"y".repeat(8192)]);
+    assert_eq!(code, 2, "an over-cap append must fail: {stderr}");
+    assert!(
+        stderr.contains("over the 4194304-byte readable limit"),
+        "{stderr}"
+    );
+
+    // The note the caller was handed an id for is still there.
+    ok(&f, &["note", "get", &id]);
+    assert_eq!(ids(&ok(&f, &["note", "list", "--json"])), [id]);
+}
+
+// ---------------------------------------------------------------------------------------
+// one `--tags` spelling across the whole surface
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn search_reads_the_same_csv_tags_every_other_verb_writes() {
+    let f = VaultFixture::new();
+    let id = ok(
+        &f,
+        &[
+            "--quiet",
+            "note",
+            "new",
+            "tagged",
+            "--body",
+            "hello world",
+            "--tags",
+            "alpha,beta",
+        ],
+    );
+    // A CSV used to be one literal tag on `search` alone, so the AND filter matched nothing.
+    for args in [
+        vec!["search", "hello", "--tags", "alpha,beta", "--json"],
+        vec![
+            "search", "hello", "--tags", "alpha", "--tags", "beta", "--json",
+        ],
+    ] {
+        assert_eq!(ids(&ok(&f, &args)), std::slice::from_ref(&id), "{args:?}");
+    }
+    assert!(
+        ids(&ok(
+            &f,
+            &["search", "hello", "--tags", "alpha,absent", "--json"]
+        ))
+        .is_empty(),
+        "AND semantics still hold"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// a note's folder never contradicts the frontmatter that names its type
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_note_update_files_the_note_where_its_type_says_it_lives() {
+    let f = VaultFixture::new();
+    let id = ok(&f, &["--quiet", "note", "new", "d3", "--body", "b"]);
+    ok(&f, &["note", "update", &id, "--type", "log"]);
+    let logs = f.vault.join("notes").join("logs").join(format!("{id}.md"));
+    assert!(logs.is_file(), "a type change moves the file");
+
+    // Strand it the way an interrupted write-then-move would, then check the next update
+    // heals it — the idempotent repair `tasks::terminate` already had and this did not.
+    let root = f.vault.join("notes").join(format!("{id}.md"));
+    std::fs::rename(&logs, &root).expect("strand the note");
+    ok(&f, &["note", "update", &id, "--title", "renamed"]);
+    assert!(logs.is_file(), "an update heals a misfiled note");
+    assert!(!root.is_file(), "and leaves nothing behind");
+}

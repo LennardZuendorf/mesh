@@ -1036,7 +1036,7 @@ pub struct SearchArgs {
         long,
         value_name = "TEXT",
         action = clap::ArgAction::Append,
-        help = "Require all these tags (AND); repeatable."
+        help = "Require all these tags (AND); CSV or repeatable."
     )]
     pub tags: Vec<String>,
     #[arg(long, value_name = "TEXT", help = OWNER_FILTER_HELP)]

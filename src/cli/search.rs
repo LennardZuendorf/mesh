@@ -8,6 +8,7 @@ use serde_json::Value as Json;
 
 use crate::cli::{out, SearchArgs};
 use crate::ctx::Ctx;
+use crate::domain::select::parse_csv;
 use crate::error::Result;
 use crate::render;
 use crate::search::{self, Engine, SearchFilter};
@@ -29,7 +30,10 @@ pub fn run(ctx: &mut Ctx, args: SearchArgs) -> Result<()> {
     let filter = SearchFilter {
         spaces: spaces.clone(),
         type_filter: args.type_filter,
-        tags: args.tags,
+        // Repeatable *and* CSV: every other `--tags` in the surface splits on commas, and
+        // a CSV is exactly what mesh itself writes, so `--tags alpha,beta` must not read as
+        // one literal tag named "alpha,beta".
+        tags: parse_csv(&args.tags.join(",")),
         owner,
         status: args.status,
         kind: args.kind,

@@ -70,6 +70,32 @@ fn corpus() -> VaultFixture {
     fixture
 }
 
+/// The corpus with its one claimed task restamped to now.
+///
+/// `status` calls a claim stale when the frontmatter `updated` is older than
+/// `STATUS_STALE_WINDOW` (2d), but the corpus timestamps are pinned to the day the golden
+/// payloads were generated. A `stale=0` assertion against a pinned fixture therefore reports
+/// the calendar, not the code: it decays to `stale=1` two days after the fixture is written.
+/// Restamping makes "a claim updated just now is not stale" hold by construction.
+fn corpus_with_a_fresh_claim() -> VaultFixture {
+    let fixture = corpus();
+    let path = fixture.vault.join("tasks").join("open").join("t-D0YQ.md");
+    let text = std::fs::read_to_string(&path).expect("read the claimed task");
+    let now = mesh::timefmt::iso_z(&mesh::timefmt::now_utc());
+    let restamped: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.starts_with("updated:") {
+                format!("updated: {now}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    std::fs::write(&path, format!("{}\n", restamped.join("\n"))).expect("restamp");
+    fixture
+}
+
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).expect("create dest");
     for entry in std::fs::read_dir(from).expect("read dir").flatten() {
@@ -1811,7 +1837,7 @@ fn status_on_an_empty_vault_has_the_pinned_key_order() {
 
 #[test]
 fn status_human_block_renders_every_group() {
-    let fixture = corpus();
+    let fixture = corpus_with_a_fresh_claim();
     let out = fixture.cmd().args(["status"]).output().expect("run mesh");
     let text = stdout_of(&out);
     for expected in [
@@ -1836,7 +1862,7 @@ fn status_human_block_renders_every_group() {
 
 #[test]
 fn status_on_the_corpus_matches_the_python_golden_counts() {
-    let fixture = corpus();
+    let fixture = corpus_with_a_fresh_claim();
     let out = fixture
         .cmd()
         .args(["--json", "status"])

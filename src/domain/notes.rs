@@ -290,21 +290,41 @@ pub fn update(cfg: &Config, target: &str, o: UpdateNote) -> Result<Note> {
     }
     restamp(cfg, &mut doc);
     let note = Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target))?;
-    write_doc(&cfg.spaces, &path, &ordered(&NOTE_FIELDS, &doc))?;
 
-    if let Some(new_type) = &o.new_type {
-        let Some(name) = path.file_name() else {
-            return Ok(note);
-        };
-        let dest = safe_resolve(&cfg.spaces, &note_folder(cfg, new_type)?.join(name))?;
-        if dest != path {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::rename(&path, &dest)?;
+    // Move first, then write. Reads are frontmatter-driven, so a failure has to leave the
+    // frontmatter describing the state on disk: write-then-move strands a note whose
+    // frontmatter already says `log` in the folder for its old type, and nothing reports it.
+    // Moving first means a failed rename changes nothing at all, and a failed write leaves
+    // the *old* content — which is what `note get` then truthfully reports. The folder is
+    // then the only thing out of step, and the repair below heals it on the next update.
+    let dest = destination(cfg, &path, &doc)?;
+    if dest != path {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        std::fs::rename(&path, &dest)?;
     }
+    write_doc(&cfg.spaces, &dest, &ordered(&NOTE_FIELDS, &doc))?;
     Ok(note)
+}
+
+/// Where a note belongs given the frontmatter it is about to carry.
+///
+/// This runs on **every** update, not only a `--type` change, so a note stranded in the wrong
+/// folder by an interrupted earlier update is healed by the next one — the same idempotent
+/// repair `tasks::terminate` performs through `move_if_needed`. An unknown type keeps the
+/// note where it is rather than failing the update.
+fn destination(cfg: &Config, path: &Path, doc: &Doc) -> Result<PathBuf> {
+    let Some(name) = path.file_name() else {
+        return Ok(path.to_path_buf());
+    };
+    let Some(note_type) = meta_str(&doc.meta, "type") else {
+        return Ok(path.to_path_buf());
+    };
+    let Ok(folder) = note_folder(cfg, note_type) else {
+        return Ok(path.to_path_buf());
+    };
+    safe_resolve(&cfg.spaces, &folder.join(name))
 }
 
 /// Read one note: frontmatter, body and path.

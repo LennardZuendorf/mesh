@@ -107,8 +107,11 @@ pub fn recent_activity(ctx: &mut Ctx, args: RecentActivityArgs) -> Result<()> {
     let mine = ctx.g.mine;
     let cfg = ctx.cfg()?;
     let spaces = spaces_for(cfg, args.space.as_deref(), &activity::DEFAULT_SPACES)?;
+    // `--owner X` swaps the effective identity, exactly as `session_start` does below.
+    // Without the swap `--mine` resolves `me` from `[core].agent` and answers empty.
+    let effective = cfg.with_agent(owner.as_deref());
     let entries = activity::recent_activity_in(
-        cfg,
+        &effective,
         args.since.as_deref(),
         owner.as_deref(),
         mine,

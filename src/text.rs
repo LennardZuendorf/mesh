@@ -136,8 +136,24 @@ pub fn append_to_end(body: &str, block: &str) -> String {
     }
 }
 
+/// A section name reduced to the single line a `##` heading can carry.
+///
+/// Whitespace runs — newlines included — collapse to one space and the ends are trimmed, so
+/// the heading the writer emits is byte-identical to what the reader's `l.trim()` compares.
+/// Without it `--section "Outcome "` never matches the heading it just wrote, and every
+/// append re-creates the section.
+pub fn normalize_section(section: &str) -> String {
+    section.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
 /// Append a block under `## {section}`, creating the section at the end when it is absent.
+///
+/// An empty section name has no heading to match, so it appends at the end instead.
 pub fn append_under_section(body: &str, block: &str, section: &str) -> String {
+    let section = normalize_section(section);
+    if section.is_empty() {
+        return append_to_end(body, block);
+    }
     let heading = format!("## {section}");
     let lines: Vec<&str> = body.split('\n').collect();
     let start = lines.iter().position(|l| l.trim() == heading);

@@ -110,6 +110,42 @@ pub fn resolve_config_path(flag: Option<&Path>) -> PathBuf {
         .join("config.toml")
 }
 
+/// The value type a settable config key holds.
+///
+/// `config set` writes through this so the writer and the readers below
+/// (`table_str` / `table_bool` / `table_strings` / the `[spaces]` match in [`from_table`])
+/// cannot disagree — a key written as the wrong TOML type is silently discarded on read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    /// A string. The raw argument is stored verbatim, never re-parsed as TOML.
+    Str,
+    /// A boolean.
+    Bool,
+    /// A float. An integer literal is widened.
+    Float,
+    /// An array of strings. A bare CSV is split, matching every other `--tags`-shaped flag.
+    Strings,
+    /// A path string, or `false` to disable the space.
+    SpacePath,
+}
+
+/// The type a dotted config key holds, or `None` when no reader consumes the key.
+///
+/// This is the whole settable surface: `mesh config set` rejects anything absent from it,
+/// because writing a key no reader looks at is a silent no-op.
+pub fn value_kind(key: &str) -> Option<ValueKind> {
+    if let Some(name) = key.strip_prefix("spaces.") {
+        return Space::from_name(name).map(|_| ValueKind::SpacePath);
+    }
+    Some(match key {
+        "core.vault_path" | "core.agent" | "search.collection" | "search.engine" => ValueKind::Str,
+        "search.hybrid" | "tasks.strict" => ValueKind::Bool,
+        "search.threshold" => ValueKind::Float,
+        "search.spaces" | "tasks.collections" => ValueKind::Strings,
+        _ => return None,
+    })
+}
+
 fn table_str(table: &toml::Table, key: &str) -> Option<String> {
     table.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }

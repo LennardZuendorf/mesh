@@ -142,7 +142,10 @@ fn next(
         any_tag: false,
         owner: None,
         mine: ctx.g.mine,
-        me: cfg.agent().map(str::to_string),
+        // Selection and the claimer must resolve the same identity: `identity(ctx)` below
+        // reads `ctx.actor()`, so `--mine` must too, or `--owner bob task next --mine
+        // --claim` picks alice's task and writes bob into `claimed_by`.
+        me: ctx.actor().map(str::to_string),
         cutoff: None,
         stale_cutoff: None,
         sort: SortKey::Priority,

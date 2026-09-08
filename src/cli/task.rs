@@ -55,7 +55,6 @@ fn dispatch(ctx: &Ctx, sub: TaskSub) -> Result<()> {
             title,
             priority,
             tags,
-            owner,
             body,
             project,
             blocks,
@@ -67,7 +66,9 @@ fn dispatch(ctx: &Ctx, sub: TaskSub) -> Result<()> {
             NewTask {
                 priority,
                 tags: tags.as_deref().map(parse_csv).unwrap_or_default(),
-                owner,
+                // The coalesce pass above folded the local `--owner` into the global one;
+                // reading the raw arg here would drop `mesh --owner bob task new T`.
+                owner: ctx.g.owner.clone(),
                 body: body.unwrap_or_default(),
                 project,
                 blocks: blocks.as_deref().map(parse_csv).unwrap_or_default(),
@@ -357,7 +358,9 @@ fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         // the raw arg here would drop `mesh --owner bob task list`.
         owner: ctx.g.owner.clone(),
         mine: ctx.g.mine,
-        me: cfg.agent().map(str::to_string),
+        // `me` is the acting identity — `--owner` else `[core].agent` — never the config
+        // agent alone, or `mesh --owner bob --mine task list` would answer alice's rows.
+        me: ctx.actor().map(str::to_string),
         cutoff: args.since.as_deref().map(parse_since).transpose()?,
         stale_cutoff: args.stale.as_deref().map(parse_since).transpose()?,
         sort,

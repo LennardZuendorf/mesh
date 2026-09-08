@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{MeshError, Result};
 use crate::fm::emit::emit_meta;
 use crate::fm::load::{parse_meta, split_frontmatter};
 use crate::fm::value::Meta;
 use crate::spaces::Spaces;
+use crate::storage::walk::MAX_FILE_BYTES;
 use crate::storage::{atomic_write, safe_resolve};
 
 /// A parsed document: ordered frontmatter plus the trailing-trimmed body.
@@ -84,7 +85,19 @@ pub fn dump_doc(doc: &Doc) -> String {
 /// Sandbox-check the destination, then write the document atomically.
 pub fn write_doc(spaces: &Spaces, path: &Path, doc: &Doc) -> Result<()> {
     let resolved = safe_resolve(spaces, path)?;
-    atomic_write(&resolved, &dump_doc(doc))
+    let text = dump_doc(doc);
+    // The walk that resolves every id skips files over `MAX_FILE_BYTES`, so writing one past
+    // the cap would exit 0 and leave the entity permanently unaddressable — `get` and even
+    // `delete` answer "not found". Refuse the write instead; the reader's own constant is
+    // the bound, so the writer and the walk cannot drift apart.
+    if text.len() as u64 > MAX_FILE_BYTES {
+        return Err(MeshError::Validation(format!(
+            "document is {} bytes, over the {MAX_FILE_BYTES}-byte readable limit: {}",
+            text.len(),
+            resolved.display()
+        )));
+    }
+    atomic_write(&resolved, &text)
 }
 
 #[cfg(test)]
