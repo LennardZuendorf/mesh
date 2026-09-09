@@ -1,13 +1,19 @@
 name: CI
 
-# Minimal gate for cli-toolset-rework/2, extended by cli-toolset-rework/5 with
-# a `ruff format --check` gate, and hardened by core-hardening/7: a real
-# 3.11/3.12/3.13 matrix, a measured coverage floor, `ty` over tests/ as well as
-# src/, a `uv.lock` freshness check, and a packaging job that actually builds
-# the wheel and exercises both console scripts. The spec-test-count drift
-# check listed in the gaps table is deliberately NOT added here — the count is
-# still settling and the controller syncs it in the spec during the branch's
-# finishing phase.
+# Gate-for-gate successor to the Python workflow:
+#   uv sync --locked      -> cargo ... --locked (Cargo.lock is committed and must be current)
+#   ruff check            -> cargo clippy -D warnings
+#   ruff format --check   -> cargo fmt --all -- --check
+#   ty check              -> the compiler
+#   pytest --cov          -> cargo llvm-cov --fail-under-lines (ratchets up, never down)
+#   wheel smoke job       -> a release build that runs the real binaries
+#
+# The toolchain is pinned by rust-toolchain.toml; no toolchain version is named here, so
+# bumping the pin is a one-file change.
+#
+# `mesh-mcp` is a stdio server that blocks on stdin by design — never `--help` it. The
+# package job checks the binary exists, and drives `mesh mcp` with a real `initialize`
+# line under a timeout instead.
 
 on:
   push:
@@ -21,79 +27,86 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
 
-      - name: Set up Python
-        run: uv python install ${{ matrix.python-version }}
+      - name: Show the pinned toolchain
+        run: rustc --version && cargo --version
 
-      - name: Install dependencies (uv.lock must be current)
-        run: uv sync --all-groups --locked --python ${{ matrix.python-version }}
+      - name: Format (cargo fmt --check)
+        run: cargo fmt --all -- --check
 
-      - name: Lint (ruff check)
-        run: uv run ruff check .
+      - name: Lint (clippy, warnings are errors)
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Format (ruff format --check)
-        run: uv run ruff format --check .
+      - name: Test
+        run: cargo test --locked
 
-      - name: Type-check (ty, src + tests)
-        run: uv run ty check src/ tests/
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Test (pytest, coverage floor enforced via pyproject.toml)
-        run: uv run pytest -q --cov=src --cov-report=term-missing
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # 80 % lines. Rust encodes in the type system many of the defensive branches the
+      # Python suite covered with tests, so the floor is lower than the old 97 % — but it
+      # ratchets up, never down. Never lower this without a coverage regression backing it.
+      - name: Coverage floor
+        run: cargo llvm-cov --locked --fail-under-lines 80
 
   package:
+    name: package
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
 
-      - name: Set up Python
-        run: uv python install 3.11
+      - name: Release build
+        run: cargo build --release --locked
 
-      - name: Build sdist + wheel
-        run: uv build
-
-      - name: Install the built wheel into a clean venv
+      - name: Smoke the `mesh` binary
         run: |
-          uv venv /tmp/wheel-smoke-venv
-          uv pip install --python /tmp/wheel-smoke-venv/bin/python dist/*.whl
+          ./target/release/mesh --version
+          ./target/release/mesh --help
 
-      - name: Smoke-test the `mesh` console script
-        run: |
-          /tmp/wheel-smoke-venv/bin/mesh --version
-          /tmp/wheel-smoke-venv/bin/mesh --help
+      # EXISTENCE ONLY — mesh-mcp boots the stdio server and blocks on stdin.
+      - name: The `mesh-mcp` binary exists and is executable
+        run: test -x ./target/release/mesh-mcp
 
-      - name: Smoke-test the `mesh-mcp` entry point resolves
-        # `mesh-mcp` has no arg parsing at all (`main()` is a bare `app.run()`),
-        # so `--help` doesn't print help and exit — it boots the stdio MCP server
-        # and blocks on stdin (core-hardening/7 finding, reported not fixed: an
-        # out-of-scope src/ behaviour change). Resolving the declared
-        # `[project.scripts]` target via importlib.metadata, without calling it,
-        # still catches the exact defect this job exists for — a renamed/removed
-        # entry point — without the hang risk.
+      - name: Shell completions generate
+        run: ./target/release/mesh completions bash > /dev/null
+
+      # Drive the stdio MCP server rather than --help-ing it.
+      - name: The MCP server answers `initialize`
         run: |
-          /tmp/wheel-smoke-venv/bin/python -c "
-          from importlib.metadata import entry_points
-          ep = next(e for e in entry_points(group='console_scripts') if e.name == 'mesh-mcp')
-          fn = ep.load()
-          print(f'mesh-mcp entry point resolves: {ep.value} -> {fn!r}')
-          "
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            | timeout 5 ./target/release/mesh mcp | head -1 | grep -q '"serverInfo"'
+
+      - name: Verb smoke test
+        run: ./scripts/smoke.sh

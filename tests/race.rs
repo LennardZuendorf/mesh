@@ -1,0 +1,792 @@
+//! Real multi-process races against the `mesh` binary: claims, appends and the lock protocol.
+//!
+//! Nothing here is simulated in-process — every contender is a separate OS process, so the
+//! `O_EXCL` test-and-set, the bounded wait and the stale-lock reclaim are exercised for real.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use common::VaultFixture;
+
+/// The `mesh` binary Cargo built for this integration test.
+fn bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_mesh"))
+}
+
+/// A raw `std::process::Command` with the same clean environment `VaultFixture::cmd` uses.
+fn cmd(f: &VaultFixture, args: &[&str]) -> Command {
+    let mut command = Command::new(bin());
+    command
+        .env_remove("MESH_CONFIG_PATH")
+        .env_remove("MESH_AGENT")
+        .env_remove("MESH_VAULT")
+        .env_remove("MESH_INDEXED_BIN")
+        .arg("--config")
+        .arg(&f.config)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn run(f: &VaultFixture, args: &[&str]) -> (String, String, i32) {
+    let out = cmd(f, args).output().expect("run mesh");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+fn ok(f: &VaultFixture, args: &[&str]) -> String {
+    let (stdout, stderr, code) = run(f, args);
+    assert_eq!(code, 0, "args={args:?} stderr={stderr}");
+    stdout.trim_end().to_string()
+}
+
+fn new_task(f: &VaultFixture, title: &str) -> String {
+    ok(f, &["--quiet", "task", "new", title])
+}
+
+fn task_path(f: &VaultFixture, id: &str) -> String {
+    f.files()
+        .into_iter()
+        .find(|p| p.ends_with(&format!("{id}.md")))
+        .unwrap_or_else(|| panic!("no file for {id}"))
+}
+
+/// Spawn every argv at once, then collect the exit codes in spawn order.
+fn race(f: &VaultFixture, argvs: &[Vec<String>]) -> Vec<i32> {
+    let children: Vec<_> = argvs
+        .iter()
+        .map(|argv| {
+            let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+            cmd(f, &borrowed).spawn().expect("spawn mesh")
+        })
+        .collect();
+    children
+        .into_iter()
+        .map(|child| {
+            child
+                .wait_with_output()
+                .expect("wait")
+                .status
+                .code()
+                .unwrap_or(-1)
+        })
+        .collect()
+}
+
+/// The lock path for one task id inside the fixture's vault.
+fn lock_path(f: &VaultFixture, id: &str) -> PathBuf {
+    f.vault.join("tasks/.locks").join(format!("{id}.lock"))
+}
+
+fn write_lock(path: &Path, pid: u32) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create .locks");
+    }
+    std::fs::write(path, format!("{pid}\n")).expect("write lock");
+}
+
+// ---------------------------------------------------------------------------------------
+// claim races
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn eight_concurrent_claims_yield_exactly_one_winner() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Contended");
+    let argvs: Vec<Vec<String>> = (0..8)
+        .map(|n| {
+            vec![
+                "--owner".to_string(),
+                format!("agent-{n}"),
+                "task".to_string(),
+                "claim".to_string(),
+                id.clone(),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert_eq!(codes.len(), 8);
+    assert_eq!(
+        codes.iter().filter(|c| **c == 0).count(),
+        1,
+        "codes = {codes:?}"
+    );
+    assert_eq!(
+        codes.iter().filter(|c| **c == 4).count(),
+        7,
+        "codes = {codes:?}"
+    );
+    // Exactly one owner is recorded, and it is one of the contenders.
+    let text = f.read(&task_path(&f, &id));
+    assert_eq!(text.matches("claimed_by: agent-").count(), 1, "{text}");
+    assert!(text.contains("status: claimed"));
+}
+
+#[test]
+fn eight_concurrent_same_agent_claims_are_all_idempotent() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Reclaimed");
+    let argvs: Vec<Vec<String>> = (0..8)
+        .map(|_| {
+            vec![
+                "--owner".to_string(),
+                "solo".to_string(),
+                "task".to_string(),
+                "claim".to_string(),
+                id.clone(),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    let text = f.read(&task_path(&f, &id));
+    assert_eq!(text.matches("claimed_by: solo").count(), 1);
+}
+
+#[test]
+fn concurrent_claims_across_distinct_tasks_all_succeed() {
+    let f = VaultFixture::new();
+    let ids: Vec<String> = (0..6).map(|n| new_task(&f, &format!("T{n}"))).collect();
+    let argvs: Vec<Vec<String>> = ids
+        .iter()
+        .map(|id| {
+            vec![
+                "--owner".to_string(),
+                "alice".to_string(),
+                "task".to_string(),
+                "claim".to_string(),
+                id.clone(),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    for id in &ids {
+        assert!(f.read(&task_path(&f, id)).contains("claimed_by: alice"));
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// append and terminal races
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn eight_concurrent_appends_all_land() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Journal");
+    let argvs: Vec<Vec<String>> = (0..8)
+        .map(|n| {
+            vec![
+                "task".to_string(),
+                "append".to_string(),
+                id.clone(),
+                format!("line-{n}"),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    let text = f.read(&task_path(&f, &id));
+    for n in 0..8 {
+        assert_eq!(
+            text.matches(&format!("line-{n}")).count(),
+            1,
+            "line-{n} missing or duplicated in:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn concurrent_finishes_write_exactly_one_outcome_section() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Finished once");
+    let argvs: Vec<Vec<String>> = (0..6)
+        .map(|n| {
+            vec![
+                "task".to_string(),
+                "finish".to_string(),
+                id.clone(),
+                "--outcome".to_string(),
+                format!("outcome-{n}"),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    let path = task_path(&f, &id);
+    assert_eq!(path, format!("tasks/done/{id}.md"));
+    let text = f.read(&path);
+    assert_eq!(text.matches("## Outcome").count(), 1, "{text}");
+    assert!(text.contains("status: done"));
+}
+
+#[test]
+fn a_concurrent_append_and_finish_both_survive() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Both");
+    let argvs = vec![
+        vec![
+            "task".to_string(),
+            "append".to_string(),
+            id.clone(),
+            "note-from-append".to_string(),
+        ],
+        vec!["task".to_string(), "finish".to_string(), id.clone()],
+    ];
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    let text = f.read(&task_path(&f, &id));
+    assert!(text.contains("note-from-append"), "{text}");
+    assert!(text.contains("## Outcome"), "{text}");
+    assert!(text.contains("status: done"));
+}
+
+#[test]
+fn concurrent_creates_never_collide_on_an_id() {
+    let f = VaultFixture::new();
+    let argvs: Vec<Vec<String>> = (0..8)
+        .map(|_| {
+            vec![
+                "--quiet".to_string(),
+                "task".to_string(),
+                "new".to_string(),
+                // Identical titles, so the id digest collides unless the allocator lock works.
+                "Same Title".to_string(),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    let files: Vec<String> = f
+        .files()
+        .into_iter()
+        .filter(|p| p.starts_with("tasks/open/"))
+        .collect();
+    assert_eq!(files.len(), 8, "{files:?}");
+    assert_eq!(
+        ok(&f, &["--quiet", "task", "list", "--limit=-1"])
+            .lines()
+            .count(),
+        8
+    );
+}
+
+#[test]
+fn concurrent_block_calls_never_deadlock() {
+    let f = VaultFixture::new();
+    let blocker = new_task(&f, "Blocker");
+    let ids: Vec<String> = (0..6).map(|n| new_task(&f, &format!("Dep{n}"))).collect();
+    // Every one of these takes its own lock and then the blocker's mirror lock, one at a
+    // time in ascending id order — so they serialise rather than deadlocking.
+    let argvs: Vec<Vec<String>> = ids
+        .iter()
+        .map(|id| {
+            vec![
+                "task".to_string(),
+                "block".to_string(),
+                id.clone(),
+                "--on".to_string(),
+                blocker.clone(),
+            ]
+        })
+        .collect();
+    let started = Instant::now();
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    assert!(started.elapsed() < Duration::from_secs(30), "took too long");
+    for id in &ids {
+        assert!(f.read(&task_path(&f, id)).contains(&blocker));
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// the lock protocol
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_live_lock_exits_four_within_the_wait_budget_rather_than_hanging() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Locked");
+    // A fresh lock file naming this very process: alive, and inside the TTL.
+    let lock = lock_path(&f, &id);
+    write_lock(&lock, std::process::id());
+    let before = f.read(&task_path(&f, &id));
+
+    let started = Instant::now();
+    let (_, stderr, code) = run(&f, &["task", "claim", &id]);
+    let elapsed = started.elapsed();
+
+    assert_eq!(code, 4, "stderr={stderr}");
+    assert_eq!(
+        stderr.trim_end(),
+        format!("lock is held: {}", lock.display())
+    );
+    // The bounded wait is 15 s; anything near it is fine, a hang is not.
+    assert!(elapsed < Duration::from_secs(60), "waited {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(10),
+        "did not wait: {elapsed:?}"
+    );
+    assert_eq!(f.read(&task_path(&f, &id)), before, "the file was written");
+    assert!(lock.exists(), "the live lock was stolen");
+}
+
+#[test]
+fn a_live_lock_json_envelope_advises_a_retry_delay() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Locked");
+    write_lock(&lock_path(&f, &id), std::process::id());
+    let (_, stderr, code) = run(&f, &["--json", "task", "append", &id, "x"]);
+    assert_eq!(code, 4);
+    let value: serde_json::Value = serde_json::from_str(stderr.trim()).expect("json envelope");
+    assert_eq!(value["kind"], serde_json::json!("lock_conflict"));
+    assert_eq!(value["retry_after_ms"], serde_json::json!(250));
+    assert!(value["message"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("lock is held: "));
+}
+
+#[test]
+fn a_dead_pid_lock_is_reclaimed_immediately() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Stale");
+    let lock = lock_path(&f, &id);
+    // 999999 is above the usual pid_max and is not running.
+    write_lock(&lock, 999_999);
+
+    let started = Instant::now();
+    let out = ok(&f, &["task", "claim", &id]);
+    assert_eq!(out, format!("claimed {id}"));
+    // A reclaim happens on the first attempt, so this must not spend the wait budget.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(f
+        .read(&task_path(&f, &id))
+        .contains("claimed_by: test-agent"));
+    assert!(!lock.exists(), "the reclaimed lock was not released");
+}
+
+#[test]
+fn an_aged_out_lock_is_reclaimed_regardless_of_its_contents() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Aged");
+    let lock = lock_path(&f, &id);
+    // A live pid, but a modification time well past the 300 s TTL.
+    write_lock(&lock, std::process::id());
+    let aged = Command::new("touch")
+        .arg("-d")
+        .arg("2 hours ago")
+        .arg(&lock)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !aged {
+        // No GNU `touch -d` here; the dead-pid path already covers reclaim.
+        return;
+    }
+    let started = Instant::now();
+    ok(&f, &["task", "claim", &id]);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(f
+        .read(&task_path(&f, &id))
+        .contains("claimed_by: test-agent"));
+}
+
+#[test]
+fn an_unparseable_lock_is_never_stolen() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Garbage");
+    let lock = lock_path(&f, &id);
+    if let Some(parent) = lock.parent() {
+        std::fs::create_dir_all(parent).expect("create .locks");
+    }
+    std::fs::write(&lock, "not-a-pid\n").expect("write lock");
+    let (_, stderr, code) = run(&f, &["task", "claim", &id]);
+    assert_eq!(code, 4, "stderr={stderr}");
+    assert!(lock.exists());
+}
+
+#[test]
+fn a_live_lock_blocks_a_create_through_the_allocator_lock() {
+    let f = VaultFixture::new();
+    // Force the tasks root to exist, then take the per-space allocator lock.
+    new_task(&f, "Seed");
+    let lock = f.vault.join("tasks/.locks/_create.lock");
+    write_lock(&lock, std::process::id());
+    let (_, stderr, code) = run(&f, &["task", "new", "Blocked create"]);
+    assert_eq!(code, 4, "stderr={stderr}");
+    assert!(stderr.contains("_create.lock"), "{stderr}");
+    assert_eq!(ok(&f, &["--quiet", "task", "list"]).lines().count(), 1);
+}
+
+#[test]
+fn a_live_lock_on_one_task_never_blocks_another() {
+    let f = VaultFixture::new();
+    let locked = new_task(&f, "Locked");
+    let free = new_task(&f, "Free");
+    write_lock(&lock_path(&f, &locked), std::process::id());
+    let started = Instant::now();
+    ok(&f, &["task", "claim", &free]);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(f
+        .read(&task_path(&f, &free))
+        .contains("claimed_by: test-agent"));
+}
+
+#[test]
+fn a_lock_is_released_after_a_normal_write() {
+    let f = VaultFixture::new();
+    let id = new_task(&f, "Clean");
+    ok(&f, &["task", "claim", &id]);
+    assert!(!lock_path(&f, &id).exists());
+    ok(&f, &["task", "finish", &id]);
+    assert!(!lock_path(&f, &id).exists());
+    // The id-named lock survives the open/ -> done/ move, so a later verb still serialises.
+    ok(&f, &["task", "append", &id, "x"]);
+    assert!(!lock_path(&f, &id).exists());
+}
+
+#[test]
+fn the_corpus_stale_lock_does_not_wedge_a_claim() {
+    let f = VaultFixture::from_corpus();
+    // tests/fixtures/python-vault ships tasks/.locks/t-STAL.lock holding a dead pid.
+    assert!(f.vault.join("tasks/.locks/t-STAL.lock").exists());
+    let started = Instant::now();
+    ok(&f, &["--owner", "demo-agent", "task", "claim", "t-TCY1"]);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(f
+        .read("tasks/open/t-TCY1.md")
+        .contains("claimed_by: demo-agent"));
+    // A lock for an unrelated id is left exactly where it was.
+    assert!(f.vault.join("tasks/.locks/t-STAL.lock").exists());
+}
+
+// ---------------------------------------------------------------------------------------
+// task next under contention
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn concurrent_next_claim_hands_distinct_tasks_to_distinct_agents() {
+    let f = VaultFixture::new();
+    for n in 0..6 {
+        new_task(&f, &format!("Work {n}"));
+    }
+    let argvs: Vec<Vec<String>> = (0..3)
+        .map(|n| {
+            vec![
+                "--quiet".to_string(),
+                "--owner".to_string(),
+                format!("agent-{n}"),
+                "task".to_string(),
+                "next".to_string(),
+                "--claim".to_string(),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    // The re-selection loop means a conflict is retried, not returned.
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    let claimed = ok(
+        &f,
+        &[
+            "--quiet",
+            "task",
+            "list",
+            "--status",
+            "claimed",
+            "--limit=-1",
+        ],
+    );
+    assert_eq!(claimed.lines().count(), 3, "{claimed}");
+    let mut owners: Vec<String> = claimed
+        .lines()
+        .map(|id| {
+            let text = f.read(&task_path(&f, id));
+            text.lines()
+                .find_map(|l| l.strip_prefix("claimed_by: "))
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    owners.sort();
+    owners.dedup();
+    assert_eq!(owners.len(), 3, "{owners:?}");
+}
+
+#[test]
+fn concurrent_gc_never_sweeps_a_blob_whose_sidecar_is_mid_write() {
+    let f = VaultFixture::new();
+    let src_dir = f.dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let mut argvs: Vec<Vec<String>> = Vec::new();
+    for n in 0..40 {
+        let src = src_dir.join(format!("f{n}.bin"));
+        std::fs::write(&src, format!("payload-{n}").repeat(64)).expect("write source");
+        argvs.push(vec![
+            "asset".into(),
+            "add".into(),
+            src.to_string_lossy().into_owned(),
+            "--quiet".into(),
+        ]);
+        // Sweepers are interleaved, not appended, so each one starts while adds are still
+        // in flight — the window where a blob exists and its sidecar does not.
+        if n % 2 == 0 {
+            argvs.push(vec!["asset".into(), "gc".into(), "--apply".into()]);
+        }
+    }
+    for code in race(&f, &argvs) {
+        assert_eq!(code, 0, "every add and sweep must succeed");
+    }
+
+    // R12: at most a blob with no sidecar, never a sidecar with no blob.
+    let report = ok(&f, &["--json", "asset", "gc"]);
+    let payload: serde_json::Value = serde_json::from_str(&report).expect("json");
+    assert_eq!(
+        payload["orphan_sidecars"],
+        serde_json::json!([]),
+        "gc deleted a live blob: {report}"
+    );
+}
+
+/// `race`, but the caller learns which argv produced which exit code.
+fn race_indexed(f: &VaultFixture, argvs: &[Vec<String>]) -> Vec<(usize, i32)> {
+    race(f, argvs).into_iter().enumerate().collect()
+}
+
+#[test]
+fn a_renewed_memory_survives_a_concurrent_expiry_sweep() {
+    // `forget --expired` scans the whole space for expired ids, then deletes them one at a
+    // time. The scan is the sweep's only look at `expires`; a memory renewed after it — under
+    // the very lock the delete then takes — is still unlinked. The renewal reported success,
+    // so the operator has no way to know the memory is gone.
+    let f = VaultFixture::new();
+    let mut ids: Vec<String> = Vec::new();
+    for n in 0..40 {
+        ids.push(ok(
+            &f,
+            &[
+                "--quiet",
+                "memory",
+                "new",
+                &format!("Expired memory {n}"),
+                "--body",
+                "payload",
+                "--expires",
+                "2020-01-01T00:00:00Z",
+            ],
+        ));
+    }
+
+    // Sweepers are interleaved, not appended: each starts while renewals are still in flight,
+    // which is the window between the sweep's scan and its unlink.
+    let mut argvs: Vec<Vec<String>> = Vec::new();
+    let mut renewals: Vec<(usize, String)> = Vec::new();
+    for (n, id) in ids.iter().enumerate() {
+        if n % 4 == 0 {
+            argvs.push(vec![
+                "memory".into(),
+                "forget".into(),
+                "--expired".into(),
+                "--force".into(),
+                "--quiet".into(),
+            ]);
+        }
+        renewals.push((argvs.len(), id.clone()));
+        argvs.push(vec![
+            "memory".into(),
+            "update".into(),
+            id.clone(),
+            "--expires".into(),
+            "3650d".into(),
+            "--quiet".into(),
+        ]);
+    }
+
+    let codes = race_indexed(&f, &argvs);
+    let files = f.files();
+    let mut lost: Vec<String> = Vec::new();
+    for (slot, id) in renewals {
+        let renewed = codes.iter().any(|(i, code)| *i == slot && *code == 0);
+        if !renewed {
+            // The sweep won the race outright and the renewal found nothing. Legitimate.
+            continue;
+        }
+        if !files.iter().any(|p| p.ends_with(&format!("{id}.md"))) {
+            lost.push(id);
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "the sweep deleted {} memories that had been renewed to a future expiry: {lost:?}",
+        lost.len()
+    );
+}
+
+#[test]
+fn a_concurrently_attached_asset_is_never_removed_unforced() {
+    // `remove` ran `references()` *before* it took the asset's lock and never re-checked
+    // inside it. `attach` records its half of the link under the *target's* lock and only
+    // then takes the asset's, so a reference landing in that window bypassed the --force
+    // refusal and left the note with a live embed pointing at bytes that no longer exist.
+    //
+    // The CLI cannot host this race: an unforced `asset remove` on a non-interactive path
+    // refuses outright, and the window it really parks in is the operator's confirmation
+    // prompt — seconds or minutes wide. So the contenders here are threads over the library,
+    // and the asset's own lock is the gate that makes the interleaving exact rather than
+    // lucky: `remove` blocks on it *after* its guard would have run, the reference lands
+    // while it waits, and only then is the lock released.
+    let f = VaultFixture::new();
+    let src = f.dir.path().join("payload.bin");
+    std::fs::write(&src, b"payload bytes").expect("write source");
+    let asset = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()]);
+    let note = ok(
+        &f,
+        &["--quiet", "note", "new", "Referrer", "--body", "body"],
+    );
+
+    let cfg = mesh::config::load_config(Some(&f.config), None).expect("load config");
+    let assets_root = cfg
+        .root(mesh::spaces::Space::Assets)
+        .expect("assets root")
+        .to_path_buf();
+    let gate = mesh::storage::entity_lock(&assets_root, &asset).expect("entity lock path");
+    let held = mesh::storage::acquire(&gate).expect("hold the asset lock");
+
+    let contender = {
+        let config = f.config.clone();
+        let id = asset.clone();
+        std::thread::spawn(move || {
+            let cfg = mesh::config::load_config(Some(&config), None).expect("load config");
+            mesh::domain::assets::remove(&cfg, &id, false)
+        })
+    };
+
+    // Let the contender reach the lock it now blocks on.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // What `attach` does to the target, under the target's own lock: record the reference.
+    // The asset half of the link is what blocks behind `held`, so only this half can land.
+    let rel = task_path(&f, &note);
+    let note_path = f.vault.join(&rel);
+    let text = f.read(&rel);
+    let patched = text.replacen("related: []", &format!("related:\n  - {asset}"), 1);
+    assert_ne!(
+        patched, text,
+        "the note fixture must carry an empty related"
+    );
+    std::fs::write(&note_path, &patched).expect("record the reference");
+
+    drop(held);
+    let outcome = contender.join().expect("contender thread");
+
+    let sidecar_gone = !f
+        .files()
+        .into_iter()
+        .any(|p| p.ends_with(&format!("{asset}.md")));
+    assert!(
+        outcome.is_err() && !sidecar_gone,
+        "unforced remove deleted an asset the note references (outcome={outcome:?}, \
+         sidecar_gone={sidecar_gone})"
+    );
+}
+
+#[test]
+fn concurrent_block_calls_never_lose_an_edge() {
+    // `block` derives the new `blocked_by` from an unlocked scan and then writes it whole.
+    // Two calls that scan the same `[]` each compute their own one-element list, and the
+    // second write drops the first edge from the authoritative side of the graph.
+    let f = VaultFixture::new();
+    let target = new_task(&f, "Target");
+    let blockers: Vec<String> = (0..16)
+        .map(|n| new_task(&f, &format!("Blocker {n}")))
+        .collect();
+
+    let argvs: Vec<Vec<String>> = blockers
+        .iter()
+        .map(|b| {
+            vec![
+                "task".into(),
+                "block".into(),
+                target.clone(),
+                "--on".into(),
+                b.clone(),
+                "--quiet".into(),
+            ]
+        })
+        .collect();
+    for code in race(&f, &argvs) {
+        assert_eq!(code, 0, "every block must succeed");
+    }
+
+    let text = f.read(&task_path(&f, &target));
+    let listed: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim().trim_start_matches("- ").trim())
+        .collect();
+    let missing: Vec<&String> = blockers
+        .iter()
+        .filter(|b| !listed.contains(&b.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} of {} edges are missing from the authoritative blocked_by: {missing:?}\n{text}",
+        missing.len(),
+        blockers.len()
+    );
+}
+
+#[test]
+fn concurrent_add_and_remove_never_leave_a_sidecar_without_a_blob() {
+    // `add` writes blob-then-sidecar under the space create lock; `remove` unlinks
+    // sidecar-then-blob under the *entity* lock. The two are not mutually exclusive, so a
+    // remove that has already dropped the sidecar can unlink the blob an add just re-wrote
+    // for the very same content address — leaving a sidecar pointing at nothing, the one
+    // state R12 forbids. b2a9503 made `gc --apply` take the create lock for exactly this
+    // reason; `remove` unlinks blobs too and needs the same exclusion.
+    let f = VaultFixture::new();
+    let src_dir = f.dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+
+    let mut argvs: Vec<Vec<String>> = Vec::new();
+    for n in 0..24 {
+        let src = src_dir.join(format!("p{n}.bin"));
+        std::fs::write(&src, format!("payload-{n}").repeat(48)).expect("write source");
+        let id = ok(&f, &["--quiet", "asset", "add", &src.to_string_lossy()]);
+        // Re-adding identical bytes takes the dedupe branch, or re-mints the same content
+        // address when the remove got there first.
+        argvs.push(vec![
+            "asset".into(),
+            "add".into(),
+            src.to_string_lossy().into_owned(),
+            "--quiet".into(),
+        ]);
+        argvs.push(vec![
+            "asset".into(),
+            "remove".into(),
+            id,
+            "--force".into(),
+            "--quiet".into(),
+        ]);
+    }
+    race(&f, &argvs);
+
+    let report = ok(&f, &["--json", "asset", "gc"]);
+    let payload: serde_json::Value = serde_json::from_str(&report).expect("json");
+    assert_eq!(
+        payload["orphan_sidecars"],
+        serde_json::json!([]),
+        "a remove unlinked a blob whose sidecar survived: {report}"
+    );
+}

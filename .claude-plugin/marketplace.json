@@ -4,13 +4,13 @@
     "name": "Lennard Zundorf"
   },
   "metadata": {
-    "description": "Mesh: MCP tools + vault-coherence skill for coordinating agents over one shared Markdown vault."
+    "description": "Mesh: MCP tools + vault-coherence skill for coordinating agents over one shared Markdown vault — notes, tasks, memories, scratch and assets."
   },
   "plugins": [
     {
       "name": "mesh",
       "source": "./plugins/mesh",
-      "description": "Coordinate notes and tasks with a fleet of agents over one shared Markdown vault: mesh_* MCP tools plus the mesh vault-coherence skill."
+      "description": "Coordinate five spaces over one shared Markdown vault — notes, tasks, memories, scratch and assets: mesh_* MCP tools plus the mesh vault-coherence skill."
     }
   ]
 }

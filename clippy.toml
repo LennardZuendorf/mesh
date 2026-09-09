@@ -1,0 +1,7 @@
+# Every documented ordering in mesh is a stable sort composition; an unstable sort would
+# silently break the path-ascending tiebreak that `domain/select.rs` and `search/**` rely on.
+disallowed-methods = [
+  { path = "slice::sort_unstable", reason = "use sort_by / sort_by_key: orderings here are stable compositions" },
+  { path = "slice::sort_unstable_by", reason = "use sort_by: orderings here are stable compositions" },
+  { path = "slice::sort_unstable_by_key", reason = "use sort_by_key: orderings here are stable compositions" },
+]

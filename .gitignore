@@ -12,28 +12,13 @@ config.local.toml
 index.sqlite
 index.sqlite-*
 
-# --- Python ---
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
-build/
-dist/
-.venv/
-venv/
-env/
-.uv/
-.python-version
+# --- Rust ---
+/target/
+**/*.rs.bk
 
 # --- Testing / tooling ---
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.mypy_cache/
-.ruff_cache/
-.tox/
+llvm-cov/
+*.profraw
 
 # --- Agent tooling caches ---
 .serena/
