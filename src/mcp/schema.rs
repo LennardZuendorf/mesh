@@ -281,7 +281,7 @@ pub const TOOLS: [ToolDef; 37] = [
     },
     ToolDef {
         name: "mesh_search",
-        description: "Recall across notes + tasks: tag pull (no query) or scored match (query).",
+        description: "Recall across notes, tasks, memories and assets: tag pull (no query) or scored match (query).",
         ann: Ann::ReadOnly,
         params: &[
             p("query", Kind::OptStr, "Search text, scored and ranked. Omit for a tag-only pull (unscored, meta_only by nature) instead of a search."),

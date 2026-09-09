@@ -35,7 +35,7 @@ fn no_args_prints_help_to_stdout_and_exits_two() {
     assert_eq!(out.status.code(), Some(2));
     let stdout = stdout_of(&out);
     assert!(
-        stdout.contains("Three verbs, one folder, one mesh"),
+        stdout.contains("Five spaces over one shared Markdown folder"),
         "{stdout}"
     );
     assert!(stdout.contains("Usage: mesh"), "{stdout}");
@@ -50,7 +50,7 @@ fn a_sub_app_with_no_subcommand_prints_its_help_to_stdout_and_exits_two() {
         ("task", "Coordinate work as claimable task files."),
         (
             "memory",
-            "Remember what an agent learned about the operator.",
+            "Remember what an agent learned about the operator or the fleet.",
         ),
         ("scratch", "Keep this session's working state, per agent."),
         ("asset", "Store files beside the vault, content-addressed."),
@@ -333,7 +333,7 @@ fn help_text_prints_raw_bracketed_strings() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Owner identity (must be in [tasks].collections).",
+            "Owner identity (checked against [tasks].collections",
         ));
 }
 

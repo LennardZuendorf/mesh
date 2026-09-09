@@ -108,12 +108,33 @@ is what keeps the vault readable:
   it a `kind`, an `importance` and, when it is only true for a while, an `expires`; supersede an
   old belief instead of overwriting it.
 - **scratch** — this session's working state, keyed by name under your own agent namespace.
-  Nobody else should ever need it: no lens and no default search will show it.
+  Nobody else should ever need it: no lens and no default *built-in* search will show it. A
+  vault wired to `indexed` is a different story — that engine is handed the whole vault root
+  and does not apply the space filter, so scratch can surface in a ranked hit. Write scratch
+  as if someone may read it.
 - **asset** — bytes that are not Markdown. Store the file once, then attach it to the note, task
   or memory it belongs to.
 
 A note and a memory with the same title never warn about each other, because the duplicate-title
 advisory is same-space by construction. Choosing the wrong space is silent, so choose on purpose.
+
+## When not to reach for mesh
+
+The rules above assume you have already decided the vault is the right place. Often it is not.
+
+- **Reasoning you will not need after this turn stays in your head.** A scratch file nobody ever
+  reads back is noise in someone's folder. Write scratch only for state a *later* session of
+  yours will actually load by name.
+- **The repository already owns code, configs and specs.** Do not mirror them into notes; link
+  to the path instead. Mesh is a second place to look, and a second place to look is a cost.
+- **Secrets and tokens do not go in.** Every file here is plain Markdown that any agent, editor
+  or backup on this machine can read, and delete is a hard unlink with no recovery.
+- **Anything you would not want the operator to read does not go in.** It is their folder; they
+  read it.
+- **Do not paste something enormous.** A Markdown file over 4 MiB drops out of every list,
+  search and lens with no warning. Attach it as an asset, or link to where it lives.
+- **One queue, not two.** If your harness is already tracking this work, do not also open a mesh
+  task for it — a task nobody will finish is worse than no task.
 
 ## Ownership is a cooperation convention, not proof of identity
 

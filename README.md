@@ -18,6 +18,29 @@ engine when one is configured, and falls back to a built-in BM25-lite engine tha
 installed. mesh coexists with whatever else writes the folder — a Markdown editor, git, another
 MCP server — and needs no database to run.
 
+## What mesh does not do
+
+Four things worth knowing before you point it at a folder you care about.
+
+- **It does not verify who is calling.** `owner` and `claimed_by` are strings a caller supplies.
+  `[tasks].collections` checks the *spelling* of `--owner` against a roster; nothing checks that
+  the process passing `--owner alice` is alice, and `claimed_by` is never checked at all. Treat a
+  claim as a cooperation signal between agents you already trust on one machine, not as proof of
+  authorship and not as a security boundary.
+- **Two search engines can answer one query differently.** `--space` is applied by the built-in
+  engine and ignored on the `indexed` path, and `mesh reindex` hands `indexed` the whole vault
+  root by default — so with a collection configured, a search can return rows from spaces you
+  filtered out, scratch among them. `mesh search --health` says which engine would answer.
+- **A Markdown file over 4 MiB is invisible.** The walk skips it, so it is absent from every
+  list, search and lens, and `note get` on its id reports "not found". There is no diagnostic
+  and no count. Mesh refuses to *write* past that limit; a file an external editor grew past it
+  simply disappears from mesh's view.
+- **Delete is a hard `unlink`.** No trash, no soft-delete, no promised recovery. Versioning and
+  backup are the vault owner's job — an unversioned vault has no recovery path for a deleted
+  note, and that is the trade mesh makes on purpose.
+
+---
+
 The spec is the source of truth: see [`.spec/`](.spec/). Working in here? Read
 [`AGENTS.md`](AGENTS.md) first. For architecture Q&A — spaces, memories vs. notes vs. scratch,
 assets, derived readiness, atomicity, vault/config resolution — see
@@ -91,7 +114,7 @@ Then:
 ```bash
 mesh note new "hello" --body "first note" --type note
 mesh task new "do something" --body "details" --priority high
-mesh memory new "operator prefers terse output" --kind preference --importance 4
+mesh memory new "operator prefers terse output" --kind preference --importance 4 --body "Terse. No prose."
 mesh task list
 mesh search "something"
 ```
@@ -390,8 +413,8 @@ the original filename is preserved in frontmatter as data, never as a path compo
 hostile filename can never traverse.
 
 `asset attach a-X TARGET` appends `![[a-7Q3KDX9M.png]]` to the target's body through the ordinary
-append path and links both `related` lists, so the pair shows up in `graph`/`build-context` for
-free. `asset path` prints the absolute blob path and nothing else — that is what gets piped into
+append path and links both `related` lists. Assets sit outside those lenses' default space set,
+so pass `--space notes,tasks,memories,assets` to see the pair in `graph`/`build-context`. `asset path` prints the absolute blob path and nothing else — that is what gets piped into
 an image tool. `asset remove` on a still-referenced asset is exit 2 unless you pass `--force`.
 
 ### `mesh search`

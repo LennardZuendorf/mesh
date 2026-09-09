@@ -117,8 +117,9 @@ Consequences that follow from content addressing rather than from a policy:
   as a path component, so a hostile filename cannot traverse.
 
 `asset attach` appends `![[<blob>]]` to the target's body through the ordinary append path and
-adds each id to the other's `related`, so the pair is visible to `graph --direction in` and
-`build-context` with no bespoke edge type.
+adds each id to the other's `related`, with no bespoke edge type. Both lenses default to
+`notes, tasks, memories` (`context::DEFAULT_SPACES`), so seeing the pair in
+`graph --direction in` or `build-context` means passing `--space notes,tasks,memories,assets`.
 
 ## Why is task readiness computed instead of stored?
 

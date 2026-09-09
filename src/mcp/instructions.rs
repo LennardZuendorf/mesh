@@ -15,11 +15,10 @@ pub const BUDGET_BYTES: usize = 2048;
 /// How many roster identities are spelled out before the `(+n more)` tail.
 pub const MAX_ROSTER_SHOWN: usize = 8;
 
-/// Section 1 — what mesh is, plus the one sentence covering the three new spaces and the
-/// which-space-wins rule (final.md §9.5).
+/// Section 1 — what mesh is: the five spaces and the which-space-wins rule (final.md §9.5).
 const WHAT_MESH_IS: &str = "# mesh\n\
-Three verbs over one shared Markdown vault: note, task, search. Markdown is the source of truth; mesh owns writes and fast reads — no separate memory store, no external task tracker.\n\
-Also: memory (an agent's belief, recalled later), scratch (this session's state, nobody else's), asset (stored files) — note is durable knowledge the operator reads.";
+Five spaces over one shared Markdown vault: note (durable knowledge the operator reads), task (claimable work, with dependencies), memory (an agent's belief, recalled later), scratch (this session's state, nobody else's), asset (stored files). Markdown is the source of truth; mesh owns writes and fast reads — no separate memory store, no external task tracker.\n\
+Search and the lenses skip scratch unless you ask for it.";
 
 /// Section 6 — the list-vs-comma-string trap, embedding `TAG_SPEC_SEMANTICS` verbatim.
 const TAG_TRAP_HEAD: &str = "## Tag mutation\n\

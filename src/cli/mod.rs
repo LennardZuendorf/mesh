@@ -24,11 +24,12 @@ use clap::{Args, Parser, Subcommand};
 use crate::ctx::Ctx;
 use crate::error::Result;
 
-/// The root help line. Unchanged from the Python CLI.
+/// The root help line: five spaces over one folder, the shape the surface actually has.
 pub const ROOT_ABOUT: &str =
-    "Three verbs, one folder, one mesh — notes + search = shared memory, tasks = coordination + handoff.";
+    "Five spaces over one shared Markdown folder — notes and memories recall, tasks coordinate, scratch and assets hold the working surface.";
 
-const OWNER_WRITE_HELP: &str = "Owner identity (must be in [tasks].collections).";
+const OWNER_WRITE_HELP: &str =
+    "Owner identity (checked against [tasks].collections when that roster is non-empty).";
 const OWNER_FILTER_HELP: &str = "Filter by exact owner.";
 const TAGS_CSV_HELP: &str = "Comma-separated tags.";
 const TAGS_FILTER_HELP: &str = "Comma-separated tag filter (AND).";
@@ -38,6 +39,13 @@ const SECTION_HELP: &str = "Append under this '## section', creating it when abs
 const TIMESTAMP_HELP: &str = "Prefix the appended block with an attribution stamp.";
 const FORCE_DELETE_HELP: &str = "Delete without the confirmation prompt.";
 const SPACE_HELP: &str = "Comma-separated spaces to read (default: [search].spaces).";
+/// `recent-activity`, `project` and `session-start` read notes and tasks, not `[search].spaces`.
+const LENS_SPACE_HELP: &str = "Comma-separated spaces to read (default: notes, tasks).";
+/// `build-context` and `graph` walk notes, tasks and memories.
+const CONTEXT_SPACE_HELP: &str =
+    "Comma-separated spaces to read (default: notes, tasks, memories).";
+/// `watch` reconciles and indexes every enabled space, not the search corpus.
+const WATCH_SPACE_HELP: &str = "Comma-separated spaces to watch (default: every enabled space).";
 
 /// A score floor clap accepts: a finite `f64`.
 ///
@@ -114,12 +122,12 @@ pub enum Command {
     Task(TaskArgs),
     #[command(
         display_order = 3,
-        about = "Recall across notes + tasks: ranked query, or an exact tag pull (--tags)."
+        about = "Recall across notes, tasks, memories and assets: ranked query, or a tag pull (--tags)."
     )]
     Search(SearchArgs),
     #[command(
         display_order = 4,
-        about = "Remember what an agent learned about the operator."
+        about = "Remember what an agent learned about the operator or the fleet."
     )]
     Memory(MemoryArgs),
     #[command(
@@ -172,7 +180,7 @@ pub enum Command {
     #[command(
         name = "session-start",
         display_order = 14,
-        about = "Warm-start payload: my tasks + mentions of me + recent activity."
+        about = "Warm-start: my tasks + mentions of me + my memories + recent activity."
     )]
     SessionStart(SessionStartArgs),
     #[command(
@@ -380,7 +388,7 @@ pub enum TaskSub {
         #[arg(
             long,
             value_name = "TEXT",
-            help = "Reassign owner (must be in [tasks].collections)."
+            help = "Reassign owner (checked against [tasks].collections when non-empty)."
         )]
         owner: Option<String>,
         #[arg(
@@ -417,7 +425,7 @@ pub enum TaskSub {
         task_id: String,
         #[arg(
             long,
-            help = "Refuse to claim a task with an unsatisfied blocker (exit 5)."
+            help = "Refuse to claim a task with an unsatisfied blocker, exit 5 (default: [tasks].strict)."
         )]
         strict: bool,
         #[arg(
@@ -706,7 +714,7 @@ pub enum MemorySub {
         #[arg(
             long,
             value_name = "TEXT",
-            help = "Reassign owner (must be in [tasks].collections)."
+            help = "Reassign owner (checked against [tasks].collections when non-empty)."
         )]
         owner: Option<String>,
         #[command(flatten)]
@@ -1122,7 +1130,7 @@ pub struct RecentActivityArgs {
         help = "Cap the number of rows."
     )]
     pub limit: i64,
-    #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
+    #[arg(long, value_name = "TEXT", help = LENS_SPACE_HELP)]
     pub space: Option<String>,
     #[command(flatten)]
     pub out: OutFlags,
@@ -1131,7 +1139,7 @@ pub struct RecentActivityArgs {
 /// `mesh build-context`.
 #[derive(Args, Debug)]
 pub struct BuildContextArgs {
-    #[arg(help = "Seed note/task id (n-… or t-…) to expand from.")]
+    #[arg(help = "Seed id to expand from (n-…, t-…, m-…, or a note title slug).")]
     pub seed_id: String,
     #[arg(
         long,
@@ -1140,7 +1148,7 @@ pub struct BuildContextArgs {
         help = "Hops to walk (0 = seed only; 1 = direct)."
     )]
     pub depth: i64,
-    #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
+    #[arg(long, value_name = "TEXT", help = CONTEXT_SPACE_HELP)]
     pub space: Option<String>,
     #[command(flatten)]
     pub out: OutFlags,
@@ -1149,7 +1157,7 @@ pub struct BuildContextArgs {
 /// `mesh graph`.
 #[derive(Args, Debug)]
 pub struct GraphArgs {
-    #[arg(help = "Seed note/task id (n-… or t-…) to expand from.")]
+    #[arg(help = "Seed id to expand from (n-…, t-…, m-…, or a note title slug).")]
     pub seed_id: String,
     #[arg(
         long,
@@ -1165,7 +1173,7 @@ pub struct GraphArgs {
         help = "Edge direction to walk: out (related, default), in (backlinks), both."
     )]
     pub direction: String,
-    #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
+    #[arg(long, value_name = "TEXT", help = CONTEXT_SPACE_HELP)]
     pub space: Option<String>,
     #[command(flatten)]
     pub out: OutFlags,
@@ -1176,7 +1184,7 @@ pub struct GraphArgs {
 pub struct ProjectArgs {
     #[arg(help = "Project note id (n-…) to scope to.")]
     pub project_id: String,
-    #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
+    #[arg(long, value_name = "TEXT", help = LENS_SPACE_HELP)]
     pub space: Option<String>,
     #[command(flatten)]
     pub out: OutFlags,
@@ -1193,7 +1201,7 @@ pub struct SessionStartArgs {
     pub owner: Option<String>,
     #[arg(
         long,
-        help = "Widen the activity half to every agent (task half stays mine)."
+        help = "Widen the activity feed to every agent (tasks, mentions and memories stay mine)."
     )]
     pub team: bool,
     #[arg(
@@ -1213,7 +1221,7 @@ pub struct SessionStartArgs {
         help = "Character budget (0 = unbounded); trims bodies, then entries."
     )]
     pub budget: i64,
-    #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
+    #[arg(long, value_name = "TEXT", help = LENS_SPACE_HELP)]
     pub space: Option<String>,
     #[command(flatten)]
     pub out: OutFlags,
@@ -1294,7 +1302,11 @@ pub struct StatusArgs {}
 /// `mesh reindex`.
 #[derive(Args, Debug)]
 pub struct ReindexArgs {
-    #[arg(long, value_name = "TEXT", help = "Comma-separated spaces to reindex.")]
+    #[arg(
+        long,
+        value_name = "TEXT",
+        help = "Comma-separated spaces to reindex (default: the whole vault root)."
+    )]
     pub space: Option<String>,
 }
 
@@ -1317,7 +1329,7 @@ pub struct WatchArgs {
         help = "Debounce window in milliseconds."
     )]
     pub debounce: u64,
-    #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
+    #[arg(long, value_name = "TEXT", help = WATCH_SPACE_HELP)]
     pub space: Option<String>,
     #[arg(long, help = "Emit an NDJSON event log on stdout.")]
     pub json: bool,
