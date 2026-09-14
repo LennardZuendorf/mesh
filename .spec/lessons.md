@@ -130,3 +130,51 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** after any bulk rename where the new token can also occur as an ordinary word, grep for the doubled token ("`<new> <new>`", case-insensitive) across every touched file and hand-fix the hits — don't trust the substitution pass alone to leave prose readable.
 **Tags:** rename, prose, review, tooling
 **Date:** 2026-09-01
+
+### A degrade-to-empty helper turns a validation error into a wrong answer
+**Pattern:** `all_paths`/`task_files` swallowed the disabled-space error with `let Ok(root) = … else { return Vec::new() }` so the cross-space search corpus would keep working. Every verb built on those helpers inherited the degrade: `task list` with `tasks = false` printed nothing and exited 0, and `note get` reported not-found (3) instead of the contract's validation error (2) — while `task get`, which resolves through a different path, exited 2 correctly. The inconsistency was invisible in review because each half read as reasonable on its own.
+**Rule:** a helper may degrade only where degrading is the contract. When a scan helper is shared between "this space's own verb" and "every space's corpus", put the error at the verb, not in the helper — and pin it with a test that walks *every* verb of the disabled space, since a per-verb divergence is exactly what a single spot-check misses.
+**Tags:** error-handling, spaces, exit-codes, testing
+**Date:** 2026-09-07
+
+### A writer and its reader must share one definition of what needs quoting
+**Pattern:** the frontmatter emitter decided a plain scalar was safe by testing `parse::<i64>()`, `parse::<f64>()` and the timestamp parser. The reader also resolved `0x`-prefixed hex to an integer. So `mesh note new 0x1F` wrote `title: 0x1F` plain, exited 0 with an id — and every later read of that file failed schema validation, making the entity permanently unaddressable by the id mesh had just handed out. The same shape hit tags (`"tags":[31]` on the JSON surface) and unknown keys.
+**Rule:** never hand-write the write-side quoting rule next to a hand-written read-side resolver. Define "resolves to a non-string" once, in the reader, and have the emitter call it — then a new literal form can only ever be added in one place. The test that catches this is round-trip (write, read, compare), not an assertion about the bytes.
+**Tags:** yaml, frontmatter, round-trip, dry
+**Date:** 2026-09-07
+
+### Locking before resolving makes the lock path an unguarded sandbox hole
+**Pattern:** every mutating task verb did `hold(&entity_lock(root, id))` *before* `resolve(cfg, id)`, so the sandbox check ran on a path the process had already created. An id of `../../../../elsewhere/victim` made `acquire` `create_dir_all` outside the vault and `reclaim_if_stale` unlink an aged `victim.lock` there — reachable over MCP, where the id is untrusted model output.
+**Rule:** anything that becomes part of a path is untrusted, including the derived path of a lock, a temp file or a marker. Validate at the function that builds the path (return `Result`, don't sanitise silently) rather than trusting the caller to have resolved first — the whole point of taking the lock early is that resolution has *not* happened yet.
+**Tags:** security, sandboxing, locks, path-traversal
+**Date:** 2026-09-07
+
+### A sweeper that snapshots one side of an invariant needs the writer's lock
+**Pattern:** `asset add` wrote blob-then-sidecar under the space create lock; `asset gc --apply` took no lock, snapshotted the sidecars, then listed the blobs. A blob written after the snapshot looked like an orphan and was unlinked while its sidecar was still being written — producing the sidecar-with-no-blob state the spec explicitly forbids. Every `add` still reported success. A 24-writer race test did not reproduce it; 40 writers with sweepers *interleaved* rather than appended did.
+**Rule:** garbage collection is a writer. If a two-write sequence is made safe by a lock, the sweep that judges that sequence complete must take the same lock. And verify a race test by breaking the fix and watching it fail — a green race test proves nothing until you have seen it go red.
+**Tags:** concurrency, locks, gc, testing
+**Date:** 2026-09-07
+
+### "Nothing names it" is not an ownership test in a shared space
+**Pattern:** `asset gc --apply` decided a file was its own by asking whether any sidecar named it, and `asset remove` treated the sidecar's `blob` key as a path. Both inferences hold only in a folder mesh alone writes. With the documented `assets = "."` layout the space is the vault root, so the sweep unlinked `important-spreadsheet.csv`, `family-photo.jpg` and the vault's own `mesh.toml` — `removed:3`, hard unlink, no trash. And because `blob` is agent- and editor-writable frontmatter, `blob: ../notes/n-XXXX.md` passed `safe_resolve` (which only proves membership in the union of space roots) and deleted a note, exit 0. The create lock added for the previous gc finding cannot help either bug: the other writer is the operator, who holds no mesh lock at all.
+**Rule:** when a space can be shared, ownership is a property of the *name mesh itself wrote*, not of what is missing elsewhere. Derive the test as the inverse of the namer (`owned_blob_id` is the inverse of `blob_name`) so the two cannot drift, and require it to match *this* entity's id before any unlink. A path that passes the sandbox check is still the wrong file to touch; sandboxing answers "inside the vault", never "mine".
+**Tags:** assets, ownership, gc, sandboxing, shared-spaces, delete
+**Date:** 2026-09-08
+
+### A list derived from an unlocked scan is a claim about the past
+**Pattern:** `task block` read `blocked_by` from a scan, appended its target, then wrote the whole list under the lock. Sixteen concurrent blocks on one task left **3 of 16** edges — each writer replayed its own stale snapshot over the previous winner, every call exit 0. `memory forget --expired` had the same shape one step further on: it deleted from a pre-lock scan and never re-read inside the lock, so a memory whose `expires` a writer had just extended was unlinked anyway and the renewal's reported success was a lie. `asset remove` ran its reference guard before the lock, so a concurrent `attach` slipped past the `--force` refusal.
+**Rule:** taking the lock is not enough — what you write inside it must be *recomputed* inside it. Carry the edit (add/remove, or a predicate) into the locked section and replay it against the value the locked read returns; never carry a precomputed result. A scan may still feed a decision that genuinely needs the whole graph, such as a cycle check, but never the list that gets written.
+**Tags:** concurrency, locks, toctou, lost-update, deps, memories, assets
+**Date:** 2026-09-08
+
+### A hardcoded date in a test fixture is a gate that expires
+**Pattern:** `tests/fixtures/python-vault/tasks/open/t-D0YQ.md` was stamped `updated: 2026-09-05` and `STATUS_STALE_WINDOW` is `"2d"`, so two `status` tests asserting `stale_claims: 0` passed for exactly two days and then failed on every later run. The handover notes recorded "1248 pass / 0 fail" in good faith; by the time the next session read them the suite was already red at that same commit, for a reason no code change had caused.
+**Rule:** a fixture that encodes an absolute date silently couples the suite to the calendar. Stamp time-relative fixtures from `now` when the fixture is materialised, or assert the derived property rather than a count that ages. And treat an inherited "gates green" claim as a timestamp, not a fact — re-run the gates on the base commit before trusting them, so a pre-existing failure is not mistaken for one you introduced.
+**Tags:** testing, fixtures, time-dependence, handover, gates
+**Date:** 2026-09-08
+
+### A test can pin the bug it is supposed to catch
+**Pattern:** `the_indexed_path_defaults_to_the_config_threshold_not_the_engine_floor` asserted that the `indexed` branch applies `[search].threshold`'s nominal `0.65` when no threshold is configured. `tech.md` says the opposite in one line — "`[search].threshold` applies **only when explicitly set**" — and `mesh init` omits the key precisely so the tag and body tiers stay reachable (README §config). So every indexed hit scoring 0.4–0.65 was dropped at exit 0, on the config mesh itself writes, and the bug survived a 123-agent adversarial review because the test covering it was green and its name asserted the wrong behaviour as intended. The same sweep found a second instance of the shape: two `status` tests encoding a `stale_claims: 0` count no spec sentence promises.
+**Rule:** a green test is evidence about the assertion, not about the spec. When a test and the spec disagree the spec wins — so read a test's assertion against the spec sentence it claims to cover before trusting it, especially one whose *name* states a behaviour. Treat a test encoding a behaviour no spec line supports as a finding in its own right, and fix the test in the same commit as the code, or the next reviewer will read it as the contract.
+**Tags:** testing, spec-conformance, search, threshold, review, gates
+**Date:** 2026-09-08
