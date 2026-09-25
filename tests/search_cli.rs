@@ -1091,6 +1091,87 @@ fn engine_indexed_shells_indexed_even_with_hybrid_off() {
     assert_eq!(f.indexed_argv().len(), 1);
 }
 
+// ---------------------------------------------------------------- reindex routing
+
+/// A stub that exits 3: the rebuild fails, so `reindex` must report the degradation.
+const REINDEX_NOTICE: &str = "search index unavailable (indexed binary missing or failed)";
+
+#[test]
+fn reindex_updates_a_collection_that_already_exists() {
+    let f = seeded_with(&hybrid_config());
+    // A stub that succeeds: the update-when-exists route is ONE refresh for the collection,
+    // never a per-root create (create would PROMPT on an existing collection and mesh never
+    // answers a prompt, so it must not be the first move).
+    f.fake_indexed("");
+    let out = run(&f, &["reindex"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stderr_of(&out), "", "a successful refresh is silent");
+    assert_eq!(f.indexed_argv(), ["index update test-vault"]);
+}
+
+#[test]
+fn reindex_creates_each_root_when_the_collection_is_missing() {
+    let f = seeded_with(&hybrid_config());
+    install_fake(&f, "no-collection.sh");
+    let log = f.dir.path().join("indexed-argv.log");
+    let out = f
+        .cmd()
+        .env("INDEXED_ARGV_LOG", &log)
+        .arg("reindex")
+        .output()
+        .expect("run reindex");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(
+        stderr_of(&out),
+        "",
+        "the create succeeded, so no degradation notice"
+    );
+    // Update is the existence probe; create follows, once per root (the vault root here).
+    let text = std::fs::read_to_string(&log).expect("argv log");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0], "index update test-vault", "probe first");
+    assert!(
+        lines[1].starts_with("index create files --path "),
+        "{:?}",
+        lines[1]
+    );
+    assert!(
+        lines[1].ends_with("--collection test-vault"),
+        "{:?}",
+        lines[1]
+    );
+}
+
+#[test]
+fn reindex_reports_a_degradation_when_the_refresh_fails() {
+    let f = seeded_with(&hybrid_config());
+    // A non-zero exit that is NOT the missing-collection error: no fallback to create.
+    install_fake(&f, "fail.sh");
+    let out = run(&f, &["reindex"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stderr_of(&out).trim_end(), REINDEX_NOTICE);
+}
+
+#[test]
+fn an_ingest_timeout_override_reaches_the_reindex_clock() {
+    let f = seeded_with(&hybrid_config());
+    install_fake(&f, "hang.sh");
+    let started = std::time::Instant::now();
+    let out = f
+        .cmd()
+        .env("MESH_INDEXED_TIMEOUT_MS", "250")
+        .arg("reindex")
+        .output()
+        .expect("run reindex");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the ingest clock honoured the override"
+    );
+    assert!(stderr_of(&out).contains(REINDEX_NOTICE));
+}
+
 // ---------------------------------------------------------------- notices and output class
 
 #[test]

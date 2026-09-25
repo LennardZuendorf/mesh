@@ -234,13 +234,25 @@ pub fn reindex_status(cfg: &Config, roots: &[PathBuf]) -> IndexOutcome {
     let Some(collection) = cfg.search.collection.as_deref() else {
         return IndexOutcome::NoCollection;
     };
-    let mut outcome = IndexOutcome::Ran;
-    for root in roots {
-        if let Err(failure) = indexed::run(&indexed::create_argv(root, collection)) {
-            outcome = IndexOutcome::Failed(failure);
+    // Update-when-exists. `index update <C>` is the collection's incremental refresh, and the
+    // only existence probe the shipped CLI offers (there is no "does it exist" query). Create
+    // only when the update reports the collection absent: create PROMPTS to overwrite an
+    // existing collection and mesh never answers a prompt, so it must never be the first move
+    // on a collection that exists. Updates are per collection, so it is one call; creates are
+    // per root, as before.
+    match indexed::run_ingest(&indexed::update_argv(collection)) {
+        Ok(_) => IndexOutcome::Ran,
+        Err(indexed::Failure::MissingCollection) => {
+            let mut outcome = IndexOutcome::Ran;
+            for root in roots {
+                if let Err(failure) = indexed::run_ingest(&indexed::create_argv(root, collection)) {
+                    outcome = IndexOutcome::Failed(failure);
+                }
+            }
+            outcome
         }
+        Err(failure) => IndexOutcome::Failed(failure),
     }
-    outcome
 }
 
 /// Refresh the collection in the index, with the outcome. Never fails the process.
@@ -252,7 +264,7 @@ pub fn index_update_status(cfg: &Config) -> IndexOutcome {
     let Some(collection) = cfg.search.collection.as_deref() else {
         return IndexOutcome::NoCollection;
     };
-    match indexed::run(&indexed::update_argv(collection)) {
+    match indexed::run_ingest(&indexed::update_argv(collection)) {
         Ok(_) => IndexOutcome::Ran,
         Err(failure) => IndexOutcome::Failed(failure),
     }

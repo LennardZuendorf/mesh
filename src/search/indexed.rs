@@ -27,11 +27,16 @@ use crate::storage::safe_resolve;
 /// The binary looked up on `PATH` when `$MESH_INDEXED_BIN` is unset.
 pub const INDEXED_BIN: &str = "indexed";
 
-/// The wall clock allowed per invocation (deviation 12). Overridable for tests through
-/// `$MESH_INDEXED_TIMEOUT_MS`; a value of `0` or an unparsable one falls back to this.
+/// The wall clock allowed per **search** invocation (deviation 12). Overridable for tests
+/// through `$MESH_INDEXED_TIMEOUT_MS`; a value of `0` or an unparsable one falls back to this.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-/// The environment variable that overrides `DEFAULT_TIMEOUT_MS`, in milliseconds.
+/// The wall clock allowed per **ingest** invocation — `index create`/`index update`, which
+/// embed and index a whole vault and are far slower than a query. `$MESH_INDEXED_TIMEOUT_MS`
+/// still overrides it.
+pub const INGEST_TIMEOUT_MS: u64 = 600_000;
+
+/// The environment variable that overrides both wall clocks, in milliseconds.
 pub const ENV_TIMEOUT_MS: &str = "MESH_INDEXED_TIMEOUT_MS";
 
 /// The environment variable that puts the `indexed` CLI in machine-readable mode — its
@@ -54,6 +59,9 @@ pub enum Failure {
     Failed,
     /// Still running when the wall clock ran out; the child was killed.
     Timeout,
+    /// `index update <C>` reported the collection absent. The only existence probe the
+    /// shipped CLI offers, so it is what routes `mesh reindex` to `index create`.
+    MissingCollection,
 }
 
 /// One decoded NDJSON line.
@@ -81,13 +89,24 @@ pub fn available() -> bool {
     binary().is_some()
 }
 
-/// The per-invocation wall clock.
+/// The wall clock for a search invocation, `$MESH_INDEXED_TIMEOUT_MS` or 30 s.
 pub fn timeout() -> Duration {
+    resolve_timeout(DEFAULT_TIMEOUT_MS)
+}
+
+/// The wall clock for an ingest invocation (`index create`/`index update`), the same
+/// environment override or 600 s.
+pub fn ingest_timeout() -> Duration {
+    resolve_timeout(INGEST_TIMEOUT_MS)
+}
+
+/// `$MESH_INDEXED_TIMEOUT_MS` when set to a positive integer, else `default_ms`.
+fn resolve_timeout(default_ms: u64) -> Duration {
     let ms = std::env::var(ENV_TIMEOUT_MS)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_TIMEOUT_MS);
+        .unwrap_or(default_ms);
     Duration::from_millis(ms)
 }
 
@@ -126,11 +145,34 @@ pub fn create_argv(root: &Path, collection: &str) -> Vec<String> {
     ]
 }
 
-/// Run `indexed` with `argv` and return its stdout.
+/// Run `indexed` with `argv` on the **search** wall clock and return its stdout.
 ///
 /// stdout is drained by a helper thread so a child that outruns the pipe buffer cannot
 /// deadlock the parent; stderr is discarded, as the Python client discarded it.
 pub fn run(argv: &[String]) -> Result<String, Failure> {
+    run_with_timeout(argv, timeout())
+}
+
+/// Run an **ingest** invocation (`index create`/`index update`) on the ingest wall clock.
+pub fn run_ingest(argv: &[String]) -> Result<String, Failure> {
+    run_with_timeout(argv, ingest_timeout())
+}
+
+/// Whether a failed child's output is the shipped CLI's missing-collection error.
+///
+/// `index update <C>` on an absent collection is the only existence probe the CLI offers
+/// (there is no "does this collection exist" query); it exits non-zero with the machine-output
+/// envelope `{"status":"error","error":"Collection 'X' not found"}` on stdout.
+fn is_missing_collection(text: &str) -> bool {
+    matches!(
+        serde_json::from_str::<Json>(text),
+        Ok(Json::Object(obj))
+            if matches!(obj.get("error"), Some(Json::String(e)) if e.contains("not found"))
+    )
+}
+
+/// Run `indexed` with `argv` under `budget` and return its stdout.
+fn run_with_timeout(argv: &[String], budget: Duration) -> Result<String, Failure> {
     let Some(bin) = binary() else {
         return Err(Failure::Missing);
     };
@@ -156,13 +198,15 @@ pub fn run(argv: &[String]) -> Result<String, Failure> {
         }
         buf
     });
-    let deadline = Instant::now() + timeout();
+    let deadline = Instant::now() + budget;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let text = reader.join().unwrap_or_default();
                 return if status.success() {
                     Ok(text)
+                } else if is_missing_collection(&text) {
+                    Err(Failure::MissingCollection)
                 } else {
                     Err(Failure::Failed)
                 };
@@ -550,5 +594,26 @@ mod tests {
     #[test]
     fn timeout_reads_the_environment_override() {
         assert!(timeout().as_millis() > 0);
+    }
+
+    #[test]
+    fn the_search_and_ingest_clocks_have_distinct_defaults() {
+        assert_eq!(DEFAULT_TIMEOUT_MS, 30_000, "search keeps its 30 s clock");
+        assert_eq!(INGEST_TIMEOUT_MS, 600_000, "the ingest path gets 600 s");
+    }
+
+    #[test]
+    fn only_the_shipped_not_found_envelope_reads_as_a_missing_collection() {
+        // The shipped CLI's `index update <absent>` machine output.
+        assert!(is_missing_collection(
+            "{\n  \"status\": \"error\",\n  \"error\": \"Collection 'c' not found\"\n}\n"
+        ));
+        // Anything else is an ordinary failure, and the create fallback is not taken.
+        assert!(!is_missing_collection(""));
+        assert!(!is_missing_collection("not json"));
+        assert!(!is_missing_collection(
+            "{\"status\":\"error\",\"error\":\"disk full\"}"
+        ));
+        assert!(!is_missing_collection("{\"results\":[]}"));
     }
 }
