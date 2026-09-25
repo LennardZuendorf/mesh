@@ -661,10 +661,13 @@ fn the_example_config_loads_through_from_table() {
     );
     assert!((cfg.search.threshold - 0.65).abs() < f64::EPSILON);
 
-    // Every space resolves, and none is disabled.
+    // Every space resolves, and none is disabled. The loader canonicalises `vault_path`,
+    // so the comparison must speak the same path space (on macOS a tempdir is `/var/...`,
+    // canonicalised to `/private/var/...`).
+    let vault_real = mesh::storage::realpath(&vault);
     for space in mesh::spaces::Space::ALL {
         let root = cfg.root(space).expect("every example space is enabled");
-        assert!(root.starts_with(&vault) || root == vault);
+        assert!(root.starts_with(&vault_real) || root == vault_real);
     }
 }
 

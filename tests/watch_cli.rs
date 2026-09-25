@@ -249,11 +249,11 @@ fn an_unknown_space_is_a_validation_error() {
 #[test]
 fn a_missing_indexed_binary_is_one_notice_not_a_failure() {
     let fixture = VaultFixture::new();
-    let out = fixture
-        .cmd()
-        .args(["watch", "--once"])
-        .output()
-        .expect("run watch");
+    // Hermetic: the operator's own PATH may carry a real `indexed` (the dev machine does),
+    // so this command sees only the fixture's bin dir — where no binary was installed.
+    let mut cmd = fixture.cmd();
+    cmd.env("PATH", fixture.dir.path().join("bin"));
+    let out = cmd.args(["watch", "--once"]).output().expect("run watch");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         stderr_of(&out),

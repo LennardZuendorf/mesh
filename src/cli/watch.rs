@@ -520,10 +520,14 @@ mod tests {
     #[test]
     fn a_misfiled_task_moves_and_keeps_its_bytes() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config_for(dir.path());
-        let src = write(dir.path(), "tasks/open/t-AAAA.md", TASK_DONE);
+        // `config_for` canonicalises its vault, so every path handed to `reconcile_path`
+        // must speak the same path space: a macOS tempdir is `/var/...`, canonicalised to
+        // `/private/var/...`, and a raw prefix never matches a canonical space root.
+        let root = crate::storage::realpath(dir.path());
+        let cfg = config_for(&root);
+        let src = write(&root, "tasks/open/t-AAAA.md", TASK_DONE);
         let dest = reconcile_path(&cfg, &src);
-        assert_eq!(dest, dir.path().join("tasks/done/t-AAAA.md"));
+        assert_eq!(dest, root.join("tasks/done/t-AAAA.md"));
         assert!(!src.exists());
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), TASK_DONE);
     }
@@ -531,18 +535,20 @@ mod tests {
     #[test]
     fn a_misfiled_note_moves_into_its_type_folder() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config_for(dir.path());
-        let src = write(dir.path(), "notes/n-BBBB.md", NOTE_DECISION);
+        let root = crate::storage::realpath(dir.path());
+        let cfg = config_for(&root);
+        let src = write(&root, "notes/n-BBBB.md", NOTE_DECISION);
         let dest = reconcile_path(&cfg, &src);
-        assert_eq!(dest, dir.path().join("notes/decisions/n-BBBB.md"));
+        assert_eq!(dest, root.join("notes/decisions/n-BBBB.md"));
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), NOTE_DECISION);
     }
 
     #[test]
     fn a_correctly_filed_file_returns_the_callers_own_path() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config_for(dir.path());
-        let src = write(dir.path(), "tasks/done/t-AAAA.md", TASK_DONE);
+        let root = crate::storage::realpath(dir.path());
+        let cfg = config_for(&root);
+        let src = write(&root, "tasks/done/t-AAAA.md", TASK_DONE);
         // The caller's path space, verbatim — not a realpath.
         assert_eq!(reconcile_path(&cfg, &src), src);
         assert!(src.exists());
@@ -551,7 +557,8 @@ mod tests {
     #[test]
     fn every_hostile_file_is_left_where_it_is() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config_for(dir.path());
+        let root = crate::storage::realpath(dir.path());
+        let cfg = config_for(&root);
         let hostile: Vec<(&str, &str)> = vec![
             ("notes/notmarkdown.txt", TASK_DONE),
             ("notes/malformed.md", "---\nid: n-CCCC\n  bad: [\n---\n\nx"),
@@ -584,7 +591,7 @@ mod tests {
             ),
         ];
         for (rel, body) in &hostile {
-            let path = write(dir.path(), rel, body);
+            let path = write(&root, rel, body);
             assert_eq!(reconcile_path(&cfg, &path), path, "{rel} must not move");
             assert!(path.exists(), "{rel} must survive");
         }
@@ -593,17 +600,18 @@ mod tests {
     #[test]
     fn a_file_outside_the_note_and_task_spaces_is_never_moved() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config_for(dir.path());
+        let root = crate::storage::realpath(dir.path());
+        let cfg = config_for(&root);
         // A memory carrying a note-shaped type must not be dragged into notes/.
         let path = write(
-            dir.path(),
+            &root,
             "memories/m-AAAA.md",
             "---\nid: m-AAAA\ntype: note\ntitle: X\n---\n\nx",
         );
         assert_eq!(reconcile_path(&cfg, &path), path);
         assert!(path.exists());
         // A path outside every space root is left alone too.
-        let outside = write(dir.path(), "stray/n-ZZZZ.md", NOTE_DECISION);
+        let outside = write(&root, "stray/n-ZZZZ.md", NOTE_DECISION);
         assert_eq!(reconcile_path(&cfg, &outside), outside);
         assert!(outside.exists());
     }
@@ -611,8 +619,9 @@ mod tests {
     #[test]
     fn a_contended_entity_is_left_for_a_later_event() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config_for(dir.path());
-        let src = write(dir.path(), "tasks/open/t-AAAA.md", TASK_DONE);
+        let root = crate::storage::realpath(dir.path());
+        let cfg = config_for(&root);
+        let src = write(&root, "tasks/open/t-AAAA.md", TASK_DONE);
         let tasks_root = cfg.root(Space::Tasks).unwrap().to_path_buf();
         let held =
             crate::storage::acquire(&crate::storage::entity_lock(&tasks_root, "t-AAAA").unwrap())
@@ -623,15 +632,16 @@ mod tests {
         // Once the writer is gone the next event heals it.
         assert_eq!(
             reconcile_path(&cfg, &src),
-            dir.path().join("tasks/done/t-AAAA.md")
+            root.join("tasks/done/t-AAAA.md")
         );
     }
 
     #[test]
     fn reconcile_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = config_for(dir.path());
-        let src = write(dir.path(), "notes/n-BBBB.md", NOTE_DECISION);
+        let root = crate::storage::realpath(dir.path());
+        let cfg = config_for(&root);
+        let src = write(&root, "notes/n-BBBB.md", NOTE_DECISION);
         let first = reconcile_path(&cfg, &src);
         let second = reconcile_path(&cfg, &first);
         assert_eq!(first, second);

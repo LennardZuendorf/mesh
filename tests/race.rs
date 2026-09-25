@@ -325,9 +325,11 @@ fn a_live_lock_exits_four_within_the_wait_budget_rather_than_hanging() {
     let elapsed = started.elapsed();
 
     assert_eq!(code, 4, "stderr={stderr}");
+    // The config canonicalises the vault, so the reported lock path is canonical too —
+    // a raw tempdir prefix (`/var/...`) never equals `/private/var/...` on macOS.
     assert_eq!(
         stderr.trim_end(),
-        format!("lock is held: {}", lock.display())
+        format!("lock is held: {}", mesh::storage::realpath(&lock).display())
     );
     // The bounded wait is 15 s; anything near it is fine, a hang is not.
     assert!(elapsed < Duration::from_secs(60), "waited {elapsed:?}");

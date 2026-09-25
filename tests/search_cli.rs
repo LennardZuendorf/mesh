@@ -685,7 +685,11 @@ fn health_reports_hybrid_disabled_first() {
 #[test]
 fn health_reports_a_missing_binary_last() {
     let f = seeded_with(&hybrid_config());
-    let out = run(&f, &["search", "--health"]);
+    // Hermetic: the operator's own PATH may carry a real `indexed` (the dev machine does),
+    // so this one command sees only the fixture's bin dir — where no binary was installed.
+    let mut cmd = f.cmd();
+    cmd.env("PATH", f.dir.path().join("bin"));
+    let out = cmd.args(["search", "--health"]).output().expect("run mesh");
     let json: Json = serde_json::from_str(stdout_of(&out).trim_end()).expect("json");
     assert_eq!(
         json["reason"],

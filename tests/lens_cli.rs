@@ -148,8 +148,24 @@ fn basename(value: &Json) -> String {
 
 /// Stamp the corpus copy with the mtimes the Python golden recorded, so mtime-ordered output
 /// is comparable row for row.
+///
+/// The golden stamps are pinned to the day they were generated, and a rolling `--since`
+/// window (session-start's 7d) decays to empty once that day leaves the window: a fixture
+/// that encodes an absolute date couples the suite to the calendar (lessons.md). Every stamp
+/// is therefore shifted by `now - the newest golden stamp` at materialisation: a uniform
+/// shift preserves the golden's ordering and puts the whole corpus back inside the window.
 fn apply_golden_mtimes(fixture: &VaultFixture) {
-    for entry in golden("recent_activity.json").as_array().expect("array") {
+    let entries = golden("recent_activity.json");
+    let entries = entries.as_array().expect("array");
+    let reference = entries
+        .iter()
+        .filter_map(|entry| entry.get("mtime").and_then(Json::as_f64))
+        .fold(0.0, f64::max);
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock is after the epoch");
+    let shift = now.as_secs_f64() - reference;
+    for entry in entries {
         let name = basename(entry.get("path").unwrap_or(&Json::Null));
         let mtime = entry
             .get("mtime")
@@ -158,7 +174,7 @@ fn apply_golden_mtimes(fixture: &VaultFixture) {
         let Some(path) = find_file(&fixture.vault, &name) else {
             continue;
         };
-        let when = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(mtime);
+        let when = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(mtime + shift);
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
