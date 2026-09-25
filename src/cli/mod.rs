@@ -698,6 +698,12 @@ pub enum MemorySub {
         #[arg(
             long,
             value_name = "TEXT",
+            help = "Soft-link this memory to a project note id (no existence check)."
+        )]
+        project: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
             help = "Soft TTL: 7d, 12h, 2w or an ISO datetime."
         )]
         expires: Option<String>,
@@ -747,6 +753,12 @@ pub enum MemorySub {
         importance: Option<i64>,
         #[arg(long, value_name = "TEXT", help = "Set the source.")]
         source: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "Set the project soft link (a project note id; no existence check)."
+        )]
+        project: Option<String>,
         #[arg(
             long,
             value_name = "TEXT",

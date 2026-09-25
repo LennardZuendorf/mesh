@@ -23,6 +23,7 @@ pub const MEMORY_FIELDS: FieldOrder = FieldOrder(&[
     "related",
     "kind",
     "scope",
+    "project",
     "importance",
     "source",
     "expires",
@@ -59,6 +60,7 @@ pub struct Memory {
     pub related: Vec<String>,
     pub kind: String,
     pub scope: String,
+    pub project: Option<String>,
     pub importance: Option<i64>,
     pub source: Option<String>,
     pub expires: Option<DateTime<Utc>>,
@@ -173,6 +175,7 @@ impl FromMeta for Memory {
             related: string_list(meta, "related")?,
             kind: open_enum(meta, "kind", DEFAULT_KIND)?,
             scope: open_enum(meta, "scope", DEFAULT_SCOPE)?,
+            project: optional_string(meta, "project")?,
             importance,
             source: optional_string(meta, "source")?,
             expires: optional_time(meta, "expires")?,
@@ -219,7 +222,8 @@ mod tests {
 
     const FULL: &str = "id: m-1\ntype: memory\ntitle: T\ntags:\n  - a\nowner: bob\n\
                         created: 2026-01-02T03:04:05Z\nupdated: 2026-01-03T00:00:00Z\n\
-                        related:\n  - n-2\nkind: preference\nscope: private\nimportance: 5\n\
+                        related:\n  - n-2\nkind: preference\nscope: private\nproject: n-2\n\
+                        importance: 5\n\
                         source: chat\nexpires: 2026-02-01T00:00:00Z\nsuperseded_by: m-9\n";
 
     #[test]
@@ -232,6 +236,7 @@ mod tests {
         assert_eq!(m.related, ["n-2"]);
         assert_eq!(m.kind, "preference");
         assert_eq!(m.scope, "private");
+        assert_eq!(m.project.as_deref(), Some("n-2"));
         assert_eq!(m.importance, Some(5));
         assert_eq!(m.source.as_deref(), Some("chat"));
         assert_eq!(m.superseded_by.as_deref(), Some("m-9"));
@@ -246,6 +251,7 @@ mod tests {
         .unwrap();
         assert_eq!(m.kind, "fact");
         assert_eq!(m.scope, "shared");
+        assert_eq!(m.project, None);
         assert_eq!(m.importance, None);
         assert_eq!(m.effective_importance(), 3);
         assert_eq!(m.source, None);
@@ -304,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn the_field_order_is_the_base_keys_then_the_six_memory_keys() {
+    fn the_field_order_is_the_base_keys_then_the_seven_memory_keys() {
         assert_eq!(
             MEMORY_FIELDS.fields(),
             [
@@ -318,6 +324,7 @@ mod tests {
                 "related",
                 "kind",
                 "scope",
+                "project",
                 "importance",
                 "source",
                 "expires",

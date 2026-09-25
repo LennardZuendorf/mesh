@@ -55,6 +55,7 @@ pub struct NewMemory {
     pub scope: String,
     pub importance: Option<i64>,
     pub source: Option<String>,
+    pub project: Option<String>,
     pub expires: Option<DateTime<Utc>>,
     pub supersedes: Option<String>,
     pub tags: Vec<String>,
@@ -71,6 +72,7 @@ pub struct UpdateMemory {
     pub scope: Option<String>,
     pub importance: Option<i64>,
     pub source: Option<String>,
+    pub project: Option<String>,
     pub expires: Option<Option<DateTime<Utc>>>,
     pub owner: Option<String>,
 }
@@ -334,6 +336,11 @@ pub fn create_with_warnings(
         );
         meta.insert("kind".to_string(), Value::str(kind.as_str()));
         meta.insert("scope".to_string(), Value::str(scope.as_str()));
+        // `project` is optional and insert-only: a memory created without one stays absent
+        // (the note `claimed_by` convention), never written as `project: null`.
+        if let Some(project) = o.project.as_deref() {
+            meta.insert("project".to_string(), Value::str(project));
+        }
         meta.insert("importance".to_string(), Value::Int(importance));
         meta.insert("source".to_string(), optional_str(o.source.as_deref()));
         meta.insert(
@@ -464,6 +471,11 @@ pub fn update(cfg: &Config, target: &str, o: UpdateMemory) -> Result<Memory> {
         if let Some(source) = &o.source {
             doc.meta
                 .insert("source".to_string(), Value::str(source.as_str()));
+        }
+        // Insert-only: an update that names no project leaves any existing one in place.
+        if let Some(project) = &o.project {
+            doc.meta
+                .insert("project".to_string(), Value::str(project.as_str()));
         }
         if let Some(expires) = &o.expires {
             doc.meta.insert(
@@ -833,11 +845,83 @@ mod tests {
         assert!(path.is_file(), "{}", path.display());
         let doc = read_doc(&path).unwrap();
         let keys: Vec<&str> = doc.meta.keys().map(String::as_str).collect();
-        assert_eq!(keys, MEMORY_FIELDS.fields());
+        // `project` is declared but optional: a memory created without one carries no key.
+        let mut expected: Vec<&str> = MEMORY_FIELDS.fields().to_vec();
+        expected.retain(|key| *key != "project");
+        assert_eq!(keys, expected);
+        assert!(!doc.meta.contains_key("project"));
         assert_eq!(m.kind, "fact");
         assert_eq!(m.scope, "shared");
         assert_eq!(m.importance, Some(3));
         assert_eq!(m.superseded_by, None);
+    }
+
+    #[test]
+    fn create_with_a_project_writes_it_after_scope() {
+        let v = vault();
+        let m = create(
+            &v.cfg,
+            "Scoped",
+            NewMemory {
+                project: Some("n-P1".into()),
+                ..new_memory()
+            },
+        )
+        .unwrap();
+        assert_eq!(m.project.as_deref(), Some("n-P1"));
+        let doc = read_doc(&v.cfg.vault().join(format!("memories/{}.md", m.id))).unwrap();
+        let keys: Vec<&str> = doc.meta.keys().map(String::as_str).collect();
+        assert_eq!(keys, MEMORY_FIELDS.fields());
+        let scope = keys.iter().position(|k| *k == "scope").unwrap();
+        let project = keys.iter().position(|k| *k == "project").unwrap();
+        assert_eq!(project, scope + 1, "project lands directly after scope");
+    }
+
+    #[test]
+    fn create_tolerates_a_dangling_project_id() {
+        let v = vault();
+        let m = create(
+            &v.cfg,
+            "Dangling",
+            NewMemory {
+                project: Some("n-NOPE".into()),
+                ..new_memory()
+            },
+        )
+        .unwrap();
+        assert_eq!(m.project.as_deref(), Some("n-NOPE"));
+    }
+
+    #[test]
+    fn update_sets_a_project_and_leaves_an_absent_one_absent() {
+        let v = vault();
+        let m = create(&v.cfg, "Alpha", new_memory()).unwrap();
+        let path = resolve(&v.cfg, &m.id).unwrap();
+        assert!(!read_doc(&path).unwrap().meta.contains_key("project"));
+        let updated = update(
+            &v.cfg,
+            &m.id,
+            UpdateMemory {
+                project: Some("n-P1".into()),
+                ..UpdateMemory::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.project.as_deref(), Some("n-P1"));
+        assert_eq!(
+            meta_str(&read_doc(&path).unwrap().meta, "project"),
+            Some("n-P1")
+        );
+        let renamed = update(
+            &v.cfg,
+            &m.id,
+            UpdateMemory {
+                title: Some("Renamed".into()),
+                ..UpdateMemory::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(renamed.project.as_deref(), Some("n-P1"));
     }
 
     #[test]

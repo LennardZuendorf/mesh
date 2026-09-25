@@ -260,6 +260,118 @@ fn new_rejects_a_bad_scope() {
 }
 
 #[test]
+fn new_with_project_round_trips_to_disk_and_get() {
+    let f = VaultFixture::new();
+    let out = f
+        .cmd()
+        .args([
+            "memory",
+            "new",
+            "Scoped",
+            "--body",
+            "x",
+            "--project",
+            "n-P1",
+            "--quiet",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    let text = f.read(&format!("memories/{id}.md"));
+    assert!(text.contains("project: n-P1\n"), "{text}");
+    // `project` is declared after `scope` on disk.
+    let keys: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .take_while(|l| *l != "---")
+        .filter_map(|l| l.split(':').next())
+        .collect();
+    let scope = keys.iter().position(|k| *k == "scope").expect("scope");
+    assert_eq!(keys.get(scope + 1).copied(), Some("project"));
+
+    let got = f
+        .cmd()
+        .args(["memory", "get", &id, "--json"])
+        .output()
+        .expect("get");
+    assert_eq!(json_of(&got)["project"], Json::String("n-P1".into()));
+
+    // The default human block shows it too.
+    let human = f
+        .cmd()
+        .args(["memory", "get", &id, "--meta-only"])
+        .output()
+        .expect("get");
+    assert!(
+        stdout_of(&human).contains("project: n-P1"),
+        "{}",
+        stdout_of(&human)
+    );
+}
+
+#[test]
+fn new_without_project_never_carries_the_key() {
+    let f = VaultFixture::new();
+    let id = new_memory(&f, "Plain", "x");
+    let text = f.read(&format!("memories/{id}.md"));
+    assert!(!text.contains("project"), "{text}");
+    let got = f
+        .cmd()
+        .args(["memory", "get", &id, "--json"])
+        .output()
+        .expect("get");
+    assert!(json_of(&got).get("project").is_none());
+}
+
+#[test]
+fn new_tolerates_an_unknown_project_id() {
+    let f = VaultFixture::new();
+    let out = f
+        .cmd()
+        .args([
+            "memory",
+            "new",
+            "Dangling",
+            "--body",
+            "x",
+            "--project",
+            "n-NOPE",
+            "--quiet",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    assert!(f
+        .read(&format!("memories/{id}.md"))
+        .contains("project: n-NOPE\n"));
+}
+
+#[test]
+fn update_sets_the_project_and_leaves_it_when_unset() {
+    let f = VaultFixture::new();
+    let id = new_memory(&f, "Alpha", "x");
+    assert!(!f.read(&format!("memories/{id}.md")).contains("project"));
+    f.cmd()
+        .args(["memory", "update", &id, "--project", "n-P2"])
+        .assert()
+        .success()
+        .stdout(format!("updated {id}\n"));
+    assert!(f
+        .read(&format!("memories/{id}.md"))
+        .contains("project: n-P2\n"));
+    // An update that names no project leaves the existing one in place.
+    f.cmd()
+        .args(["memory", "update", &id, "--title", "Renamed"])
+        .assert()
+        .success();
+    assert!(f
+        .read(&format!("memories/{id}.md"))
+        .contains("project: n-P2\n"));
+}
+
+#[test]
 fn new_rejects_an_out_of_range_importance() {
     let f = VaultFixture::new();
     for value in ["0", "6"] {
@@ -728,17 +840,17 @@ fn a_memory_is_addressable_by_its_title_slug() {
 // ---------------------------------------------------------------------------------------
 
 #[test]
-fn get_prints_fourteen_meta_lines_then_a_preview() {
+fn get_prints_fifteen_meta_lines_then_a_preview() {
     let f = VaultFixture::new();
     let id = new_memory(&f, "Alpha", "the body");
     let out = f.cmd().args(["memory", "get", &id]).output().expect("run");
     let text = stdout_of(&out);
     let (block, body) = text.split_once("\n\n").expect("a blank line");
-    assert_eq!(block.lines().count(), 14, "{block}");
+    assert_eq!(block.lines().count(), 15, "{block}");
     assert!(block.starts_with(&format!(
         "id: {id}\ntype: memory\ntitle: Alpha\nkind: fact\n"
     )));
-    assert!(block.contains("\nscope: shared\nimportance: 3\n"));
+    assert!(block.contains("\nscope: shared\nproject: \nimportance: 3\n"));
     assert_eq!(body.trim_end(), "the body");
 }
 
