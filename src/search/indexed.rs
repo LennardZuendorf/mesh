@@ -1,8 +1,11 @@
-//! The `indexed` subprocess wrapper: three argv forms, NDJSON in, hits out.
+//! The `indexed` subprocess wrapper: three argv forms, one JSON envelope in, hits out.
 //!
 //! Agent content is data, never shell input — every invocation is a direct `execve` with an
-//! argument vector, never a shell string. A missing binary, a non-zero exit or a hung child
-//! degrades to the built-in engine with the standard notice; none of them is an error.
+//! argument vector, never a shell string. Machine output is requested through the
+//! `INDEXED_SIMPLE_OUTPUT` environment variable on the child (the CLI's `--simple-output`
+//! flag is global-only), so the argv never carries an output flag. A missing binary, a
+//! non-zero exit or a hung child degrades to the built-in engine with the standard notice;
+//! none of them is an error.
 
 use std::cmp::Ordering;
 use std::io::Read;
@@ -30,6 +33,11 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// The environment variable that overrides `DEFAULT_TIMEOUT_MS`, in milliseconds.
 pub const ENV_TIMEOUT_MS: &str = "MESH_INDEXED_TIMEOUT_MS";
+
+/// The environment variable that puts the `indexed` CLI in machine-readable mode — its
+/// `--simple-output` flag is global-only, so the child is configured through the environment
+/// and the argv stays free of output flags.
+pub const ENV_SIMPLE_OUTPUT: &str = "INDEXED_SIMPLE_OUTPUT";
 
 /// How often the parent checks on a running child.
 const POLL: Duration = Duration::from_millis(2);
@@ -83,7 +91,7 @@ pub fn timeout() -> Duration {
     Duration::from_millis(ms)
 }
 
-/// `indexed index search <query> --collection <C> --json --limit <N>`.
+/// `indexed index search <query> --collection <C> --limit <N>`.
 pub fn search_argv(query: &str, collection: &str, limit: i64) -> Vec<String> {
     vec![
         "index".to_string(),
@@ -91,28 +99,27 @@ pub fn search_argv(query: &str, collection: &str, limit: i64) -> Vec<String> {
         query.to_string(),
         "--collection".to_string(),
         collection.to_string(),
-        "--json".to_string(),
         "--limit".to_string(),
         limit.to_string(),
     ]
 }
 
-/// `indexed index update <path> --collection <C>`.
-pub fn update_argv(path: &Path, collection: &str) -> Vec<String> {
+/// `indexed index update <C>` — a refresh is per collection; the CLI has no path-level update.
+pub fn update_argv(collection: &str) -> Vec<String> {
     vec![
         "index".to_string(),
         "update".to_string(),
-        path.display().to_string(),
-        "--collection".to_string(),
         collection.to_string(),
     ]
 }
 
-/// `indexed index create <root> --collection <C>`.
+/// `indexed index create files --path <root> --collection <C>`.
 pub fn create_argv(root: &Path, collection: &str) -> Vec<String> {
     vec![
         "index".to_string(),
         "create".to_string(),
+        "files".to_string(),
+        "--path".to_string(),
         root.display().to_string(),
         "--collection".to_string(),
         collection.to_string(),
@@ -129,6 +136,7 @@ pub fn run(argv: &[String]) -> Result<String, Failure> {
     };
     let mut child = Command::new(&bin)
         .args(argv)
+        .env(ENV_SIMPLE_OUTPUT, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -171,41 +179,67 @@ pub fn run(argv: &[String]) -> Result<String, Failure> {
     }
 }
 
-/// Decode NDJSON: one object per line, tolerantly.
+/// Decode the `--simple-output` envelope: one JSON document, chunk-level `results`.
 ///
-/// Blank lines are skipped; a malformed line is skipped and decoding continues; a missing or
-/// wrong-typed `path`/`score` skips the line; a **boolean `score` is rejected** (`true` must
-/// not become `1.0`); an integer `score` coerces to float; unknown keys are ignored; an absent
-/// or null `snippet` is `None`.
-pub fn parse_ndjson(text: &str) -> Vec<IndexedHit> {
+/// Tolerantly: a payload that is not a JSON object, or whose `results` is not an array, is
+/// no hits; an entry without a string `document_url` or a numeric score is skipped and
+/// decoding continues; a **boolean score is rejected** (`true` must not become `1.0`); an
+/// integer score coerces to float; unknown keys are ignored; an absent or null `text` is
+/// `None` and a wrong-typed one skips the entry. Scores are normalised to higher-is-better:
+/// a v2 entry's `relevance` is used as-is, a v1 entry carries only `relevance_score`
+/// (squared L2, lower is better) and is mapped through `1/(1+s)` onto the same scale.
+/// Chunks of one document are deduplicated to the best chunk, so one document is one hit.
+pub fn parse_envelope(text: &str) -> Vec<IndexedHit> {
+    let Ok(Json::Object(obj)) = serde_json::from_str::<Json>(text) else {
+        return Vec::new();
+    };
+    let Some(Json::Array(entries)) = obj.get("results") else {
+        return Vec::new();
+    };
     let mut out: Vec<IndexedHit> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(Json::Object(obj)) = serde_json::from_str::<Json>(trimmed) else {
+    for entry in entries {
+        let Json::Object(entry) = entry else {
             continue;
         };
-        let Some(Json::String(path)) = obj.get("path") else {
+        let Some(Json::String(url)) = entry.get("document_url") else {
             continue;
         };
-        let Some(Json::Number(score)) = obj.get("score") else {
-            continue;
+        let path = url
+            .strip_prefix("file://")
+            .map(str::to_string)
+            .unwrap_or_else(|| url.clone());
+        let score = match entry.get("relevance").and_then(Json::as_f64) {
+            Some(relevance) => relevance,
+            None => {
+                let Some(Json::Number(raw)) = entry.get("relevance_score") else {
+                    continue;
+                };
+                let Some(raw) = raw.as_f64() else {
+                    continue;
+                };
+                1.0 / (1.0 + raw.max(0.0))
+            }
         };
-        let Some(score) = score.as_f64() else {
-            continue;
-        };
-        let snippet = match obj.get("snippet") {
+        let snippet = match entry.get("text") {
             None | Some(Json::Null) => None,
             Some(Json::String(s)) => Some(s.clone()),
             Some(_) => continue,
         };
-        out.push(IndexedHit {
-            path: path.clone(),
-            score,
-            snippet,
-        });
+        match out.iter_mut().find(|hit| hit.path == path) {
+            // A document may match through several chunks: keep the best one, so one
+            // document is one hit with its strongest score and that chunk's text.
+            Some(existing) => {
+                if score > existing.score {
+                    existing.score = score;
+                    existing.snippet = snippet;
+                }
+            }
+            None => out.push(IndexedHit {
+                path,
+                score,
+                snippet,
+            }),
+        }
     }
     out
 }
@@ -272,7 +306,7 @@ pub fn search(
     let filter = base_filter(f);
     let fallback = f.spaces.first().copied().unwrap_or(Space::Notes);
     let mut hits: Vec<Hit> = Vec::new();
-    for hit in parse_ndjson(&raw) {
+    for hit in parse_envelope(&raw) {
         if hit.score < threshold {
             continue;
         }
@@ -340,7 +374,6 @@ mod tests {
                 "hello world",
                 "--collection",
                 "test-vault",
-                "--json",
                 "--limit",
                 "5"
             ]
@@ -349,69 +382,115 @@ mod tests {
 
     #[test]
     fn update_and_create_argv_are_byte_exact() {
-        assert_eq!(
-            update_argv(Path::new("/v/notes/n-1.md"), "c"),
-            ["index", "update", "/v/notes/n-1.md", "--collection", "c"]
-        );
+        assert_eq!(update_argv("c"), ["index", "update", "c"]);
         assert_eq!(
             create_argv(Path::new("/v"), "c"),
-            ["index", "create", "/v", "--collection", "c"]
+            [
+                "index",
+                "create",
+                "files",
+                "--path",
+                "/v",
+                "--collection",
+                "c"
+            ]
         );
     }
 
+    /// One chunk entry in `results`, as `--simple-output` prints it.
+    fn envelope(entries: &str) -> String {
+        format!(
+            "{{\"query\":\"q\",\"total_collections_searched\":1,\
+              \"total_documents_found\":1,\"total_chunks_found\":1,\
+              \"results\":[{entries}],\"collection_errors\":[]}}"
+        )
+    }
+
     #[test]
-    fn ndjson_decodes_one_object_per_line() {
-        let hits = parse_ndjson("{\"path\":\"/a.md\",\"score\":0.9}\n{\"path\":\"/b.md\",\"score\":0.5,\"snippet\":\"s\"}\n");
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].path, "/a.md");
+    fn the_envelope_decodes_chunk_entries_to_document_hits() {
+        let hits = parse_envelope(&envelope(
+            "{\"rank\":1,\"relevance\":0.9,\"relevance_score\":0.9,\"collection\":\"c\",\
+              \"document_id\":\"x\",\"document_url\":\"file:///v/a.md\",\
+              \"chunk_number\":1,\"text\":\"s\"}",
+        ));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "/v/a.md", "file:// is stripped");
+        assert_eq!(hits[0].score, 0.9, "v2 relevance is used as-is");
+        assert_eq!(hits[0].snippet.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn the_envelope_normalises_v1_scores_to_higher_is_better() {
+        // v1 carries no `relevance`; `relevance_score` is squared L2 (lower is better), so it
+        // is normalised into the same higher-is-better scale the comparator expects.
+        let hits = parse_envelope(&envelope(
+            "{\"rank\":1,\"relevance_score\":0.25,\"document_url\":\"/v/a.md\",\"text\":\"t\"}",
+        ));
+        assert_eq!(hits.len(), 1);
+        assert!((hits[0].score - 1.0 / 1.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_envelope_dedupes_documents_keeping_the_best_chunk() {
+        let hits = parse_envelope(&envelope(
+            "{\"rank\":1,\"relevance\":0.9,\"document_url\":\"/v/a.md\",\"text\":\"best\"},\
+             {\"rank\":2,\"relevance\":0.5,\"document_url\":\"/v/a.md\",\"text\":\"worse\"}",
+        ));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].score, 0.9);
+        assert_eq!(hits[0].snippet.as_deref(), Some("best"));
+    }
+
+    #[test]
+    fn the_envelope_skips_entries_with_a_missing_or_wrong_typed_url_or_score() {
+        for entries in [
+            "{\"relevance\":0.9}",                                // no url
+            "{\"document_url\":7,\"relevance\":0.9}",             // url not a string
+            "{\"document_url\":\"/v/a.md\"}",                     // no score at all
+            "{\"document_url\":\"/v/a.md\",\"relevance\":\"x\"}", // score not a number
+            "{\"document_url\":\"/v/a.md\",\"relevance\":true}",  // boolean is rejected
+        ] {
+            assert!(parse_envelope(&envelope(entries)).is_empty(), "{entries}");
+        }
+    }
+
+    #[test]
+    fn the_envelope_skips_a_wrong_typed_text_and_tolerates_its_absence() {
+        assert!(parse_envelope(&envelope(
+            "{\"relevance\":0.9,\"document_url\":\"/v/a.md\",\"text\":7}"
+        ))
+        .is_empty());
+        let hits = parse_envelope(&envelope(
+            "{\"relevance\":0.9,\"document_url\":\"/v/a.md\"}",
+        ));
+        assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, None);
-        assert_eq!(hits[1].snippet.as_deref(), Some("s"));
     }
 
     #[test]
-    fn ndjson_skips_blank_and_malformed_lines_and_continues() {
-        let hits = parse_ndjson(
-            "\n   \n{not json}\n{\"path\":\"/a.md\",\"score\":0.9}\nnope\n{\"path\":\"/b.md\",\"score\":0.1}\n",
-        );
-        assert_eq!(hits.len(), 2);
-    }
-
-    #[test]
-    fn ndjson_requires_a_string_path() {
-        assert!(parse_ndjson("{\"score\":0.9}").is_empty());
-        assert!(parse_ndjson("{\"path\":7,\"score\":0.9}").is_empty());
-        assert!(parse_ndjson("{\"path\":null,\"score\":0.9}").is_empty());
-    }
-
-    #[test]
-    fn ndjson_requires_a_numeric_score() {
-        assert!(parse_ndjson("{\"path\":\"/a.md\"}").is_empty());
-        assert!(parse_ndjson("{\"path\":\"/a.md\",\"score\":\"0.9\"}").is_empty());
-        assert!(parse_ndjson("{\"path\":\"/a.md\",\"score\":null}").is_empty());
-    }
-
-    #[test]
-    fn ndjson_rejects_a_boolean_score() {
-        assert!(parse_ndjson("{\"path\":\"/a.md\",\"score\":true}").is_empty());
-        assert!(parse_ndjson("{\"path\":\"/a.md\",\"score\":false}").is_empty());
-    }
-
-    #[test]
-    fn ndjson_coerces_an_integer_score_to_float() {
-        let hits = parse_ndjson("{\"path\":\"/a.md\",\"score\":1}");
+    fn the_envelope_coerces_an_integer_score_and_ignores_unknown_keys() {
+        let hits = parse_envelope(&envelope(
+            "{\"rank\":1,\"relevance\":1,\"document_url\":\"/v/a.md\",\"future\":{\"k\":1}}",
+        ));
+        assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].score, 1.0);
     }
 
     #[test]
-    fn ndjson_ignores_unknown_keys_and_a_json_array_line() {
-        let hits = parse_ndjson("{\"path\":\"/a.md\",\"score\":0.5,\"future\":{\"k\":1}}\n[1,2]\n");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].score, 0.5);
+    fn the_envelope_degrades_to_nothing_on_a_non_json_or_shapeless_payload() {
+        assert!(parse_envelope("").is_empty());
+        assert!(parse_envelope("not json").is_empty());
+        assert!(parse_envelope("[1,2]").is_empty());
+        assert!(parse_envelope("{\"results\":7}").is_empty());
+        assert!(parse_envelope("{}").is_empty());
     }
 
     #[test]
-    fn ndjson_skips_a_wrong_typed_snippet() {
-        assert!(parse_ndjson("{\"path\":\"/a.md\",\"score\":0.5,\"snippet\":7}").is_empty());
+    fn collection_errors_never_become_hits() {
+        let hits = parse_envelope(
+            "{\"query\":\"q\",\"results\":[],\"collection_errors\":[{\"collection\":\"c\",\"error\":\"boom\"}]}",
+        );
+        assert!(hits.is_empty());
     }
 
     #[test]

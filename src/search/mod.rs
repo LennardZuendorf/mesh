@@ -14,7 +14,7 @@ pub mod tagpull;
 pub mod tokenize;
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
@@ -243,12 +243,16 @@ pub fn reindex_status(cfg: &Config, roots: &[PathBuf]) -> IndexOutcome {
     outcome
 }
 
-/// Refresh one path in the index, with the outcome. Never fails the process.
-pub fn index_update_status(cfg: &Config, path: &Path) -> IndexOutcome {
+/// Refresh the collection in the index, with the outcome. Never fails the process.
+///
+/// The `indexed` CLI has no path-level refresh — an update is per collection — so a watched
+/// path's event means "the collection behind it went stale", and the path itself only rides
+/// the event, not the argv.
+pub fn index_update_status(cfg: &Config) -> IndexOutcome {
     let Some(collection) = cfg.search.collection.as_deref() else {
         return IndexOutcome::NoCollection;
     };
-    match indexed::run(&indexed::update_argv(path, collection)) {
+    match indexed::run(&indexed::update_argv(collection)) {
         Ok(_) => IndexOutcome::Ran,
         Err(failure) => IndexOutcome::Failed(failure),
     }
@@ -544,14 +548,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = config_for(dir.path());
         let roots = [dir.path().to_path_buf()];
-        let path = dir.path().join("notes/n-1.md");
         // No collection: nothing to do, and nothing to complain about.
         assert_eq!(reindex_status(&cfg, &roots), IndexOutcome::NoCollection);
-        assert_eq!(index_update_status(&cfg, &path), IndexOutcome::NoCollection);
+        assert_eq!(index_update_status(&cfg), IndexOutcome::NoCollection);
         // A collection with no reachable `indexed`: a degradation the caller must see.
         cfg.search.collection = Some("c".into());
         assert!(reindex_status(&cfg, &roots).degraded());
-        assert!(index_update_status(&cfg, &path).degraded());
+        assert!(index_update_status(&cfg).degraded());
     }
 
     #[test]

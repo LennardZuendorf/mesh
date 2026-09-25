@@ -4,8 +4,9 @@ Stand-ins for the external `indexed` binary, installed onto a `VaultFixture`'s p
 directory (which the fixture already prepends to `PATH`) by `install_fake` in
 `tests/search_cli.rs`.
 
-`VaultFixture::fake_indexed(ndjson)` covers the happy path — it writes a script that records
-its argv and echoes a fixed NDJSON payload. These two cover the paths it cannot:
+`VaultFixture::fake_indexed(payload)` covers the happy path — it writes a script that records
+its argv and echoes a fixed `--simple-output` envelope payload. These two cover the paths it
+cannot:
 
 | script | behaviour | what it exercises |
 |---|---|---|

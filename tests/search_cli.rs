@@ -712,7 +712,7 @@ fn health_reports_indexed_when_every_gate_is_open() {
 #[test]
 fn health_short_circuits_a_query_and_never_shells_indexed() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed("{\"path\":\"/nope.md\",\"score\":0.9}");
+    f.fake_indexed("{\"query\":\"q\",\"results\":[]}");
     let out = run(&f, &["search", "zebra", "--health"]);
     let json: Json = serde_json::from_str(stdout_of(&out).trim_end()).expect("json");
     assert_eq!(json["mode"], Json::String("indexed".into()));
@@ -729,31 +729,74 @@ fn health_reports_watcher_liveness_as_daemon_up() {
 
 // ---------------------------------------------------------------- the indexed path
 
-fn ndjson_for(f: &VaultFixture, rows: &[(&str, f64, Option<&str>)]) -> String {
-    rows.iter()
-        .map(|(rel, score, snippet)| {
+/// The `--simple-output` envelope, v2-shaped (`relevance` is the higher-is-better score),
+/// one chunk entry per row — the real CLI emits one entry per matched chunk.
+fn envelope_for(f: &VaultFixture, rows: &[(&str, f64, Option<&str>)]) -> String {
+    let entries: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, (rel, score, snippet))| {
             let path = f.vault.join(rel);
             match snippet {
                 Some(s) => format!(
-                    "{{\"path\": \"{}\", \"score\": {score}, \"snippet\": \"{s}\"}}",
+                    "{{\"rank\":{},\"relevance\":{score},\"relevance_score\":{score},\
+                     \"collection\":\"test-vault\",\"document_id\":\"doc{idx}\",\
+                     \"document_url\":\"{}\",\"chunk_number\":1,\"text\":\"{s}\"}}",
+                    idx + 1,
                     path.display()
                 ),
-                None => format!("{{\"path\": \"{}\", \"score\": {score}}}", path.display()),
+                None => format!(
+                    "{{\"rank\":{},\"relevance\":{score},\"relevance_score\":{score},\
+                     \"collection\":\"test-vault\",\"document_id\":\"doc{idx}\",\
+                     \"document_url\":\"{}\",\"chunk_number\":1}}",
+                    idx + 1,
+                    path.display()
+                ),
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    format!(
+        "{{\"query\":\"q\",\"total_collections_searched\":1,\
+              \"total_documents_found\":{},\"total_chunks_found\":{},\
+              \"results\":[{}],\"collection_errors\":[]}}",
+        rows.len(),
+        rows.len(),
+        entries.join(",")
+    )
 }
 
 #[test]
 fn the_indexed_search_argv_is_byte_exact() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, Some("s"))]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, Some("s"))]));
     let got = hits(&f, &["search", "hello world", "--limit", "5"]);
     assert_eq!(ids(&got), ["n-AAAA"]);
     assert_eq!(
         f.indexed_argv(),
-        ["index search hello world --collection test-vault --json --limit 5"]
+        ["index search hello world --collection test-vault --limit 5"]
+    );
+}
+
+#[test]
+fn the_wrapper_puts_the_cli_in_simple_output_mode() {
+    let f = seeded_with(&hybrid_config());
+    // The output mode is an environment contract, not an argv flag: `--simple-output` is
+    // global-only in the CLI, so the child is switched over by env. Pin that it arrives.
+    let log = f.dir.path().join("indexed-argv.log");
+    f.write_bin(
+        "indexed",
+        &format!(
+            "#!/bin/sh\nprintf '%s env=%s\\n' \"$*\" \"$INDEXED_SIMPLE_OUTPUT\" >> {log}\n\
+             printf '%s' '{{\"query\":\"q\",\"results\":[]}}'\n",
+            log = log.display()
+        ),
+    );
+    let _ = hits(&f, &["search", "zebra"]);
+    let argv = f.indexed_argv();
+    assert_eq!(argv.len(), 1);
+    assert!(
+        argv[0].ends_with("env=1") && !argv[0].contains("--json"),
+        "{argv:?}"
     );
 }
 
@@ -768,7 +811,7 @@ fn a_filtered_indexed_query_fetches_unbounded_and_caps_after_filtering() {
         "---\nid: n-CCCN\ntype: note\ntitle: Third\ntags: []\n\
          updated: 2026-05-01T00:00:00Z\n---\n\nzebra\n",
     );
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-AAAA.md", 0.9, None),
@@ -802,7 +845,7 @@ fn a_filtered_indexed_query_fetches_unbounded_and_caps_after_filtering() {
     );
     // With no filter, the limit still reaches `indexed` verbatim.
     let bare = seeded_with(&hybrid_config());
-    bare.fake_indexed(&ndjson_for(&bare, &[("notes/n-AAAA.md", 0.9, None)]));
+    bare.fake_indexed(&envelope_for(&bare, &[("notes/n-AAAA.md", 0.9, None)]));
     hits(&bare, &["search", "zebra", "--limit", "2"]);
     assert!(
         bare.indexed_argv()[0].ends_with("--limit 2"),
@@ -826,7 +869,7 @@ fn indexed_ties_break_on_path_ascending() {
         "---\nid: n-YYYY\ntype: note\ntitle: Why\ntags: []\n\
          updated: 2026-06-01T00:00:00Z\n---\n\nzebra\n",
     );
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-ZZZZ.md", 0.8, None),
@@ -839,7 +882,7 @@ fn indexed_ties_break_on_path_ascending() {
 #[test]
 fn indexed_hits_carry_the_external_score_and_snippet() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[("notes/n-AAAA.md", 0.91, Some("ranked"))],
     ));
@@ -851,7 +894,7 @@ fn indexed_hits_carry_the_external_score_and_snippet() {
 #[test]
 fn indexed_hits_are_re_filtered_against_the_conjunctive_filters() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-AAAA.md", 0.9, None),
@@ -875,17 +918,17 @@ fn an_unset_config_threshold_never_filters_the_indexed_path() {
     // omits the key for exactly this reason. The indexed branch applied the nominal 0.65
     // anyway, so every indexed hit in the 0.4-0.65 band was dropped at exit 0 — on the
     // config mesh itself writes. It now uses the same floor the built-in branch uses.
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
     assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-AAAA"]);
     // The engine's own floor still applies.
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.3, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.3, None)]));
     assert!(hits(&f, &["search", "zebra"]).is_empty());
 }
 
 #[test]
 fn an_explicit_config_threshold_does_filter_the_indexed_path() {
     let f = seeded_with(&format!("{}threshold = 0.65\n", hybrid_config()));
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
     assert!(hits(&f, &["search", "zebra"]).is_empty());
     assert_eq!(
         ids(&hits(&f, &["search", "zebra", "--threshold", "0.4"])),
@@ -896,7 +939,7 @@ fn an_explicit_config_threshold_does_filter_the_indexed_path() {
 #[test]
 fn indexed_hits_below_the_threshold_are_dropped() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-AAAA.md", 0.9, None),
@@ -914,10 +957,17 @@ fn an_indexed_hit_outside_the_sandbox_is_dropped() {
     let f = seeded_with(&hybrid_config());
     let outside = f.dir.path().join("outside.md");
     std::fs::write(&outside, "---\nid: n-OUT\n---\n\nx\n").expect("write outside");
+    // One envelope, both hits: only the sandbox-resolvable one survives.
+    let entry = |url: &std::path::Path| {
+        format!(
+            "{{\"rank\":1,\"relevance\":0.9,\"document_url\":\"{}\"}}",
+            url.display()
+        )
+    };
     f.fake_indexed(&format!(
-        "{{\"path\": \"{}\", \"score\": 0.9}}\n{}",
-        outside.display(),
-        ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)])
+        "{{\"query\":\"q\",\"results\":[{},{}]}}",
+        entry(&outside),
+        entry(&f.vault.join("notes/n-AAAA.md"))
     ));
     assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-AAAA"]);
 }
@@ -925,7 +975,7 @@ fn an_indexed_hit_outside_the_sandbox_is_dropped() {
 #[test]
 fn an_indexed_hit_whose_file_vanished_is_dropped() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[("notes/gone.md", 0.9, None), ("notes/n-AAAA.md", 0.9, None)],
     ));
@@ -937,7 +987,7 @@ fn the_indexed_path_orders_by_the_epsilon_comparator() {
     let f = seeded_with(&hybrid_config());
     // n-BBBB scores lower but is inside the 0.02 band and… older, so n-AAAA still wins;
     // n-AAAA is the more recently updated of the pair.
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/logs/n-BBBB.md", 0.91, None),
@@ -950,7 +1000,7 @@ fn the_indexed_path_orders_by_the_epsilon_comparator() {
 #[test]
 fn the_indexed_path_prefers_score_outside_the_band() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/logs/n-BBBB.md", 0.95, None),
@@ -961,19 +1011,26 @@ fn the_indexed_path_prefers_score_outside_the_band() {
 }
 
 #[test]
-fn malformed_ndjson_lines_are_skipped_and_the_query_continues() {
+fn a_garbage_envelope_yields_no_hits_and_never_an_error() {
     let f = seeded_with(&hybrid_config());
-    let good = ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]);
-    f.fake_indexed(&format!(
-        "\n{{not json}}\n{{\"path\": \"/x.md\"}}\n{{\"path\": \"/x.md\", \"score\": true}}\n{good}"
-    ));
-    assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-AAAA"]);
+    // The envelope is one JSON document, so a malformed payload is zero hits on the indexed
+    // branch at exit 0 — not a crash, and not a fallback (the subprocess ran fine).
+    f.fake_indexed("{not json}\n{\"path\": \"/x.md\"}\n");
+    let out = run(&f, &["search", "zebra"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        stderr_of(&out),
+        "",
+        "the subprocess succeeded, so no notice"
+    );
+    let got: Json = serde_json::from_str(stdout_of(&out).trim_end()).expect("json");
+    assert_eq!(got.as_array().map(Vec::len), Some(0));
 }
 
 #[test]
 fn the_indexed_path_emits_no_degradation_notice() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
     let out = run(&f, &["search", "zebra"]);
     assert_eq!(stderr_of(&out), "");
 }
@@ -1014,7 +1071,7 @@ fn a_hanging_indexed_times_out_and_degrades() {
 #[test]
 fn engine_builtin_never_shells_indexed() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
     let _ = hits(&f, &["search", "zebra", "--engine", "builtin"]);
     assert!(f.indexed_argv().is_empty());
 }
@@ -1026,7 +1083,7 @@ fn engine_indexed_shells_indexed_even_with_hybrid_off() {
         common::DEFAULT_CONFIG
     );
     let f = seeded_with(&cfg);
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
     assert_eq!(
         ids(&hits(&f, &["search", "zebra", "--engine", "indexed"])),
         ["n-AAAA"]

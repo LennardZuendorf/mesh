@@ -132,7 +132,7 @@ fn handle_path(ctx: &Ctx, cfg: &Config, path: &Path, args: &WatchArgs, indexed: 
     // claimed it had indexed a file it had not. Report only a rebuild that actually ran.
     if indexed
         && matches!(
-            crate::search::index_update_status(cfg, &landed),
+            crate::search::index_update_status(cfg),
             crate::search::IndexOutcome::Ran
         )
     {
