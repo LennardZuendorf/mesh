@@ -5,7 +5,7 @@ children:
   - tech.md
   - design.md
   - plan.md
-updated: 2026-09-08
+updated: 2026-09-25
 ---
 
 # Mesh — Product
@@ -35,8 +35,10 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
    → [tech.md](tech.md) § Implemented surfaces
 2. **Spaces are configuration, not layout.** Each space is a folder relative to the vault root,
    an absolute folder, the vault root itself, or disabled. The notes space may *be* the vault, so
-   an existing Markdown vault is exposed as-is; foreign files stay readable and searchable and
-   are never mutated. → [tech.md](tech.md) § Invariants
+   an existing Markdown vault is exposed as-is; foreign files stay readable and searchable. Mesh
+   never mutates a foreign file except through the operator's explicit `note adopt`, which
+   inserts the minimal mesh block (id and absent bookkeeping keys) and preserves everything
+   else. → [tech.md](tech.md) § Invariants, [features/note-adoption/tech.md](features/note-adoption/tech.md)
 3. **Markdown is truth.** Schema-valid frontmatter, unknown keys round-trip, clean bodies. Mesh
    owns the interface, the operator owns the vault.
 4. **Tasks are handoff with a live graph.** `owner` / `claimed_by` / `claim` / `release` /
