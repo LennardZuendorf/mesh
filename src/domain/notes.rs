@@ -5,9 +5,12 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{MeshError, Result};
-use crate::fm::{read_body, read_doc, read_meta_only, write_doc, Doc, Meta, Row, Value, View};
+use crate::fm::{
+    parse_meta, read_body, read_doc, read_meta_only, split_frontmatter, write_doc, Doc, Meta, Row,
+    Value, View,
+};
 use crate::ids::generate_id;
-use crate::model::common::{meta_str, meta_strings, optional_str, ts_value};
+use crate::model::common::{meta_str, meta_strings, meta_time, optional_str, ts_value};
 use crate::model::note::{ForeignView, Note, NOTE_ID_PREFIX, NOTE_TYPES};
 use crate::model::{ordered, NOTE_FIELDS};
 use crate::spaces::Space;
@@ -260,6 +263,147 @@ pub fn create(cfg: &Config, title: &str, o: NewNote) -> Result<Note> {
     let doc = Doc::new(meta, o.body);
     write_doc(&cfg.spaces, &path, &ordered(&NOTE_FIELDS, &doc))?;
     Note::from_meta(&doc.meta).ok_or(MeshError::NoteNotFound(id))
+}
+
+/// What `note adopt` committed: the mesh id now in the file's frontmatter, and the file
+/// it lives in (which keeps its foreign stem).
+#[derive(Clone, Debug)]
+pub struct Adopted {
+    pub id: String,
+    pub path: PathBuf,
+}
+
+/// Where an adopt target lives: the path as given (absolute, or relative to the cwd), or
+/// the same path read against the notes root or the vault root — the address forms
+/// `note get --foreign` already accepts.
+fn adopt_resolve(cfg: &Config, target: &Path) -> Option<PathBuf> {
+    for base in [cfg.root(Space::Notes).ok()?, cfg.vault()] {
+        let joined = base.join(target);
+        if joined.is_file() {
+            return Some(joined);
+        }
+    }
+    target.is_file().then(|| target.to_path_buf())
+}
+
+/// A path rendered vault-relative when possible, absolute otherwise.
+fn vault_rel(cfg: &Config, path: &Path) -> String {
+    path.strip_prefix(cfg.vault())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+/// Adopt existing foreign Markdown: mint a mesh id into each file, in place. Only the
+/// keys mesh needs that the file lacks are added (`id`, `title`, `created`, `updated`);
+/// the name, body and every foreign key survive untouched, and re-adoption is a
+/// byte-identical no-op.
+///
+/// A batch is a sequence of single-entity transactions: the first failure stops the run
+/// and names what already committed, and because adopt is idempotent, re-running the
+/// same command heals.
+pub fn adopt(cfg: &Config, targets: &[PathBuf]) -> Result<Vec<Adopted>> {
+    let root = cfg.root(Space::Notes)?.to_path_buf();
+    let mut adopted = Vec::new();
+    for target in targets {
+        match adopt_one(cfg, &root, target) {
+            Ok(one) => adopted.push(one),
+            Err(e) => {
+                if adopted.is_empty() {
+                    return Err(e);
+                }
+                let committed = adopted
+                    .iter()
+                    .map(|a| format!("{} → {}", a.id, vault_rel(cfg, &a.path)))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(e.partial(format!(
+                    "{committed} already adopted; re-run the same adopt command with the \
+                     remaining paths to heal"
+                )));
+            }
+        }
+    }
+    Ok(adopted)
+}
+
+/// Adopt one file. Sandbox first, then mint and write under the create lock with the file
+/// re-read inside it: a racing adopt of the same file is either already done (a no-op
+/// holding the same lock) or serialized behind this one.
+fn adopt_one(cfg: &Config, root: &Path, target: &Path) -> Result<Adopted> {
+    let missing = || note_not_found(&target.display().to_string());
+    let Some(path) = adopt_resolve(cfg, target) else {
+        return Err(missing());
+    };
+    let resolved = safe_resolve(&cfg.spaces, &path)?;
+    // An adopt may touch a file inside the notes space that is not itself inside a nested
+    // space root: another space's files are that space's to manage.
+    let in_notes = resolved.strip_prefix(root).is_ok()
+        && !cfg
+            .spaces
+            .exclusions_for(Space::Notes)
+            .iter()
+            .any(|excl| resolved.strip_prefix(excl).is_ok());
+    if !in_notes {
+        return Err(MeshError::validation(format!(
+            "{} belongs to another space",
+            target.display()
+        )));
+    }
+
+    let _guard = hold(&create_lock(root))?;
+    let text = std::fs::read_to_string(&resolved).map_err(|_| missing())?;
+    let (yaml, body) = split_frontmatter(&text);
+    let mut meta = match &yaml {
+        None => Meta::new(),
+        Some(block) => parse_meta(block).ok_or_else(missing)?,
+    };
+    if let Some(existing) = meta_str(&meta, "id") {
+        if existing.starts_with(NOTE_ID_PREFIX) {
+            return Ok(Adopted {
+                id: existing.to_string(),
+                path: resolved,
+            });
+        }
+        return Err(MeshError::validation(format!(
+            "foreign id: '{existing}' — remove or rename the id key to adopt {}",
+            target.display()
+        )));
+    }
+    let now = now_utc();
+    let created = meta_time(&meta, "created").unwrap_or(now);
+    let title = meta_str(&meta, "title")
+        .map(str::to_string)
+        .or_else(|| derived_title(&resolved, &body))
+        .ok_or_else(missing)?;
+    // The same two namespaces a minted id must not collide with as `create`: frontmatter
+    // ids (adopted files carry theirs in a foreign stem) and `n-` stems.
+    let mut taken: Vec<String> = Vec::new();
+    for path in mesh_paths(cfg) {
+        if let Some(id) = meta_id(&path) {
+            taken.push(id);
+        }
+        if let Some(s) = stem(&path) {
+            if s.starts_with(NOTE_ID_PREFIX) {
+                taken.push(s.to_string());
+            }
+        }
+    }
+    let id = generate_id(NOTE_ID_PREFIX, &iso_z(&created), &title, &|candidate| {
+        taken.iter().any(|t| t == candidate)
+    });
+    meta.insert("id".to_string(), Value::str(&id));
+    if meta.get("title").is_none() {
+        meta.insert("title".to_string(), Value::str(&title));
+    }
+    if meta.get("created").is_none() {
+        meta.insert("created".to_string(), ts_value(&created));
+    }
+    if meta.get("updated").is_none() {
+        meta.insert("updated".to_string(), ts_value(&now));
+    }
+    let doc = Doc::new(meta, body);
+    write_doc(&cfg.spaces, &resolved, &ordered(&NOTE_FIELDS, &doc))?;
+    Ok(Adopted { id, path: resolved })
 }
 
 /// Recompute `related` from the current body and bump `updated`. Both keys are overwritten
@@ -988,5 +1132,173 @@ mod tests {
         assert_eq!(rows.len(), 2, "the unparseable file is skipped");
         let listed = list(&v.cfg, &Filter::unbounded(), false).unwrap();
         assert_eq!(listed.len(), 1);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // adopt
+    // ---------------------------------------------------------------------------------
+
+    const FOREIGN_TEAM: &str = "---\ntype: Team\ntitle: Team Sol\nbelongs_to: []\nschema: 3\n\
+                                 status: captured\n---\n\n# Team Sol\n\nBody text.\n";
+
+    #[test]
+    fn adopt_mints_the_minimal_mesh_block() {
+        let v = vault();
+        write(&v.cfg, "notes/team-sol.md", FOREIGN_TEAM);
+        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/team-sol.md")]).unwrap();
+        assert_eq!(adopted.len(), 1);
+        let id = adopted[0].id.clone();
+        assert!(id.starts_with(NOTE_ID_PREFIX));
+
+        // Only the four mesh keys are injected; every foreign key survives in place.
+        let Some(doc) = read_doc(&v.cfg.vault().join("notes/team-sol.md")) else {
+            panic!("the adopted file must be readable");
+        };
+        assert_eq!(meta_str(&doc.meta, "id"), Some(id.as_str()));
+        assert_eq!(meta_str(&doc.meta, "type"), Some("Team"));
+        assert_eq!(meta_str(&doc.meta, "title"), Some("Team Sol"));
+        assert_eq!(meta_str(&doc.meta, "status"), Some("captured"));
+        assert!(doc.meta.contains_key("belongs_to"));
+        assert!(doc.meta.contains_key("schema"));
+        assert!(meta_time(&doc.meta, "created").is_some());
+        assert!(meta_time(&doc.meta, "updated").is_some());
+        assert_eq!(doc.body, "# Team Sol\n\nBody text.");
+
+        // The file keeps its foreign stem and is now addressable by id.
+        assert!(adopted[0].path.ends_with("team-sol.md"));
+        let note = get(&v.cfg, &id).unwrap();
+        assert_eq!(note.item.title, "Team Sol");
+        assert_eq!(note.item.note_type, "Team");
+        assert_eq!(list(&v.cfg, &Filter::unbounded(), false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn adopt_preserves_and_reuses_an_existing_created() {
+        let v = vault();
+        write(
+            &v.cfg,
+            "notes/pinned.md",
+            "---\ntitle: Pinned\ncreated: 2026-01-02\n---\n\n# Pinned\n",
+        );
+        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/pinned.md")]).unwrap();
+        let id = adopted[0].id.clone();
+        // The existing created is the digest input, so the id is reproducible.
+        let expected = generate_id(NOTE_ID_PREFIX, "2026-01-02T00:00:00Z", "Pinned", &|_| false);
+        assert_eq!(id, expected);
+        let text = std::fs::read_to_string(v.cfg.vault().join("notes/pinned.md")).unwrap();
+        assert!(
+            text.contains("created: 2026-01-02\n"),
+            "raw preserved: {text}"
+        );
+        assert!(text.contains("updated: 2"), "updated is stamped: {text}");
+    }
+
+    #[test]
+    fn re_adoption_is_a_byte_identical_noop() {
+        let v = vault();
+        write(&v.cfg, "notes/team-sol.md", FOREIGN_TEAM);
+        let target = v.cfg.vault().join("notes/team-sol.md");
+        let first = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap();
+        let before = std::fs::read_to_string(&target).unwrap();
+        let second = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap();
+        assert_eq!(second[0].id, first[0].id);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
+    }
+
+    #[test]
+    fn adopt_prepends_a_block_to_a_frontmatter_less_file() {
+        let v = vault();
+        write(&v.cfg, "notes/loose.md", "# Just a body\n\ntext\n");
+        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/loose.md")]).unwrap();
+        let id = adopted[0].id.clone();
+        let Some(doc) = read_doc(&v.cfg.vault().join("notes/loose.md")) else {
+            panic!("the adopted file must be readable");
+        };
+        assert_eq!(meta_str(&doc.meta, "id"), Some(id.as_str()));
+        assert_eq!(meta_str(&doc.meta, "title"), Some("Just a body"));
+        assert_eq!(doc.body, "# Just a body\n\ntext");
+        let raw = std::fs::read_to_string(v.cfg.vault().join("notes/loose.md")).unwrap();
+        assert!(
+            raw.contains("# Just a body\n\ntext\n") && raw.ends_with('\n'),
+            "body intact, one trailing newline: {raw}"
+        );
+    }
+
+    #[test]
+    fn adopt_refuses_a_malformed_block_and_writes_nothing() {
+        let v = vault();
+        let text = "---\ntitle: [unclosed\n---\n\nbroken\n";
+        write(&v.cfg, "notes/broken.md", text);
+        let target = v.cfg.vault().join("notes/broken.md");
+        let err = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), text);
+    }
+
+    #[test]
+    fn adopt_refuses_a_foreign_id_key() {
+        let v = vault();
+        let text = "---\nid: mine-1\ntitle: Owned elsewhere\n---\n\nx\n";
+        write(&v.cfg, "notes/owned.md", text);
+        let target = v.cfg.vault().join("notes/owned.md");
+        let err = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap_err();
+        assert_eq!(err.code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("foreign id"), "{msg}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), text);
+    }
+
+    #[test]
+    fn adopt_reports_a_missing_path_as_not_found() {
+        let v = vault();
+        let err = adopt(&v.cfg, &[v.cfg.vault().join("notes/nope.md")]).unwrap_err();
+        assert_eq!(err.code(), 3);
+    }
+
+    #[test]
+    fn adopt_refuses_paths_outside_the_notes_space() {
+        let v = vault();
+        // Inside the vault, but in another space: not adoptable as a note.
+        write(&v.cfg, "tasks/other-space.md", "---\ntitle: X\n---\n\nx\n");
+        let err = adopt(&v.cfg, &[v.cfg.vault().join("tasks/other-space.md")]).unwrap_err();
+        assert_eq!(err.code(), 2);
+        // Outside the vault entirely: sandbox escape, refused.
+        let outside = tempfile::tempdir().unwrap();
+        let foreign = outside.path().join("elsewhere.md");
+        std::fs::write(&foreign, "# Elsewhere\n").unwrap();
+        let err = adopt(&v.cfg, &[foreign]).unwrap_err();
+        assert_eq!(err.code(), 2);
+    }
+
+    #[test]
+    fn an_id_collision_extends_the_id() {
+        let v = vault();
+        let text = "---\ntitle: Same\ncreated: 2026-01-02\n---\n\n# Same\n";
+        write(&v.cfg, "notes/one.md", text);
+        write(&v.cfg, "notes/two.md", text);
+        let adopted = adopt(
+            &v.cfg,
+            &[
+                v.cfg.vault().join("notes/one.md"),
+                v.cfg.vault().join("notes/two.md"),
+            ],
+        )
+        .unwrap();
+        assert_ne!(adopted[0].id, adopted[1].id);
+    }
+
+    #[test]
+    fn adopt_stops_at_the_first_failure_and_names_what_committed() {
+        let v = vault();
+        write(&v.cfg, "notes/good.md", FOREIGN_TEAM);
+        let good = v.cfg.vault().join("notes/good.md");
+        let missing = v.cfg.vault().join("notes/nope.md");
+        let err = adopt(&v.cfg, &[good.clone(), missing]).unwrap_err();
+        assert_eq!(err.code(), 3);
+        let msg = err.to_string();
+        assert!(msg.contains("re-run"), "{msg}");
+        let committed_id = meta_id(&good).expect("good committed");
+        assert!(msg.contains(committed_id.as_str()), "{msg}");
+        assert!(meta_id(&good).is_some(), "the first file did commit");
     }
 }

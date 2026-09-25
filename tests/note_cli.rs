@@ -1235,7 +1235,7 @@ fn note_help_lists_the_six_subcommands_in_order() {
     let out = f.cmd().args(["note", "--help"]).output().expect("run");
     let text = stdout_of(&out);
     let mut at = 0usize;
-    for name in ["new", "append", "update", "get", "list", "delete"] {
+    for name in ["new", "adopt", "append", "update", "get", "list", "delete"] {
         let found = text.get(at..).and_then(|rest| rest.find(name));
         let offset = found.unwrap_or_else(|| panic!("{name} missing or out of order in {text}"));
         at += offset + name.len();
@@ -1553,4 +1553,189 @@ fn an_adopted_shaped_file_is_deletable_by_id() {
         .assert()
         .success();
     assert!(!f.files().contains(&"notes/team-sol.md".to_string()));
+}
+
+// ---------------------------------------------------------------------------------------
+// adopt
+// ---------------------------------------------------------------------------------------
+
+/// The brain-style layout: notes live at the vault root, tasks in a nested folder.
+const BRAIN_CFG: &str = "[core]\nvault_path = \"{VAULT}\"\nagent = \"test-agent\"\n\n[spaces]\n\
+                         notes = \".\"\ntasks = \"Agents/tasks\"\n";
+
+/// A foreign file: rich frontmatter, no mesh id.
+const FOREIGN: &str =
+    "---\ntype: Team\ntitle: Team Sol\nbelongs_to: []\nschema: 3\nstatus: captured\n\
+                       ---\n\n# Team Sol\n\nBody text.\n";
+
+#[test]
+fn adopt_mints_ids_into_existing_vault_files() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("Team & Organization/team-sol.md", FOREIGN);
+    f.write("Raw/loose.md", "# Loose\n");
+
+    let out = f
+        .cmd()
+        .args([
+            "note",
+            "adopt",
+            "Team & Organization/team-sol.md",
+            "--quiet",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    assert!(id.starts_with("n-"), "{}", id);
+    let text = f.read("Team & Organization/team-sol.md");
+    assert!(text.contains(&format!("id: {id}\n")), "{text}");
+    assert!(
+        text.contains("type: Team\n"),
+        "foreign keys survive: {text}"
+    );
+    assert!(
+        text.contains("# Team Sol\n\nBody text.\n"),
+        "body untouched: {text}"
+    );
+
+    // Human mode names the file it adopted.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "Raw/loose.md"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    let id2 = stdout
+        .strip_prefix("adopted ")
+        .and_then(|rest| rest.split_once(' '))
+        .map(|(id, _)| id)
+        .expect("adopted {id} → {path}")
+        .to_string();
+    assert!(id2.starts_with("n-"), "{stdout}");
+    assert_eq!(stdout, format!("adopted {id2} → Raw/loose.md\n"));
+
+    // JSON is one array of {id, path} rows.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "Raw/loose.md", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    let rows = payload.as_array().expect("a JSON array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], Json::String(id2.clone()));
+    assert_eq!(rows[0]["path"], Json::String("Raw/loose.md".into()));
+
+    // The adopted files are addressable by id, and the census moved.
+    let out = f
+        .cmd()
+        .args(["note", "get", &id, "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), id);
+    let out = f.cmd().args(["--json", "status"]).output().expect("run");
+    let status = json_of(&out);
+    assert_eq!(status["notes"], Json::from(2));
+    assert_eq!(status["notes_foreign"], Json::from(0));
+}
+
+#[test]
+fn adopt_is_idempotent_byte_for_byte() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("one.md", FOREIGN);
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    let before = f.read("one.md");
+
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), id);
+    assert_eq!(f.read("one.md"), before);
+}
+
+#[test]
+fn adopt_rejects_other_spaces_and_paths_outside_the_vault() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("Agents/tasks/foreign-task.md", "---\ntitle: X\n---\n\nx\n");
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "Agents/tasks/foreign-task.md"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+    assert!(
+        stderr_of(&out).to_lowercase().contains("space"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(
+        f.read("Agents/tasks/foreign-task.md")
+            .starts_with("---\ntitle: X"),
+        "the file is untouched"
+    );
+
+    let outside = tempfile::tempdir().expect("outside dir");
+    let path = outside.path().join("elsewhere.md");
+    std::fs::write(&path, "# Elsewhere\n").expect("write");
+    let out = f
+        .cmd()
+        .args(["note", "adopt"])
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "missing.md"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+}
+
+#[test]
+fn an_adopt_batch_stops_and_heals_on_re_run() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("one.md", FOREIGN);
+    f.write("two.md", FOREIGN);
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "missing.md", "two.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains("re-run"), "{stderr}");
+    let one = f.read("one.md");
+    assert!(one.contains("\nid: n-"), "the first file committed: {one}");
+    assert!(
+        !f.read("two.md").contains("\nid: n-"),
+        "the batch stopped before two.md"
+    );
+
+    // Re-running the same verb with the surviving paths heals the batch.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "two.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(
+        f.read("one.md"),
+        one,
+        "re-adoption is a byte-identical no-op"
+    );
+    assert!(f.read("two.md").contains("\nid: n-"));
 }

@@ -234,7 +234,21 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 2, about = "Append a block to a note's body.")]
+    #[command(
+        display_order = 2,
+        about = "Adopt existing Markdown: mint a mesh id in place, in the notes space."
+    )]
+    Adopt {
+        #[arg(
+            value_name = "PATH",
+            required = true,
+            help = "Files to adopt: vault-relative or absolute."
+        )]
+        paths: Vec<PathBuf>,
+        #[command(flatten)]
+        out: OutFlags,
+    },
+    #[command(display_order = 3, about = "Append a block to a note's body.")]
     Append {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -247,7 +261,7 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 3, about = "Update a note's tags, type or title.")]
+    #[command(display_order = 4, about = "Update a note's tags, type or title.")]
     Update {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -264,7 +278,7 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 4, about = "Read one note.")]
+    #[command(display_order = 5, about = "Read one note.")]
     Get {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -282,7 +296,7 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 5, about = "List notes.")]
+    #[command(display_order = 6, about = "List notes.")]
     List {
         #[arg(long, value_name = "TEXT", help = TAGS_FILTER_HELP)]
         tags: Option<String>,
@@ -311,7 +325,7 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 6, about = "Delete a note.")]
+    #[command(display_order = 7, about = "Delete a note.")]
     Delete {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -1542,7 +1556,7 @@ mod tests {
         let command = Cli::command();
         assert_eq!(
             sub_names(&command, "note"),
-            ["new", "append", "update", "get", "list", "delete"]
+            ["new", "adopt", "append", "update", "get", "list", "delete"]
         );
         assert_eq!(
             sub_names(&command, "task"),

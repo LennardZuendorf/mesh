@@ -1,4 +1,4 @@
-//! `mesh note …` — the six note subcommands and their output branches.
+//! `mesh note …` — the seven note subcommands and their output branches.
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,10 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
         } => {
             ctx.coalesce(out.json, out.quiet, owner);
             new(ctx, &title, &note_type, tags.as_deref(), body, file)
+        }
+        NoteSub::Adopt { paths, out } => {
+            ctx.coalesce(out.json, out.quiet, None);
+            adopt(ctx, paths)
         }
         NoteSub::Append {
             target,
@@ -191,6 +195,40 @@ fn report(ctx: &Ctx, note: &Note, verb: &str) {
         &[("type", Json::String(note.note_type.clone()))],
         note.updated.unwrap_or_else(now_utc),
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// adopt
+// ---------------------------------------------------------------------------------------
+
+/// Adopt existing foreign Markdown: mint a mesh id into each file, in place.
+fn adopt(ctx: &mut Ctx, paths: Vec<PathBuf>) -> Result<()> {
+    let cfg = ctx.cfg()?;
+    let adopted = notes::adopt(cfg, &paths)?;
+    let entries: Vec<Json> = adopted
+        .iter()
+        .map(|a| {
+            let mut row = Map::new();
+            row.insert("id".to_string(), Json::String(a.id.clone()));
+            row.insert("path".to_string(), Json::String(vault_rel(cfg, &a.path)));
+            Json::Object(row)
+        })
+        .collect();
+    out::rows(ctx, &entries, |row| {
+        format!(
+            "adopted {} → {}",
+            row.get("id").and_then(Json::as_str).unwrap_or_default(),
+            row.get("path").and_then(Json::as_str).unwrap_or_default()
+        )
+    });
+    Ok(())
+}
+
+/// A path rendered vault-relative when possible, absolute otherwise.
+fn vault_rel(cfg: &crate::config::Config, path: &Path) -> String {
+    path.strip_prefix(cfg.vault())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 // ---------------------------------------------------------------------------------------
