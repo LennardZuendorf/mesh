@@ -579,7 +579,7 @@ pub fn session_picks(cfg: &Config, me: Option<&str>, cap: usize) -> Vec<View<Mem
         .retain(|v| !v.item.is_expired(now) && !v.item.is_superseded() && v.item.is_visible_to(me));
     // Stable composition: the weakest key first, the strongest last.
     views.sort_by(|a, b| a.path.to_string_lossy().cmp(&b.path.to_string_lossy()));
-    views.sort_by(|a, b| b.item.updated.cmp(&a.item.updated));
+    views.sort_by_key(|a| std::cmp::Reverse(a.item.updated));
     views.sort_by(|a, b| {
         b.item
             .effective_importance()
@@ -703,7 +703,7 @@ pub fn recall(cfg: &Config, query: &str, f: &Filter, o: &RecallOpts) -> Result<V
 
     // Stable composition: path ascending, then `updated` descending, then the final score.
     scored.sort_by(|a, b| a.1.path.cmp(&b.1.path));
-    scored.sort_by(|a, b| b.1.updated.cmp(&a.1.updated));
+    scored.sort_by_key(|a| std::cmp::Reverse(a.1.updated));
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
 
     let mut out: Vec<Hit> = scored.into_iter().map(|(_, hit)| hit).collect();

@@ -116,7 +116,7 @@ fn typed_note_values_match_the_python_reference() {
         if let Some(object) = want.as_object_mut() {
             assert_eq!(
                 object.remove("extra"),
-                Some(serde_json::json!({"nested": true})).filter(|_| id == "n-HAND")
+                (id == "n-HAND").then_some(serde_json::json!({"nested": true}))
             );
         }
         assert_eq!(got, want, "note {id}");
