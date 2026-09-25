@@ -641,6 +641,81 @@ pub fn foreign_rows(cfg: &Config, f: &Filter) -> Vec<ForeignView> {
     foreign_paths(cfg).iter().map(|p| foreign_view(p)).collect()
 }
 
+/// Atomically take a claim on a note: a test-and-set on `claimed_by` alone.
+///
+/// Mirrors `tasks::claim` minus the lifecycle: a note gains no status and the claim never
+/// moves the file. Resolution happens twice — once before the lock so a missing note is
+/// not-found rather than a conflict, and again *inside* the lock, which is the TOCTOU rule
+/// every notes verb follows. A re-claim by the same identity is a no-op that reports the
+/// state it found and never rewrites; a claim by a second identity exits 4 with the task
+/// claim conflict envelope.
+pub fn claim(cfg: &Config, target: &str, claimer: &str) -> Result<Note> {
+    // Resolve first, so a missing note is not-found rather than "unclaimed".
+    let note_id = resolve_id(cfg, target)?;
+    let root = cfg.root(Space::Notes)?.to_path_buf();
+
+    let _guard = hold(&entity_lock(&root, &note_id)?)?;
+    let path = resolve(cfg, &note_id)?;
+    let Some(mut doc) = read_doc(&path) else {
+        return Err(note_not_found(target));
+    };
+    let existing = meta_str(&doc.meta, "claimed_by").map(str::to_string);
+    match existing {
+        // Same-identity reclaim: no write, `updated` untouched.
+        Some(ref who) if who == claimer => {
+            Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target))
+        }
+        // Someone else holds it.
+        Some(who) => Err(MeshError::ClaimConflict {
+            task_id: note_id,
+            existing_owner: who,
+        }),
+        // Take it. `owner` and every other field are untouched.
+        None => {
+            doc.meta
+                .insert("claimed_by".to_string(), Value::str(claimer));
+            let now = now_utc();
+            doc.meta.insert("updated".to_string(), ts_value(&now));
+            let note = Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target))?;
+            write_doc(&cfg.spaces, &path, &ordered(&NOTE_FIELDS, &doc))?;
+            Ok(note)
+        }
+    }
+}
+
+/// Release a claim on a note: clear `claimed_by`.
+///
+/// Mirrors `tasks::release` minus the lifecycle: idempotent, a no-op release never rewrites,
+/// `force` breaks another holder's claim, and the cleared key is emitted as `null`. `owner`
+/// is never touched.
+pub fn release(cfg: &Config, target: &str, releaser: &str, force: bool) -> Result<Note> {
+    let note_id = resolve_id(cfg, target)?;
+    let root = cfg.root(Space::Notes)?.to_path_buf();
+
+    let _guard = hold(&entity_lock(&root, &note_id)?)?;
+    let path = resolve(cfg, &note_id)?;
+    let Some(mut doc) = read_doc(&path) else {
+        return Err(note_not_found(target));
+    };
+    let Some(holder) = meta_str(&doc.meta, "claimed_by").map(str::to_string) else {
+        // Releasing an unclaimed note is an idempotent no-op.
+        return Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target));
+    };
+    // `force` is a cooperation override and an audit affordance, never an auth check.
+    if holder != releaser && !force {
+        return Err(MeshError::ClaimConflict {
+            task_id: note_id,
+            existing_owner: holder,
+        });
+    }
+    doc.meta.insert("claimed_by".to_string(), Value::Null);
+    let now = now_utc();
+    doc.meta.insert("updated".to_string(), ts_value(&now));
+    let note = Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target))?;
+    write_doc(&cfg.spaces, &path, &ordered(&NOTE_FIELDS, &doc))?;
+    Ok(note)
+}
+
 /// Hard-delete a note. Removing a file with corrupt frontmatter is the repair path, so this
 /// is the one verb that never validates.
 pub fn delete(cfg: &Config, target: &str) -> Result<String> {
@@ -1373,5 +1448,155 @@ mod tests {
         let doc = read_doc(&v.cfg.vault().join("notes").join(format!("{}.md", note.id)))
             .expect("readable");
         assert_eq!(meta_str(&doc.meta, "owner"), Some("bob"));
+    }
+
+    // ---------------------------------------------------------------------------------
+    // claim / release (note-adoption/4)
+    // ---------------------------------------------------------------------------------
+
+    /// The note's file path, whether it lives at the space root or a typed folder.
+    fn note_path(v: &Vault, id: &str) -> PathBuf {
+        let path = resolve(&v.cfg, id).unwrap();
+        assert!(path.is_file(), "{}", path.display());
+        path
+    }
+
+    #[test]
+    fn claim_writes_claimed_by_only_and_leaves_owner_alone() {
+        let v = vault();
+        let note = create(&v.cfg, "T", NewNote::default()).unwrap();
+        let path = note_path(&v, &note.id);
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains("owner: test-agent\n"), "{before}");
+        assert!(!before.contains("claimed_by"), "{before}");
+
+        let claimed = claim(&v.cfg, &note.id, "alice").unwrap();
+        assert_eq!(claimed.claimed_by.as_deref(), Some("alice"));
+        // The claim never touches the durable owner, and a note never gains a status.
+        assert_eq!(claimed.owner.as_deref(), Some("test-agent"));
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("claimed_by: alice\n"), "{after}");
+        assert!(after.contains("owner: test-agent\n"), "{after}");
+        assert!(
+            !after.contains("status:"),
+            "a note never gains a status: {after}"
+        );
+        assert_ne!(before, after, "the claim is a write");
+
+        // claimed_by is declared after owner, so it lands between owner and created.
+        let keys: Vec<&str> = after
+            .lines()
+            .skip(1)
+            .take_while(|l| *l != "---")
+            .filter_map(|l| l.split(':').next())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "type",
+                "title",
+                "tags",
+                "owner",
+                "claimed_by",
+                "created",
+                "updated",
+                "related"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_second_identity_claim_conflicts_and_writes_nothing() {
+        let v = vault();
+        let note = create(&v.cfg, "T", NewNote::default()).unwrap();
+        claim(&v.cfg, &note.id, "alice").unwrap();
+        let path = note_path(&v, &note.id);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = claim(&v.cfg, &note.id, "bob").unwrap_err();
+        assert_eq!(err.code(), 4);
+        assert_eq!(
+            err.to_string(),
+            format!("task {} already claimed by alice", note.id)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_same_identity_reclaim_is_a_byte_identical_noop() {
+        let v = vault();
+        let note = create(&v.cfg, "T", NewNote::default()).unwrap();
+        let first = claim(&v.cfg, &note.id, "alice").unwrap();
+        let path = note_path(&v, &note.id);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let again = claim(&v.cfg, &note.id, "alice").unwrap();
+        assert_eq!(again.updated, first.updated, "a no-op never bumps updated");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn release_is_idempotent_and_force_breaks_a_foreign_claim() {
+        let v = vault();
+        let note = create(&v.cfg, "T", NewNote::default()).unwrap();
+        let path = note_path(&v, &note.id);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // An unclaimed note reports the found state and writes nothing.
+        let released = release(&v.cfg, &note.id, "alice", false).unwrap();
+        assert_eq!(released.claimed_by, None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        claim(&v.cfg, &note.id, "alice").unwrap();
+        let held = std::fs::read_to_string(&path).unwrap();
+        let err = release(&v.cfg, &note.id, "bob", false).unwrap_err();
+        assert_eq!(err.code(), 4);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), held);
+
+        let released = release(&v.cfg, &note.id, "bob", true).unwrap();
+        assert_eq!(released.claimed_by, None);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("claimed_by: null\n"));
+        // The owner survives a release as well.
+        assert_eq!(released.owner.as_deref(), Some("test-agent"));
+    }
+
+    #[test]
+    fn release_reports_the_holder_it_cleared() {
+        let v = vault();
+        let note = create(&v.cfg, "T", NewNote::default()).unwrap();
+        claim(&v.cfg, &note.id, "alice").unwrap();
+        // The holder may release their own claim without --force.
+        let released = release(&v.cfg, &note.id, "alice", false).unwrap();
+        assert_eq!(released.claimed_by, None);
+
+        // Releasing again is still an idempotent no-op.
+        let path = note_path(&v, &note.id);
+        let before = std::fs::read_to_string(&path).unwrap();
+        release(&v.cfg, &note.id, "alice", false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn claim_and_release_resolve_a_slug_and_report_not_found() {
+        let v = vault();
+        let note = create(&v.cfg, "Team Sol", NewNote::default()).unwrap();
+        claim(&v.cfg, "team-sol", "alice").unwrap();
+        assert_eq!(
+            get(&v.cfg, &note.id).unwrap().item.claimed_by.as_deref(),
+            Some("alice")
+        );
+        release(&v.cfg, "team-sol", "alice", false).unwrap();
+
+        assert_eq!(claim(&v.cfg, "n-NOPE", "alice").unwrap_err().code(), 3);
+        assert_eq!(
+            release(&v.cfg, "n-NOPE", "alice", false)
+                .unwrap_err()
+                .code(),
+            3
+        );
     }
 }

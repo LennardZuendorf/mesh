@@ -4,13 +4,24 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::select::{FromMeta, SortKey, SortValue, Sortable};
 use crate::fm::{Meta, Value};
-use crate::model::common::{meta_time, FieldOrder, BASE_FIELDS};
+use crate::model::common::{meta_time, FieldOrder};
 
 /// The five note types, in declaration order. `--help` text is generated from this.
 pub const NOTE_TYPES: [&str; 5] = ["note", "log", "decision", "reference", "project"];
 
-/// Note key order on disk and in JSON.
-pub const NOTE_FIELDS: FieldOrder = FieldOrder(BASE_FIELDS);
+/// Note key order on disk and in JSON. `claimed_by` sits after `owner`, matching the task
+/// layout's identity fields; a note that was never claimed carries no such key.
+pub const NOTE_FIELDS: FieldOrder = FieldOrder(&[
+    "id",
+    "type",
+    "title",
+    "tags",
+    "owner",
+    "claimed_by",
+    "created",
+    "updated",
+    "related",
+]);
 
 /// The id prefix every mesh note carries.
 pub const NOTE_ID_PREFIX: &str = "n-";
@@ -24,6 +35,7 @@ pub struct Note {
     pub title: String,
     pub tags: Vec<String>,
     pub owner: Option<String>,
+    pub claimed_by: Option<String>,
     pub created: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
     pub related: Vec<String>,
@@ -72,6 +84,7 @@ impl FromMeta for Note {
             title: meta.get("title")?.as_str()?.to_string(),
             tags: string_list(meta, "tags")?,
             owner: optional_string(meta, "owner")?,
+            claimed_by: optional_string(meta, "claimed_by")?,
             created: Some(meta_time(meta, "created")?),
             updated: Some(meta_time(meta, "updated")?),
             related: string_list(meta, "related")?,
@@ -204,10 +217,34 @@ mod tests {
     }
 
     #[test]
-    fn the_field_order_is_the_eight_base_keys() {
+    fn claimed_by_reads_as_an_optional_scalar() {
+        let note = Note::from_meta(&meta(
+            "id: n-1\ntitle: T\nclaimed_by: alice\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
+        ))
+        .unwrap();
+        assert_eq!(note.claimed_by.as_deref(), Some("alice"));
+        let note = Note::from_meta(&meta(
+            "id: n-1\ntitle: T\nclaimed_by: null\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
+        ))
+        .unwrap();
+        assert_eq!(note.claimed_by, None);
+    }
+
+    #[test]
+    fn the_field_order_declares_claimed_by_after_owner() {
         assert_eq!(
             NOTE_FIELDS.fields(),
-            ["id", "type", "title", "tags", "owner", "created", "updated", "related"]
+            [
+                "id",
+                "type",
+                "title",
+                "tags",
+                "owner",
+                "claimed_by",
+                "created",
+                "updated",
+                "related"
+            ]
         );
     }
 

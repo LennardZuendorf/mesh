@@ -1284,3 +1284,54 @@ fn an_update_leaves_a_note_in_the_folder_the_operator_filed_it_in() {
 // finds a hand-made duplicate before the rename is ever reached. The guard mirrors the one
 // `watch.rs` reconciliation carries and stays as cheap insurance — but a test that has to
 // contrive an unreachable state proves nothing, so there isn't one.
+
+// ---------------------------------------------------------------------------------------
+// a note claim conflict wears the task claim conflict's envelope
+// ---------------------------------------------------------------------------------------
+
+fn envelope_keys(value: &Json) -> Vec<String> {
+    value
+        .as_object()
+        .expect("object")
+        .keys()
+        .cloned()
+        .collect::<Vec<String>>()
+}
+
+#[test]
+fn a_note_claim_conflict_has_the_task_claim_envelope_shape() {
+    let f = VaultFixture::new();
+    let note = ok(&f, &["--quiet", "note", "new", "N", "--body", "b"]);
+    ok(&f, &["--owner", "alice", "note", "claim", &note]);
+    let (_, note_stderr, note_code) =
+        run(&f, &["--json", "--owner", "bob", "note", "claim", &note]);
+    assert_eq!(note_code, 4);
+    let note_env: Json = serde_json::from_str(&note_stderr).expect("note envelope");
+
+    let task = ok(&f, &["--quiet", "task", "new", "T"]);
+    ok(&f, &["--owner", "alice", "task", "claim", &task]);
+    let (_, task_stderr, task_code) =
+        run(&f, &["--json", "--owner", "bob", "task", "claim", &task]);
+    assert_eq!(task_code, 4);
+    let task_env: Json = serde_json::from_str(&task_stderr).expect("task envelope");
+
+    // Shape parity: the note conflict carries byte-identical keys, in order, to the task one.
+    assert_eq!(envelope_keys(&note_env), envelope_keys(&task_env));
+    assert_eq!(
+        envelope_keys(&note_env),
+        [
+            "kind",
+            "message",
+            "next_action",
+            "task_id",
+            "existing_owner"
+        ]
+    );
+    assert_eq!(note_env["kind"], Json::String("claim_conflict".into()));
+    assert_eq!(note_env["task_id"], Json::String(note));
+    assert_eq!(note_env["existing_owner"], Json::String("alice".into()));
+    assert_eq!(note_env["next_action"], task_env["next_action"]);
+    // A durable claim carries no retry advice — that belongs to a contended lock.
+    assert!(note_env.get("retry_after_ms").is_none());
+    assert!(task_env.get("retry_after_ms").is_none());
+}

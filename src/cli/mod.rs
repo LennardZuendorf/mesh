@@ -308,6 +308,8 @@ pub enum NoteSub {
         any_tag: bool,
         #[arg(long, value_name = "TEXT", help = OWNER_FILTER_HELP)]
         owner: Option<String>,
+        #[arg(long, help = "Only notes I own or have claimed.")]
+        mine: bool,
         #[arg(long = "type", value_name = "TEXT", help = "Filter by note type.")]
         note_type: Option<String>,
         #[arg(long, value_name = "TEXT", help = "Recency: 7d or an ISO date.")]
@@ -329,7 +331,29 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 7, about = "Delete a note.")]
+    #[command(
+        display_order = 7,
+        about = "Claim a note (atomic test-and-set on claimed_by)."
+    )]
+    Claim {
+        #[arg(help = "Note id or title slug.")]
+        target: String,
+        #[command(flatten)]
+        out: OutFlags,
+    },
+    #[command(display_order = 8, about = "Release a note claim.")]
+    Release {
+        #[arg(help = "Note id or title slug.")]
+        target: String,
+        #[arg(
+            long,
+            help = "Break another agent's claim (cooperation override, not auth)."
+        )]
+        force: bool,
+        #[command(flatten)]
+        out: OutFlags,
+    },
+    #[command(display_order = 9, about = "Delete a note.")]
     Delete {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -1560,7 +1584,7 @@ mod tests {
         let command = Cli::command();
         assert_eq!(
             sub_names(&command, "note"),
-            ["new", "adopt", "append", "update", "get", "list", "delete"]
+            ["new", "adopt", "append", "update", "get", "list", "claim", "release", "delete"]
         );
         assert_eq!(
             sub_names(&command, "task"),

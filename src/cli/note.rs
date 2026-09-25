@@ -1,10 +1,11 @@
-//! `mesh note …` — the seven note subcommands and their output branches.
+//! `mesh note …` — the note subcommands and their output branches.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value as Json};
 
 use crate::cli::out;
+use crate::cli::task::identity;
 use crate::cli::NoteSub;
 use crate::ctx::Ctx;
 use crate::domain::notes::{self, AppendOpts, NewNote, UpdateNote};
@@ -79,6 +80,7 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
             tags,
             any_tag,
             owner,
+            mine,
             note_type,
             since,
             sort,
@@ -88,6 +90,7 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
         } => {
             // The filter reads the *coalesced* owner: `mesh --owner bob note list` must behave
             // exactly like `mesh note list --owner bob`.
+            ctx.coalesce_mine(mine);
             ctx.coalesce(out.json, out.quiet, owner);
             let owner = ctx.g.owner.clone();
             list(
@@ -101,6 +104,14 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
                 limit,
                 foreign,
             )
+        }
+        NoteSub::Claim { target, out } => {
+            ctx.coalesce(out.json, out.quiet, None);
+            claim(ctx, &target)
+        }
+        NoteSub::Release { target, force, out } => {
+            ctx.coalesce(out.json, out.quiet, None);
+            release(ctx, &target, force)
         }
         NoteSub::Delete { target, force, out } => {
             ctx.coalesce(out.json, out.quiet, None);
@@ -320,6 +331,39 @@ fn update(
 }
 
 // ---------------------------------------------------------------------------------------
+// claim / release
+// ---------------------------------------------------------------------------------------
+
+/// `mesh note claim` — a Class M mutation, mirroring `task claim`.
+fn claim(ctx: &Ctx, target: &str) -> Result<()> {
+    let claimer = identity(ctx)?;
+    let note = notes::claim(ctx.cfg()?, target, &claimer)?;
+    let fields: [(&str, Json); 2] = [
+        ("type", Json::String(note.note_type.clone())),
+        (
+            "claimed_by",
+            note.claimed_by.clone().map_or(Json::Null, Json::String),
+        ),
+    ];
+    out::mutation(
+        ctx,
+        &note.id,
+        "claimed",
+        &fields,
+        note.updated.unwrap_or_else(now_utc),
+    );
+    Ok(())
+}
+
+/// `mesh note release` — idempotent; `--force` breaks another holder's claim.
+fn release(ctx: &Ctx, target: &str, force: bool) -> Result<()> {
+    let releaser = identity(ctx)?;
+    let note = notes::release(ctx.cfg()?, target, &releaser, force)?;
+    report(ctx, &note, "released");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
 // get
 // ---------------------------------------------------------------------------------------
 
@@ -460,6 +504,10 @@ fn list(
         tags: tags.map(parse_csv).filter(|t| !t.is_empty()),
         any_tag,
         owner,
+        // `--mine` limits to owner-or-claimed_by == the acting identity, exactly like
+        // `task list`: `me` is the acting identity (`--owner` else `[core].agent`).
+        mine: ctx.g.mine,
+        me: ctx.actor().map(str::to_string),
         cutoff,
         sort,
         limit: Some(limit),

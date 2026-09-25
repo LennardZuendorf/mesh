@@ -1235,7 +1235,9 @@ fn note_help_lists_the_six_subcommands_in_order() {
     let out = f.cmd().args(["note", "--help"]).output().expect("run");
     let text = stdout_of(&out);
     let mut at = 0usize;
-    for name in ["new", "adopt", "append", "update", "get", "list", "delete"] {
+    for name in [
+        "new", "adopt", "append", "update", "get", "list", "claim", "release", "delete",
+    ] {
         let found = text.get(at..).and_then(|rest| rest.find(name));
         let offset = found.unwrap_or_else(|| panic!("{name} missing or out of order in {text}"));
         at += offset + name.len();
@@ -1826,4 +1828,217 @@ fn update_owner_sets_the_area_explicitly() {
         .expect("run");
     assert_eq!(code_of(&out), Some(2));
     assert_eq!(stderr_of(&out).trim(), "unknown owner: 'ghost'");
+}
+
+// ---------------------------------------------------------------------------------------
+// claim / release (note-adoption/4): task-grade atomicity, no lifecycle
+// ---------------------------------------------------------------------------------------
+
+/// One frontmatter field's line, or an empty string when the key is absent.
+fn field_of(text: &str, key: &str) -> String {
+    text.lines()
+        .find(|l| l.starts_with(&format!("{key}:")))
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn claim_writes_claimed_by_only() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    let before = f.read(&rel);
+
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "claim", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("claimed {id}"));
+
+    let after = f.read(&rel);
+    assert!(after.contains("claimed_by: bob\n"), "{after}");
+    assert_eq!(
+        field_of(&after, "owner"),
+        "owner: test-agent",
+        "the durable owner is untouched: {after}"
+    );
+    assert!(
+        !after.contains("status:"),
+        "a note never gains a status: {after}"
+    );
+    assert_eq!(field_of(&before, "created"), field_of(&after, "created"));
+    assert_ne!(field_of(&before, "updated"), field_of(&after, "updated"));
+}
+
+#[test]
+fn claim_json_carries_the_holder_and_the_updated_stamp() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let out = f
+        .cmd()
+        .args(["note", "claim", &id, "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    let keys: Vec<&str> = payload
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["id", "type", "claimed_by", "updated"]);
+    assert_eq!(payload["claimed_by"], Json::String("test-agent".into()));
+}
+
+#[test]
+fn a_foreign_claim_is_exit_four_and_writes_nothing() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    f.cmd()
+        .args(["--owner", "alice", "note", "claim", &id, "--quiet"])
+        .assert()
+        .success();
+    let before = f.read(&rel);
+
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "claim", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(4));
+    assert_eq!(
+        stderr_of(&out).trim(),
+        format!("task {id} already claimed by alice"),
+        "the note conflict reuses the task claim envelope"
+    );
+    assert_eq!(f.read(&rel), before, "a conflict writes nothing");
+}
+
+#[test]
+fn a_same_identity_reclaim_leaves_the_bytes_untouched() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    f.cmd()
+        .args(["--owner", "alice", "note", "claim", &id, "--quiet"])
+        .assert()
+        .success();
+    let before = f.read(&rel);
+
+    let out = f
+        .cmd()
+        .args(["--owner", "alice", "note", "claim", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("claimed {id}"));
+    assert_eq!(f.read(&rel), before, "a re-claim never rewrites");
+}
+
+#[test]
+fn release_is_idempotent_and_force_breaks_a_foreign_claim() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    let before = f.read(&rel);
+
+    // An unclaimed note reports the found state, exits 0, and is byte-identical.
+    let out = f
+        .cmd()
+        .args(["note", "release", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("released {id}"));
+    assert_eq!(f.read(&rel), before, "an unclaimed release is a no-op");
+
+    f.cmd()
+        .args(["--owner", "alice", "note", "claim", &id, "--quiet"])
+        .assert()
+        .success();
+    let held = f.read(&rel);
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "release", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(4), "a foreign release needs --force");
+    assert_eq!(f.read(&rel), held, "a refused release writes nothing");
+
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "release", &id, "--force"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("released {id}"));
+    assert!(
+        f.read(&rel).contains("claimed_by: null\n"),
+        "a released claim is emitted as null: {}",
+        f.read(&rel)
+    );
+}
+
+#[test]
+fn list_mine_lists_owned_or_claimed_notes() {
+    let f = VaultFixture::new();
+    let owned = new_note(&f, "Owned", "x");
+    let theirs = {
+        let out = f
+            .cmd()
+            .args(["note", "new", "Theirs", "--owner", "bob", "--body", "x"])
+            .args(["--quiet"])
+            .output()
+            .expect("run");
+        stdout_of(&out).trim().to_string()
+    };
+    let claimed = {
+        let out = f
+            .cmd()
+            .args(["note", "new", "Claimed", "--owner", "bob", "--body", "x"])
+            .args(["--quiet"])
+            .output()
+            .expect("run");
+        stdout_of(&out).trim().to_string()
+    };
+    f.cmd()
+        .args(["note", "claim", &claimed, "--quiet"])
+        .assert()
+        .success();
+
+    let ids = |args: &[&str]| {
+        let mut cmd = f.cmd();
+        cmd.args(["note", "list", "--quiet"]);
+        cmd.args(args);
+        let out = cmd.output().expect("run");
+        stdout_of(&out)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<String>>()
+    };
+    let mine = ids(&["--mine"]);
+    assert!(mine.contains(&owned), "an owned note is mine: {mine:?}");
+    assert!(mine.contains(&claimed), "a claimed note is mine: {mine:?}");
+    assert!(
+        !mine.contains(&theirs),
+        "another agent's note is not mine: {mine:?}"
+    );
+
+    // The global flag agrees with the local one.
+    let out = f
+        .cmd()
+        .args(["--mine", "note", "list", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(
+        stdout_of(&out)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<String>>(),
+        mine
+    );
 }
