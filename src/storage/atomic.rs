@@ -31,7 +31,7 @@ pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
 pub fn fresh_file_mode() -> u32 {
     let current = rustix::process::umask(rustix::fs::Mode::empty());
     rustix::process::umask(current);
-    0o666 & !current.bits()
+    u32::from(0o666 & !current.bits())
 }
 
 fn match_destination_mode(file: &std::fs::File, path: &Path) {
@@ -39,7 +39,10 @@ fn match_destination_mode(file: &std::fs::File, path: &Path) {
         Ok(meta) => meta.permissions().mode() & 0o7777,
         Err(_) => fresh_file_mode(),
     };
-    let Some(mode) = rustix::fs::Mode::from_bits(mode) else {
+    let Some(mode) = u16::try_from(mode)
+        .ok()
+        .and_then(rustix::fs::Mode::from_bits)
+    else {
         return;
     };
     let _ = rustix::fs::fchmod(file, mode);
