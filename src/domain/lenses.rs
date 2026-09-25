@@ -391,6 +391,8 @@ struct AgentCounts {
     owns_open: u64,
     claimed: u64,
     stale_claims: u64,
+    notes_owned: u64,
+    notes_claimed: u64,
 }
 
 /// The complete `mesh status` payload, in the pinned key order (surface.md §8.2).
@@ -401,10 +403,9 @@ pub fn status_report(cfg: &Config) -> serde_json::Value {
     let mut out = Map::new();
 
     // notes: schema-valid notes only.
-    let notes = crate::domain::notes::list(cfg, &Filter::unbounded(), false)
-        .map(|views| views.len())
-        .unwrap_or(0);
-    out.insert("notes".to_string(), Json::from(notes));
+    let note_views =
+        crate::domain::notes::list(cfg, &Filter::unbounded(), false).unwrap_or_default();
+    out.insert("notes".to_string(), Json::from(note_views.len()));
 
     // tasks: zero-filled in TASK_STATUSES order, an unknown status appended.
     let task_views = crate::domain::tasks::list(cfg, &Filter::unbounded(), Availability::Any)
@@ -513,6 +514,25 @@ pub fn status_report(cfg: &Config) -> serde_json::Value {
             }
         }
     }
+    // Note ownership and claims join the same census (R9): the roster is observed
+    // identities, so a note owner who owns no task is registered on sight too. The note
+    // counters are appended after the task ones, never spliced in. `owner` is the durable
+    // area, `claimed_by` the transient annotation.
+    for view in &note_views {
+        let note = &view.item;
+        if let Some(owner) = note.owner.as_deref().filter(|o| !o.is_empty()) {
+            let index = register(&mut agents, owner);
+            if let Some((_, counts)) = agents.get_mut(index) {
+                counts.notes_owned += 1;
+            }
+        }
+        if let Some(claimer) = note.claimed_by.as_deref().filter(|c| !c.is_empty()) {
+            let index = register(&mut agents, claimer);
+            if let Some((_, counts)) = agents.get_mut(index) {
+                counts.notes_claimed += 1;
+            }
+        }
+    }
     agents.sort_by(|a, b| a.0.cmp(&b.0));
     let mut agents_obj = Map::new();
     for (name, counts) in &agents {
@@ -522,6 +542,8 @@ pub fn status_report(cfg: &Config) -> serde_json::Value {
                 ("owns_open", counts.owns_open),
                 ("claimed", counts.claimed),
                 ("stale_claims", counts.stale_claims),
+                ("notes_owned", counts.notes_owned),
+                ("notes_claimed", counts.notes_claimed),
             ]),
         );
     }
@@ -988,10 +1010,67 @@ mod tests {
         assert_eq!(report["agents"]["alice"]["owns_open"], Json::from(1));
         assert_eq!(report["agents"]["bob"]["claimed"], Json::from(1));
         assert_eq!(report["agents"]["bob"]["owns_open"], Json::from(0));
+        // The census reads note ownership too, appending the note keys after the task ones.
+        assert_eq!(report["agents"]["test-agent"]["notes_owned"], Json::from(2));
+        assert_eq!(
+            report["agents"]["test-agent"]["notes_claimed"],
+            Json::from(0)
+        );
+        let alice_keys: Vec<&str> = report["agents"]["alice"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            alice_keys,
+            [
+                "owns_open",
+                "claimed",
+                "stale_claims",
+                "notes_owned",
+                "notes_claimed"
+            ]
+        );
         assert_eq!(report["deps"]["ready"], Json::from(1));
         assert_eq!(report["deps"]["blocked"], Json::from(0));
         assert_eq!(report["deps"]["cycles"], serde_json::json!([]));
         assert_eq!(report["vault"]["exists"], Json::Bool(true));
+    }
+
+    #[test]
+    fn the_status_census_registers_note_owners_and_claimers() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_for(dir.path());
+        note(dir.path(), "n-a", "A", "nora", "body");
+        note(dir.path(), "n-b", "B", "nora", "body");
+        fs::write(
+            dir.path().join("notes/n-c.md"),
+            "---\nid: n-c\ntype: note\ntitle: C\ntags: []\nowner: null\nclaimed_by: nora\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n---\nb\n",
+        )
+        .unwrap();
+        let report = status_report(&cfg);
+        assert_eq!(report["agents"]["nora"]["notes_owned"], Json::from(2));
+        assert_eq!(report["agents"]["nora"]["notes_claimed"], Json::from(1));
+        assert_eq!(report["agents"]["nora"]["owns_open"], Json::from(0));
+        // The key order pins the append: task counters first, note counters last.
+        let keys: Vec<&str> = report["agents"]["nora"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "owns_open",
+                "claimed",
+                "stale_claims",
+                "notes_owned",
+                "notes_claimed"
+            ]
+        );
     }
 
     #[test]

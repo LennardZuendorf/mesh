@@ -1904,7 +1904,7 @@ fn status_human_block_renders_every_group() {
         "stale locks: 1",
         "daemon: stopped",
         "agents:",
-        "  demo-agent: open=3 claimed=1 stale=0",
+        "  demo-agent: open=3 claimed=1 stale=0 notes_owned=7 notes_claimed=0",
         "memories: total=0 expired=0 superseded=0",
         "scratch: files=0 agents=0",
         "assets: count=0 bytes=0 orphan_blobs=0",
@@ -2085,9 +2085,93 @@ fn status_agent_rows_register_owners_and_claimers() {
     assert_eq!(names, ["alice", "bob", "carol"]);
     assert_eq!(agents["alice"]["owns_open"], Json::from(1));
     assert_eq!(agents["bob"]["claimed"], Json::from(1));
+    // The per-agent keys are pinned: the note counts are appended after the task-shaped
+    // counters, never spliced in the middle (the `notes_foreign` append precedent).
+    let row_keys: Vec<&str> = agents["alice"]
+        .as_object()
+        .expect("agent object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        row_keys,
+        [
+            "owns_open",
+            "claimed",
+            "stale_claims",
+            "notes_owned",
+            "notes_claimed"
+        ]
+    );
     assert_eq!(
         agents["carol"],
-        serde_json::json!({"owns_open": 0, "claimed": 0, "stale_claims": 0})
+        serde_json::json!({
+            "owns_open": 0,
+            "claimed": 0,
+            "stale_claims": 0,
+            "notes_owned": 0,
+            "notes_claimed": 0
+        })
+    );
+}
+
+#[test]
+fn status_census_counts_note_ownership_and_claims() {
+    let fixture = VaultFixture::new();
+    // `nora` owns two notes and claims a third owned by nobody.
+    note(&fixture, "n-one", "One", "nora", &[], "b");
+    note(&fixture, "n-two", "Two", "nora", &[], "b");
+    fixture.write(
+        "notes/n-three.md",
+        "---\nid: n-three\ntype: note\ntitle: Three\ntags: []\nowner: null\n\
+         claimed_by: nora\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+         related: []\n---\n\nb\n",
+    );
+    // `tina` owns a task only: zero notes, so her line must render exactly as before.
+    task(&fixture, "t-a", "A", "open", "tina", "", "", &[], "b");
+
+    let out = fixture
+        .cmd()
+        .args(["--json", "status"])
+        .output()
+        .expect("run mesh");
+    let agents = json_of(&out)["agents"].clone();
+    let names: Vec<&str> = agents
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    // A note owner who owns no task still appears in the census.
+    assert_eq!(names, ["nora", "tina"]);
+    assert_eq!(agents["nora"]["notes_owned"], Json::from(2));
+    assert_eq!(agents["nora"]["notes_claimed"], Json::from(1));
+    assert_eq!(
+        agents["tina"],
+        serde_json::json!({
+            "owns_open": 1,
+            "claimed": 0,
+            "stale_claims": 0,
+            "notes_owned": 0,
+            "notes_claimed": 0
+        })
+    );
+
+    // Human block: the note counts ride at the end of the row; a zero-note agent is
+    // byte-identical to the pre-change line.
+    let human = fixture.cmd().args(["status"]).output().expect("run mesh");
+    let text = stdout_of(&human);
+    assert!(
+        text.contains("  nora: open=0 claimed=0 stale=0 notes_owned=2 notes_claimed=1"),
+        "missing nora row in:\n{text}"
+    );
+    assert!(
+        text.contains("  tina: open=1 claimed=0 stale=0\n"),
+        "zero-note row changed in:\n{text}"
+    );
+    assert!(
+        !text.contains("  tina: open=1 claimed=0 stale=0 notes_"),
+        "a zero-note agent must carry no note segment:\n{text}"
     );
 }
 

@@ -238,9 +238,18 @@ pub fn status_block(report: &Json) -> String {
                 let open = as_i64(row.get("owns_open")).unwrap_or(0);
                 let claimed = as_i64(row.get("claimed")).unwrap_or(0);
                 let stale = as_i64(row.get("stale_claims")).unwrap_or(0);
-                lines.push(format!(
-                    "  {name}: open={open} claimed={claimed} stale={stale}"
-                ));
+                let mut line = format!("  {name}: open={open} claimed={claimed} stale={stale}");
+                // Note counts ride at the end of the row, and only when nonzero: an agent
+                // that owns or claims no note renders exactly as it did before the census
+                // widened (the `notes_foreign` shape rule).
+                let notes_owned = as_i64(row.get("notes_owned")).unwrap_or(0);
+                let notes_claimed = as_i64(row.get("notes_claimed")).unwrap_or(0);
+                if notes_owned > 0 || notes_claimed > 0 {
+                    line.push_str(&format!(
+                        " notes_owned={notes_owned} notes_claimed={notes_claimed}"
+                    ));
+                }
+                lines.push(line);
             }
         }
     }
@@ -734,8 +743,10 @@ mod tests {
             "stale_locks": ["/v/tasks/.locks/t-x.lock"],
             "vault": {"path": "/v", "exists": true},
             "daemon": {"running": false, "pid": null},
-            "agents": {"bob": {"owns_open": 0, "claimed": 1, "stale_claims": 0},
-                       "alice": {"owns_open": 2, "claimed": 0, "stale_claims": 0}},
+            "agents": {"bob": {"owns_open": 0, "claimed": 1, "stale_claims": 0,
+                               "notes_owned": 0, "notes_claimed": 0},
+                       "alice": {"owns_open": 2, "claimed": 0, "stale_claims": 0,
+                                 "notes_owned": 2, "notes_claimed": 1}},
             "dangling_links_total": 3,
             "memories": {"total": 4, "expired": 1, "superseded": 0},
             "scratch": {"files": 2, "agents": 1},
@@ -754,7 +765,11 @@ mod tests {
         assert_eq!(lines[5], "stale locks: 1");
         assert_eq!(lines[6], "daemon: stopped");
         assert_eq!(lines[7], "agents:");
-        assert_eq!(lines[8], "  alice: open=2 claimed=0 stale=0");
+        assert_eq!(
+            lines[8],
+            "  alice: open=2 claimed=0 stale=0 notes_owned=2 notes_claimed=1"
+        );
+        // A zero-note agent keeps the pre-change line byte for byte.
         assert_eq!(lines[9], "  bob: open=0 claimed=1 stale=0");
         assert_eq!(lines[10], "memories: total=4 expired=1 superseded=0");
         assert_eq!(lines[11], "scratch: files=2 agents=1");
