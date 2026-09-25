@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-09-08
+updated: 2026-09-25
 ---
 
 # Mesh — Technical Architecture
@@ -226,7 +226,11 @@ tests cited.
   an index update it did not make. Reconciliation *moves* a file and never destroys one: an
   occupied destination leaves the source in place. `status.deps.cycles` reports **strongly
   connected components**, not one entry per DFS back edge — while a component is listed the
-  graph is still cyclic, and it disappears only when it is really gone.
+  graph is still cyclic, and it disappears only when it is really gone. `status` names the
+  notes-corpus split explicitly: the human block labels the count `notes: N (mesh-native)` and
+  adds a `foreign markdown` line when foreign files exist, and the payload **appends** a
+  `notes_foreign` count — never mid-payload, per the append contract — so `notes: 0` beside a
+  vault full of adopted files cannot read as blindness.
 - **MCP** — stdio JSON-RPC, 37 `mesh_*` tools mirroring the safe verbs plus the read-only
   lenses, each carrying explicit read-only/idempotent/destructive hints with exactly one
   destructive tool (`mesh_task_cancel`). Withheld: every removal verb, asset ingest and gc, and
@@ -241,6 +245,9 @@ tests cited.
   resolves against the **acting** identity — `--owner` when given, else `[core].agent` — on every
   lens and list verb, the same identity a claim would be written as. A lens narrows its corpus
   when a space is disabled; any other listing failure is still an error, never an empty result.
+  A seed that names a foreign file — one `search` can see but no lens can address — fails as
+  `seed is not mesh-native (no mesh id)` (exit 3, envelope `not_found`), never confused with
+  `seed not found`.
 
 ---
 

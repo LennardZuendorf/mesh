@@ -31,6 +31,13 @@ Four things worth knowing before you point it at a folder you care about.
   engine and ignored on the `indexed` path, and `mesh reindex` hands `indexed` the whole vault
   root by default — so with a collection configured, a search can return rows from spaces you
   filtered out, scratch among them. `mesh search --health` says which engine would answer.
+- **Lenses read mesh-authored entities only.** Point `notes` at an existing vault and
+  `mesh search` (plus `note get/list --foreign`) sees every file in it — but `graph`,
+  `build-context`, `project` and `session-start` resolve by mesh id, so adopted Markdown
+  stays outside the coordination layer until mesh itself writes entities there. `mesh status`
+  makes the split visible (`notes: N (mesh-native)` plus a `foreign markdown` count), and a
+  lens seed naming a foreign file answers `seed is not mesh-native (no mesh id)` instead of
+  `seed not found`.
 - **A Markdown file over 4 MiB is invisible.** The walk skips it, so it is absent from every
   list, search and lens, and `note get` on its id reports "not found". There is no diagnostic
   and no count. Mesh refuses to *write* past that limit; a file an external editor grew past it

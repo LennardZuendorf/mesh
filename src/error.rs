@@ -44,6 +44,9 @@ pub enum MeshError {
     ScratchNotFound(String),
     #[error("seed not found: {0}")]
     SeedNotFound(String),
+    /// The seed names a foreign file that exists but carries no mesh id. Exit 3.
+    #[error("seed is not mesh-native (no mesh id): {0}")]
+    SeedForeign(String),
     #[error("project not found: {0}")]
     ProjectNotFound(String),
     /// A free-form "nothing matched" outcome (e.g. `task next` with no ready task). Exit 3.
@@ -154,6 +157,7 @@ impl MeshError {
             | MeshError::AssetNotFound(_)
             | MeshError::ScratchNotFound(_)
             | MeshError::SeedNotFound(_)
+            | MeshError::SeedForeign(_)
             | MeshError::ProjectNotFound(_)
             | MeshError::Empty(_) => 3,
             MeshError::ClaimConflict { .. } | MeshError::Lock(_) => 4,
@@ -177,6 +181,7 @@ impl MeshError {
             | MeshError::AssetNotFound(_)
             | MeshError::ScratchNotFound(_)
             | MeshError::SeedNotFound(_)
+            | MeshError::SeedForeign(_)
             | MeshError::ProjectNotFound(_)
             | MeshError::Empty(_) => "not_found",
             MeshError::Validation(_) => "validation",
@@ -189,6 +194,10 @@ impl MeshError {
 
     /// The `next_action` line of the JSON error envelope (map/mcp.md §5.4, plus `blocked`).
     pub fn next_action(&self) -> &'static str {
+        if let MeshError::SeedForeign(_) = self.inner() {
+            return "read it with `mesh search` or `mesh note get --foreign <slug>`; \
+                    graph lenses walk mesh-authored entities only";
+        }
         match self.kind() {
             "config_missing" => "run `mesh init` to create a config, then retry",
             "claim_conflict" => "pick a different task, wait, or ask the named agent to release it",
@@ -222,7 +231,9 @@ impl MeshError {
                 out.push(("slug", slug.as_str().into()));
                 out.push(("ids", ids.clone().into()));
             }
-            MeshError::SeedNotFound(id) => out.push(("seed_id", id.as_str().into())),
+            MeshError::SeedNotFound(id) | MeshError::SeedForeign(id) => {
+                out.push(("seed_id", id.as_str().into()))
+            }
             MeshError::ProjectNotFound(id) => out.push(("project_id", id.as_str().into())),
             MeshError::ConfigMissing { path } => {
                 out.push(("cfg_path", path.display().to_string().into()));
@@ -265,6 +276,10 @@ mod tests {
             "seed not found: n-1"
         );
         assert_eq!(
+            MeshError::SeedForeign("n-1".into()).to_string(),
+            "seed is not mesh-native (no mesh id): n-1"
+        );
+        assert_eq!(
             MeshError::ProjectNotFound("n-1".into()).to_string(),
             "project not found: n-1"
         );
@@ -284,6 +299,18 @@ mod tests {
             .to_string(),
             "task t-x is blocked by t-a, t-b"
         );
+    }
+
+    #[test]
+    fn the_foreign_seed_error_is_a_not_found_with_a_pointed_next_action() {
+        let err = MeshError::SeedForeign("ndc-rollout-status".into());
+        assert_eq!(err.code(), 3);
+        assert_eq!(err.kind(), "not_found");
+        assert_eq!(
+            err.structured(),
+            vec![("seed_id", serde_json::json!("ndc-rollout-status"))]
+        );
+        assert!(err.next_action().contains("foreign"));
     }
 
     #[test]

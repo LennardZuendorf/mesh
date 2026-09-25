@@ -257,8 +257,17 @@ fn bfs(
             DIRECTIONS.join(", ")
         )));
     }
-    let seed = resolve_entry(cfg, seed_id, spaces)
-        .ok_or_else(|| MeshError::SeedNotFound(seed_id.to_string()))?;
+    // A seed that names a file search can see must not read as a typo: distinguish
+    // "exists but is not mesh-native" from "no such file".
+    let seed = match resolve_entry(cfg, seed_id, spaces) {
+        Some(seed) => seed,
+        None => {
+            return Err(match crate::domain::notes::find_foreign(cfg, seed_id) {
+                Some(_) => MeshError::SeedForeign(seed_id.to_string()),
+                None => MeshError::SeedNotFound(seed_id.to_string()),
+            })
+        }
+    };
 
     // One pass, at most once per query, and never at depth 0.
     let inbound = if (direction == "in" || direction == "both") && depth > 0 {
@@ -476,6 +485,41 @@ mod tests {
         let err = build_context(&cfg, "n-nope", 1).unwrap_err();
         assert_eq!(err.code(), 3);
         assert_eq!(err.to_string(), "seed not found: n-nope");
+    }
+
+    #[test]
+    fn a_seed_that_names_a_foreign_file_is_distinct_from_a_typo() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_for(dir.path());
+        fs::create_dir_all(dir.path().join("notes")).unwrap();
+        fs::write(
+            dir.path().join("notes/NDC Rollout Status.md"),
+            "# NDC Rollout Status\n\nraw transcript\n",
+        )
+        .unwrap();
+        let err = graph_query(&cfg, "ndc-rollout-status", 1, "out").unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert_eq!(err.kind(), "not_found");
+        assert_eq!(
+            err.to_string(),
+            "seed is not mesh-native (no mesh id): ndc-rollout-status"
+        );
+        assert_eq!(
+            err.structured(),
+            vec![("seed_id", Json::String("ndc-rollout-status".into()))]
+        );
+        assert!(err.next_action().contains("foreign"));
+        // a plain typo stays plain; the raw stem names the same foreign file
+        assert_eq!(
+            build_context(&cfg, "n-nope", 1).unwrap_err().to_string(),
+            "seed not found: n-nope"
+        );
+        assert_eq!(
+            build_context(&cfg, "NDC Rollout Status", 1)
+                .unwrap_err()
+                .to_string(),
+            "seed is not mesh-native (no mesh id): NDC Rollout Status"
+        );
     }
 
     #[test]

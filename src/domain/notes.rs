@@ -402,6 +402,31 @@ pub fn get_foreign(cfg: &Config, target: &str) -> Result<ForeignView> {
     Err(note_not_found(target))
 }
 
+/// How many non-mesh Markdown files live in the notes space — the half of the corpus
+/// `status` names beside the mesh-native count, so `notes: 0` on a vault full of foreign
+/// files cannot read as "mesh sees nothing".
+pub fn foreign_count(cfg: &Config) -> usize {
+    foreign_paths(cfg).len()
+}
+
+/// The foreign file a lens seed names, when one matches: [`get_foreign`]'s matcher
+/// (stem, notes-relative path, vault-relative path) plus a slug match over the stem and
+/// the derived title. `None` means "no such file" — what the seed error must keep
+/// distinguishing from "exists, but mesh did not author it".
+pub fn find_foreign(cfg: &Config, target: &str) -> Option<PathBuf> {
+    if let Ok(view) = get_foreign(cfg, target) {
+        return Some(view.path);
+    }
+    let want = slugify(target);
+    if want.is_empty() {
+        return None;
+    }
+    foreign_paths(cfg).into_iter().find(|path| {
+        stem(path).is_some_and(|s| slugify(s) == want)
+            || derived_title(path, &read_body(path)).is_some_and(|title| slugify(&title) == want)
+    })
+}
+
 /// List mesh notes: id-bearing, schema-valid files only.
 ///
 /// `foreign` cannot be honoured through this return type — a `View<Note>` has no shape for a

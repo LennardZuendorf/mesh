@@ -176,7 +176,14 @@ pub fn status_block(report: &Json) -> String {
         lines.push(format!("vault: {path}{suffix}"));
     }
     if let Some(notes) = obj.get("notes") {
-        lines.push(format!("notes: {}", scalar_text(notes)));
+        lines.push(format!("notes: {} (mesh-native)", scalar_text(notes)));
+    }
+    if let Some(count) = obj.get("notes_foreign").and_then(Json::as_u64) {
+        if count > 0 {
+            lines.push(format!(
+                "foreign markdown: {count} (visible to search, not to lenses)"
+            ));
+        }
     }
     if let Some(line) = obj
         .get("tasks")
@@ -188,7 +195,14 @@ pub fn status_block(report: &Json) -> String {
         let age = freshness.get("age_seconds").and_then(Json::as_f64);
         lines.push(match age {
             Some(age) => format!("freshness: {age:.1}s ago"),
-            None => "freshness: (no vault files)".to_string(),
+            None => {
+                let foreign = obj.get("notes_foreign").and_then(Json::as_u64).unwrap_or(0);
+                if foreign > 0 {
+                    format!("freshness: (no mesh-native files; {foreign} foreign markdown)")
+                } else {
+                    "freshness: (no vault files)".to_string()
+                }
+            }
         });
     }
     if let Some(dangling) = obj.get("dangling_links") {
@@ -703,7 +717,7 @@ mod tests {
         let block = status_block(&report);
         assert_eq!(
             block,
-            "vault: /v (does not exist)\nnotes: 2\n\
+            "vault: /v (does not exist)\nnotes: 2 (mesh-native)\n\
              tasks: open=1 claimed=0 done=0 cancelled=0\nagents: (none)"
         );
         assert!(!block.contains("freshness"));
@@ -733,7 +747,7 @@ mod tests {
         let block = status_block(&report);
         let lines: Vec<&str> = block.lines().collect();
         assert_eq!(lines[0], "vault: /v");
-        assert_eq!(lines[1], "notes: 1");
+        assert_eq!(lines[1], "notes: 1 (mesh-native)");
         assert_eq!(lines[2], "tasks: open=0 claimed=1 done=0 cancelled=0");
         assert_eq!(lines[3], "freshness: 0.2s ago");
         assert_eq!(lines[4], "dangling links: 3 (Ghost)");
@@ -767,6 +781,28 @@ mod tests {
         assert!(block.contains("freshness: (no vault files)"));
         assert!(block.contains("dangling links: 0"));
         assert!(!block.contains("dangling links: 0 ("));
+    }
+
+    #[test]
+    fn foreign_markdown_is_labelled_and_freshness_says_which_half_is_missing() {
+        let report = serde_json::json!({
+            "notes": 0,
+            "notes_foreign": 490,
+            "freshness": {"mtime": null, "age_seconds": null},
+        });
+        let block = status_block(&report);
+        assert!(block.contains("notes: 0 (mesh-native)"));
+        assert!(block.contains("foreign markdown: 490 (visible to search, not to lenses)"));
+        assert!(block.contains("freshness: (no mesh-native files; 490 foreign markdown)"));
+        // zero foreign files: no foreign line, and the old freshness label stands
+        let report = serde_json::json!({
+            "notes": 0,
+            "notes_foreign": 0,
+            "freshness": {"mtime": null, "age_seconds": null},
+        });
+        let block = status_block(&report);
+        assert!(block.contains("freshness: (no vault files)"));
+        assert!(!block.contains("foreign markdown"));
     }
 
     #[test]

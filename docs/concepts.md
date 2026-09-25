@@ -41,6 +41,41 @@ empty directories.
 Five is a closed set. A sixth space needs a spec change — that is the "keep the surface honest"
 thesis, restated for a granular surface.
 
+## What does mesh see in a vault it didn't write?
+
+Two halves, and the split is deliberate: **search over everything, coordination over mesh's own
+entities only.**
+
+- **Search sees every Markdown file.** `mesh search` and `note get/list --foreign` read the
+  whole notes space; a file mesh did not author surfaces with `id: null`
+  (`src/search/corpus.rs`, `src/domain/notes.rs::foreign_rows`).
+- **The lenses see mesh-authored entities only.** `graph`, `build-context`, `project` and
+  `session-start` resolve seeds by mesh id or title slug over id-bearing files
+  (`src/domain/context.rs::resolve_entry`, `src/domain/notes.rs::mesh_paths`), so adopted
+  Markdown stays outside the coordination layer until mesh itself writes entities into the
+  vault. A seed that names a file the lenses cannot address reports
+  `seed is not mesh-native (no mesh id)` (exit 3) — distinct from `seed not found`, so an
+  unadopted file never reads as a typo.
+- **`mesh status` names the split instead of hiding it.** The human block prints
+  `notes: N (mesh-native)`, adds a `foreign markdown: M` line when foreign files exist, and
+  the `--json` payload appends a `notes_foreign` count (`src/domain/lenses.rs::status_report`)
+  — so `notes: 0` on a vault full of foreign files is no longer mistakable for "mesh sees
+  nothing".
+
+Two side effects of pointing mesh at an existing vault are worth knowing before the first
+agent fleet runs:
+
+- **Write verbs create `<space>/.locks/` before anything else.** Acquiring an entity lock
+  creates the space's lock directory (`src/storage/lock.rs::acquire`), and the directory
+  persists after the lock is released — including after a failed write or an idempotent
+  no-op. With the default layout those are visible folders; point memories, scratch and
+  assets at dot-prefixed paths (Obsidian hides dotfolders) when the vault root is curated.
+- **Note types route into subfolders of the notes root.** With `notes = "."` the first
+  `note new --type project` creates `projects/` at the vault root
+  (`src/domain/notes.rs::note_folder`), and the same goes for `logs/`, `decisions/` and
+  `references/`. Type routing is fixed, not configurable — one more reason to give mesh a
+  dedicated subfolder when the vault root is part of the information architecture.
+
 ## Where do memories live, versus notes, versus scratch?
 
 All three are note-shaped Markdown files with the same frontmatter base block, the same lock and

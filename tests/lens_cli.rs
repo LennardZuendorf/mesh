@@ -1812,6 +1812,7 @@ fn status_on_an_empty_vault_has_the_pinned_key_order() {
             "deps",
             "spaces",
             "watcher",
+            "notes_foreign",
         ]
     );
     assert_eq!(payload["notes"], Json::from(0));
@@ -1836,12 +1837,52 @@ fn status_on_an_empty_vault_has_the_pinned_key_order() {
 }
 
 #[test]
+fn a_foreign_only_vault_is_searchable_and_labeled_not_mesh_native() {
+    let fixture = VaultFixture::with(CORPUS_CONFIG);
+    std::fs::create_dir_all(fixture.vault.join("notes")).expect("create notes space");
+    std::fs::write(
+        fixture.vault.join("notes/NDC Rollout Status.md"),
+        "# NDC Rollout Status\n\nraw transcript about NDC flights\n",
+    )
+    .expect("seed the foreign file");
+    let out = fixture.cmd().args(["status"]).output().expect("run mesh");
+    let text = stdout_of(&out);
+    assert!(text.contains("notes: 0 (mesh-native)"), "{text}");
+    assert!(
+        text.contains("foreign markdown: 1 (visible to search, not to lenses)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("freshness: (no mesh-native files; 1 foreign markdown)"),
+        "{text}"
+    );
+    // search sees the file; the graph lens names it instead of reading as a typo
+    let out = fixture
+        .cmd()
+        .args(["search", "NDC flights"])
+        .output()
+        .expect("run mesh");
+    assert!(stdout_of(&out).contains("NDC Rollout Status"));
+    let out = fixture
+        .cmd()
+        .args(["graph", "ndc-rollout-status"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        stderr_of(&out).trim_end(),
+        "seed is not mesh-native (no mesh id): ndc-rollout-status"
+    );
+}
+
+#[test]
 fn status_human_block_renders_every_group() {
     let fixture = corpus_with_a_fresh_claim();
     let out = fixture.cmd().args(["status"]).output().expect("run mesh");
     let text = stdout_of(&out);
     for expected in [
-        "notes: 8",
+        "notes: 8 (mesh-native)",
+        "foreign markdown: 1 (visible to search, not to lenses)",
         "tasks: open=3 claimed=1 done=1 cancelled=1",
         "dangling links: 1 (Missing Title)",
         "stale locks: 1",

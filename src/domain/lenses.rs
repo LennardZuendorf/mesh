@@ -594,6 +594,15 @@ pub fn status_report(cfg: &Config) -> serde_json::Value {
 
     out.insert("watcher".to_string(), liveness(watcher));
 
+    // Appended last, never inserted mid-payload: `mesh status` keeps every pre-existing
+    // key at its old position (README §Migrating). The foreign Markdown the search
+    // corpus sees and the lenses do not — the number that keeps `notes: 0` on a vault
+    // full of foreign files from reading as "mesh sees nothing".
+    out.insert(
+        "notes_foreign".to_string(),
+        Json::from(crate::domain::notes::foreign_count(cfg)),
+    );
+
     Json::Object(out)
 }
 
@@ -935,6 +944,7 @@ mod tests {
                 "deps",
                 "spaces",
                 "watcher",
+                "notes_foreign",
             ]
         );
         assert_eq!(report["notes"], Json::from(0));
@@ -982,6 +992,27 @@ mod tests {
         assert_eq!(report["deps"]["blocked"], Json::from(0));
         assert_eq!(report["deps"]["cycles"], serde_json::json!([]));
         assert_eq!(report["vault"]["exists"], Json::Bool(true));
+    }
+
+    #[test]
+    fn the_status_counts_foreign_markdown_beside_mesh_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_for(dir.path());
+        note(dir.path(), "n-a", "A", "test-agent", "body");
+        fs::write(dir.path().join("notes/loose-one.md"), "# Loose One\n").unwrap();
+        fs::write(
+            dir.path().join("notes/Loose Two.md"),
+            "no frontmatter at all\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/loose-three.md"),
+            "---\ntitle: Three\ntype: Meeting\n---\nbody\n",
+        )
+        .unwrap();
+        let report = status_report(&cfg);
+        assert_eq!(report["notes"], Json::from(1));
+        assert_eq!(report["notes_foreign"], Json::from(3));
     }
 
     #[test]
