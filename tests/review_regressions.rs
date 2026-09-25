@@ -1286,6 +1286,60 @@ fn an_update_leaves_a_note_in_the_folder_the_operator_filed_it_in() {
 // contrive an unreachable state proves nothing, so there isn't one.
 
 // ---------------------------------------------------------------------------------------
+// an idempotent note verb reports the state it found and never rewrites the file
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn an_idempotent_note_verb_never_rewrites_the_file() {
+    // The per-verb feature pins live in note_cli.rs (`adopt_is_idempotent_byte_for_byte`,
+    // `a_same_identity_reclaim_leaves_the_bytes_untouched`,
+    // `release_is_idempotent_and_force_breaks_a_foreign_claim`); this is the regression-level
+    // guard that all three no-ops hold byte-for-byte under the default layout.
+    let f = VaultFixture::new();
+
+    // Adopt of an already-adopted file reports the id it found and rewrites nothing.
+    let adopted = ok(&f, &["--quiet", "note", "new", "Adopted", "--body", "b"]);
+    let adopted_rel = format!("notes/{adopted}.md");
+    let adopted_before = f.read(&adopted_rel);
+    assert_eq!(ok(&f, &["--quiet", "note", "adopt", &adopted_rel]), adopted);
+    assert_eq!(
+        f.read(&adopted_rel),
+        adopted_before,
+        "a re-adopt rewrote the file"
+    );
+
+    // Claim by the identity that already holds it.
+    ok(
+        &f,
+        &["--owner", "alice", "note", "claim", &adopted, "--quiet"],
+    );
+    let held = f.read(&adopted_rel);
+    assert_eq!(
+        ok(&f, &["--owner", "alice", "note", "claim", &adopted]),
+        format!("claimed {adopted}")
+    );
+    assert_eq!(
+        f.read(&adopted_rel),
+        held,
+        "a same-identity re-claim rewrote the file"
+    );
+
+    // Release of an unclaimed note.
+    let unclaimed = ok(&f, &["--quiet", "note", "new", "Unclaimed", "--body", "b"]);
+    let unclaimed_rel = format!("notes/{unclaimed}.md");
+    let unclaimed_before = f.read(&unclaimed_rel);
+    assert_eq!(
+        ok(&f, &["note", "release", &unclaimed]),
+        format!("released {unclaimed}")
+    );
+    assert_eq!(
+        f.read(&unclaimed_rel),
+        unclaimed_before,
+        "an unclaimed release rewrote the file"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
 // a note claim conflict wears the task claim conflict's envelope
 // ---------------------------------------------------------------------------------------
 

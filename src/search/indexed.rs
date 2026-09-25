@@ -167,7 +167,8 @@ fn is_missing_collection(text: &str) -> bool {
     matches!(
         serde_json::from_str::<Json>(text),
         Ok(Json::Object(obj))
-            if matches!(obj.get("error"), Some(Json::String(e)) if e.contains("not found"))
+            if matches!(obj.get("status"), Some(Json::String(s)) if s == "error")
+                && matches!(obj.get("error"), Some(Json::String(e)) if e.contains("not found"))
     )
 }
 
@@ -615,5 +616,13 @@ mod tests {
             "{\"status\":\"error\",\"error\":\"disk full\"}"
         ));
         assert!(!is_missing_collection("{\"results\":[]}"));
+        // The error string alone is not enough: a success payload that merely mentions the
+        // phrase, or a failure that is not the envelope, must not trigger the create fallback.
+        assert!(!is_missing_collection(
+            "{\"status\":\"ok\",\"error\":\"Collection 'c' not found\"}"
+        ));
+        assert!(!is_missing_collection(
+            "{\"error\":\"Collection 'c' not found\"}"
+        ));
     }
 }

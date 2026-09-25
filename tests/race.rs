@@ -59,6 +59,18 @@ fn task_path(f: &VaultFixture, id: &str) -> String {
         .unwrap_or_else(|| panic!("no file for {id}"))
 }
 
+fn new_note(f: &VaultFixture, title: &str) -> String {
+    ok(f, &["--quiet", "note", "new", title, "--body", "b"])
+}
+
+/// The path of one note under the default layout: notes stay at `notes/{id}.md` and no
+/// note verb moves them, so this is stable for the whole race.
+fn note_path(f: &VaultFixture, id: &str) -> String {
+    let rel = format!("notes/{id}.md");
+    assert!(f.vault.join(&rel).is_file(), "no file for {id}");
+    rel
+}
+
 /// Spawn every argv at once, then collect the exit codes in spawn order.
 fn race(f: &VaultFixture, argvs: &[Vec<String>]) -> Vec<i32> {
     let children: Vec<_> = argvs
@@ -172,6 +184,118 @@ fn concurrent_claims_across_distinct_tasks_all_succeed() {
     for id in &ids {
         assert!(f.read(&task_path(&f, id)).contains("claimed_by: alice"));
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// note claim races
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn eight_concurrent_note_claims_yield_exactly_one_winner() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Contended note");
+    let argvs: Vec<Vec<String>> = (0..8)
+        .map(|n| {
+            vec![
+                "--owner".to_string(),
+                format!("agent-{n}"),
+                "note".to_string(),
+                "claim".to_string(),
+                id.clone(),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert_eq!(codes.len(), 8);
+    assert_eq!(
+        codes.iter().filter(|c| **c == 0).count(),
+        1,
+        "codes = {codes:?}"
+    );
+    assert_eq!(
+        codes.iter().filter(|c| **c == 4).count(),
+        7,
+        "codes = {codes:?}"
+    );
+    // Exactly one holder is recorded, the durable owner is untouched, and the note gained
+    // no lifecycle field.
+    let text = f.read(&note_path(&f, &id));
+    assert_eq!(text.matches("claimed_by: agent-").count(), 1, "{text}");
+    assert!(text.contains("owner: test-agent"), "{text}");
+    assert!(
+        !text.contains("status:"),
+        "a note never gains a status: {text}"
+    );
+}
+
+#[test]
+fn eight_concurrent_same_agent_note_claims_are_all_idempotent() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Reclaimed note");
+    let argvs: Vec<Vec<String>> = (0..8)
+        .map(|_| {
+            vec![
+                "--owner".to_string(),
+                "solo".to_string(),
+                "note".to_string(),
+                "claim".to_string(),
+                id.clone(),
+            ]
+        })
+        .collect();
+    let codes = race(&f, &argvs);
+    assert!(codes.iter().all(|c| *c == 0), "codes = {codes:?}");
+    let text = f.read(&note_path(&f, &id));
+    assert_eq!(text.matches("claimed_by: solo").count(), 1, "{text}");
+    assert!(text.contains("owner: test-agent"), "{text}");
+}
+
+#[test]
+fn concurrent_note_claim_and_release_never_tear_the_file() {
+    // Four claimants race four releasers on one note. Every writer either wins cleanly or
+    // loses with the claim-conflict envelope, and the file never tears: it ends with one
+    // `claimed_by` line whose value is either `null` or exactly one of the claimants.
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Claim and release");
+    let mut argvs: Vec<Vec<String>> = Vec::new();
+    for n in 0..4 {
+        argvs.push(vec![
+            "--owner".to_string(),
+            format!("claimer-{n}"),
+            "note".to_string(),
+            "claim".to_string(),
+            id.clone(),
+        ]);
+        argvs.push(vec![
+            "--owner".to_string(),
+            format!("releaser-{n}"),
+            "note".to_string(),
+            "release".to_string(),
+            id.clone(),
+        ]);
+    }
+    let codes = race(&f, &argvs);
+    for code in &codes {
+        assert!(*code == 0 || *code == 4, "codes = {codes:?}");
+    }
+    let text = f.read(&note_path(&f, &id));
+    assert_eq!(text.matches("claimed_by:").count(), 1, "torn file:\n{text}");
+    let holder = text
+        .lines()
+        .find_map(|l| l.strip_prefix("claimed_by:"))
+        .map(str::trim);
+    match holder {
+        Some("null") => {}
+        Some(who) => assert!(
+            who.starts_with("claimer-"),
+            "only a claimant may hold the note, got {who:?} in:\n{text}"
+        ),
+        None => panic!("the note lost its claimed_by line:\n{text}"),
+    }
+    // The note is still well-formed and addressable by id.
+    let payload: serde_json::Value =
+        serde_json::from_str(&ok(&f, &["note", "get", &id, "--json"])).expect("json");
+    assert_eq!(payload["id"], serde_json::json!(id));
 }
 
 // ---------------------------------------------------------------------------------------
