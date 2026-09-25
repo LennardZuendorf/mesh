@@ -52,6 +52,15 @@ fn is_mesh_stem(path: &Path) -> bool {
     stem(path).is_some_and(|s| s.starts_with(NOTE_ID_PREFIX))
 }
 
+/// The mesh id a file's frontmatter carries, if any — the one mesh-native test for notes.
+fn meta_id(path: &Path) -> Option<String> {
+    read_meta_only(path)
+        .as_ref()
+        .and_then(|m| meta_str(m, "id"))
+        .filter(|id| id.starts_with(NOTE_ID_PREFIX))
+        .map(str::to_string)
+}
+
 /// Every Markdown file in the notes space, sorted, dot components and exclusions skipped.
 fn all_paths(cfg: &Config) -> Vec<PathBuf> {
     let Ok(root) = cfg.root(Space::Notes) else {
@@ -60,19 +69,25 @@ fn all_paths(cfg: &Config) -> Vec<PathBuf> {
     iter_md(root, true, cfg.spaces.exclusions_for(Space::Notes)).collect()
 }
 
-/// The files a mesh verb may address. Membership is by filename stem, not by content, so a
-/// note with unparseable frontmatter still resolves — and is then reported not-found.
+/// The files a mesh verb may address: the frontmatter carries a mesh id, or the stem is one
+/// mesh would mint. Stem membership is kept for the repair path — a `n-`-stemmed file with
+/// unparseable frontmatter still resolves, and is then reported not-found, because delete
+/// is the only way out of a corrupt file.
 fn mesh_paths(cfg: &Config) -> Vec<PathBuf> {
-    let mut out = all_paths(cfg);
-    out.retain(|p| is_mesh_stem(p));
-    out
+    all_paths(cfg)
+        .into_iter()
+        .filter(|p| is_mesh_stem(p) || meta_id(p).is_some())
+        .collect()
 }
 
-/// Non-mesh Markdown in the notes space: invisible to every mutating verb.
+/// Foreign Markdown in the notes space: no mesh id in the frontmatter and a stem mesh would
+/// never mint. Classification is by id, so an adopted file keeps its foreign stem and still
+/// leaves this set — and an `n-`-stemmed file with no id key lands here, honestly.
 fn foreign_paths(cfg: &Config) -> Vec<PathBuf> {
-    let mut out = all_paths(cfg);
-    out.retain(|p| !is_mesh_stem(p));
-    out
+    all_paths(cfg)
+        .into_iter()
+        .filter(|p| !is_mesh_stem(p) && meta_id(p).is_none())
+        .collect()
 }
 
 /// Up to five nearest ids, by edit distance over both the id and the title slug.
@@ -81,7 +96,7 @@ fn candidates(paths: &[PathBuf], target: &str) -> Vec<String> {
     let lower = target.to_lowercase();
     let mut scored: Vec<(usize, String)> = Vec::new();
     for path in paths {
-        let Some(id) = stem(path) else {
+        let Some(id) = meta_id(path).or_else(|| stem(path).map(str::to_string)) else {
             continue;
         };
         let mut best = edit_distance(&lower, &id.to_lowercase());
@@ -91,7 +106,7 @@ fn candidates(paths: &[PathBuf], target: &str) -> Vec<String> {
         {
             best = best.min(edit_distance(&want, &slugify(&title)));
         }
-        scored.push((best, id.to_string()));
+        scored.push((best, id));
     }
     scored.sort();
     scored
@@ -103,15 +118,20 @@ fn candidates(paths: &[PathBuf], target: &str) -> Vec<String> {
 
 /// Resolve an `n-` id or a title slug to the note's path.
 ///
-/// An exact stem match wins; otherwise the slugified title is compared against every mesh
-/// note. Several matches are an ambiguous slug (exit 2, ids sorted); none is not-found
-/// (exit 3) carrying the near-miss candidates.
+/// An exact stem match wins (the corrupt-frontmatter repair path); then the frontmatter id
+/// — an adopted file keeps its foreign stem, so the id lives in the file, not the name;
+/// then the slugified title against every addressable note. Several title matches are an
+/// ambiguous slug (exit 2, ids sorted); none is not-found (exit 3) carrying the near-miss
+/// candidates.
 pub fn resolve(cfg: &Config, target: &str) -> Result<PathBuf> {
     // A disabled space is a validation error on every verb, not an empty corpus: `all_paths`
     // degrades to `[]` so the cross-space scans keep working, so the check belongs here.
     cfg.root(Space::Notes)?;
     let paths = mesh_paths(cfg);
     if let Some(hit) = paths.iter().find(|p| stem(p) == Some(target)) {
+        return safe_resolve(&cfg.spaces, hit);
+    }
+    if let Some(hit) = paths.iter().find(|p| meta_id(p).as_deref() == Some(target)) {
         return safe_resolve(&cfg.spaces, hit);
     }
     let want = slugify(target);
@@ -133,8 +153,7 @@ pub fn resolve(cfg: &Config, target: &str) -> Result<PathBuf> {
         _ => {
             let mut ids: Vec<String> = hits
                 .iter()
-                .filter_map(|p| stem(p))
-                .map(str::to_string)
+                .filter_map(|p| meta_id(p).or_else(|| stem(p).map(str::to_string)))
                 .collect();
             ids.sort();
             Err(MeshError::AmbiguousSlug {
@@ -149,11 +168,13 @@ fn note_not_found(target: &str) -> MeshError {
     MeshError::NoteNotFound(target.to_string())
 }
 
-/// Resolve to the note id, which is what names the lock.
+/// Resolve to the note id, which is what names the lock. The id is the frontmatter's, so
+/// an adopted file locks under its mesh id while keeping its foreign stem; a corrupt
+/// `n-`-stemmed file falls back to the stem, which is the only name it has left.
 fn resolve_id(cfg: &Config, target: &str) -> Result<String> {
     let path = resolve(cfg, target)?;
-    stem(&path)
-        .map(str::to_string)
+    meta_id(&path)
+        .or_else(|| stem(&path).map(str::to_string))
         .ok_or_else(|| note_not_found(target))
 }
 
@@ -201,11 +222,20 @@ pub fn create(cfg: &Config, title: &str, o: NewNote) -> Result<Note> {
 
     let _guard = hold(&create_lock(&root))?;
     let now = now_utc();
-    let taken: Vec<String> = mesh_paths(cfg)
-        .iter()
-        .filter_map(|p| stem(p))
-        .map(str::to_string)
-        .collect();
+    // Both namespaces a minted id must not collide with: the frontmatter ids (adopted files
+    // carry theirs in a foreign-stemmed name) and the `n-` stems (create names files by
+    // id, so a stem collision would be a filename collision).
+    let mut taken: Vec<String> = Vec::new();
+    for path in mesh_paths(cfg) {
+        if let Some(id) = meta_id(&path) {
+            taken.push(id);
+        }
+        if is_mesh_stem(&path) {
+            if let Some(s) = stem(&path) {
+                taken.push(s.to_string());
+            }
+        }
+    }
     let id = generate_id(NOTE_ID_PREFIX, &iso_z(&now), title, &|candidate| {
         taken.iter().any(|t| t == candidate)
     });
@@ -876,6 +906,72 @@ mod tests {
             root.join("projects")
         );
         assert!(note_folder(&v.cfg, "memo").is_err());
+    }
+
+    #[test]
+    fn an_id_bearing_file_with_a_foreign_stem_and_type_lists_and_resolves() {
+        let v = vault();
+        write(
+            &v.cfg,
+            "notes/team-sol.md",
+            "---\nid: n-SOL1\ntype: Team\ntitle: Team Sol\nbelongs_to: []\nschema: 3\n\
+             created: 2026-01-02T00:00:00Z\nupdated: 2026-01-03T00:00:00Z\n---\n\n# Team Sol\n",
+        );
+        let listed = list(&v.cfg, &Filter::unbounded(), false).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].item.id, "n-SOL1");
+        assert_eq!(listed[0].item.note_type, "Team");
+        assert_eq!(resolve_id(&v.cfg, "n-SOL1").unwrap(), "n-SOL1");
+        assert_eq!(resolve_id(&v.cfg, "Team Sol").unwrap(), "n-SOL1");
+        let got = get(&v.cfg, "n-SOL1").unwrap();
+        assert_eq!(got.item.title, "Team Sol");
+        assert_eq!(got.path, v.cfg.vault().join("notes/team-sol.md"));
+        assert!(
+            got.item.meta.contains_key("schema") && got.item.meta.contains_key("belongs_to"),
+            "unknown keys ride along untouched"
+        );
+    }
+
+    #[test]
+    fn classification_is_by_frontmatter_id_not_by_stem() {
+        let v = vault();
+        // The discriminating case: under stem classification both files are foreign (2);
+        // under id classification the id-bearing file has left the foreign set (1).
+        write(&v.cfg, "notes/loose.md", "# Loose\n");
+        write(
+            &v.cfg,
+            "notes/team-sol.md",
+            "---\nid: n-SOL1\ntype: Team\ntitle: Team Sol\n\
+             created: 2026-01-02T00:00:00Z\nupdated: 2026-01-03T00:00:00Z\n---\n\nx\n",
+        );
+        assert_eq!(foreign_count(&v.cfg), 1, "only the id-less file is foreign");
+    }
+
+    #[test]
+    fn delete_removes_an_adopted_shaped_file_by_meta_id() {
+        let v = vault();
+        write(
+            &v.cfg,
+            "notes/team-sol.md",
+            "---\nid: n-SOL1\ntype: Team\ntitle: Team Sol\n\
+             created: 2026-01-02T00:00:00Z\nupdated: 2026-01-03T00:00:00Z\n---\n\nx\n",
+        );
+        assert_eq!(delete(&v.cfg, "n-SOL1").unwrap(), "n-SOL1");
+        assert!(!v.cfg.vault().join("notes/team-sol.md").exists());
+    }
+
+    #[test]
+    fn a_miss_carries_candidates_from_foreign_stems() {
+        let v = vault();
+        write(
+            &v.cfg,
+            "notes/team-sol.md",
+            "---\nid: n-SOL1\ntype: Team\ntitle: Team Sol\n\
+             created: 2026-01-02T00:00:00Z\nupdated: 2026-01-03T00:00:00Z\n---\n\nx\n",
+        );
+        let err = resolve(&v.cfg, "n-SOLX").unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert_eq!(err.candidates(), ["n-SOL1"]);
     }
 
     #[test]

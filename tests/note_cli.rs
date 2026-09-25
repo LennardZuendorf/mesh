@@ -1471,3 +1471,86 @@ fn the_corpus_lock_directory_is_never_listed_as_a_note() {
     // Eight mesh notes plus the one foreign file; n-BAD is skipped.
     assert_eq!(text.lines().count(), 9, "{text}");
 }
+
+// ---------------------------------------------------------------------------------------
+// adopted-shaped files (note-adoption/1): mesh-native is the frontmatter id, not the stem
+// ---------------------------------------------------------------------------------------
+
+const ADOPTED: &str = "---\nid: n-SOL1\ntype: Team\ntitle: Team Sol\nbelongs_to: []\nschema: 3\n\
+                       created: 2026-01-02T00:00:00Z\nupdated: 2026-01-03T00:00:00Z\n\
+                       ---\n\n# Team Sol\n";
+
+#[test]
+fn an_adopted_shaped_file_lists_and_resolves_by_id() {
+    let f = VaultFixture::new();
+    f.write("notes/team-sol.md", ADOPTED);
+    f.write("notes/loose.md", "# Loose\n");
+
+    let out = f
+        .cmd()
+        .args(["note", "list", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let rows = json_of(&out);
+    let rows = rows.as_array().expect("list is an array");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], Json::String("n-SOL1".into()));
+    assert_eq!(rows[0]["type"], Json::String("Team".into()));
+
+    // The foreign type filters by raw equality, and the id resolves from the frontmatter.
+    let out = f
+        .cmd()
+        .args(["note", "list", "--type", "Team", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(json_of(&out).as_array().expect("array").len(), 1);
+    let out = f
+        .cmd()
+        .args(["note", "get", "n-SOL1", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["id"], Json::String("n-SOL1".into()));
+    assert_eq!(payload["title"], Json::String("Team Sol".into()));
+    assert_eq!(payload["type"], Json::String("Team".into()));
+
+    // The slug still resolves by title over the foreign stem.
+    f.cmd()
+        .args(["note", "get", "team sol", "--quiet"])
+        .assert()
+        .success()
+        .stdout("n-SOL1\n");
+
+    // And the loose file stays invisible, as before.
+    let out = f
+        .cmd()
+        .args(["note", "get", "loose"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+}
+
+#[test]
+fn status_counts_id_bearing_files_as_mesh_native() {
+    let f = VaultFixture::new();
+    f.write("notes/team-sol.md", ADOPTED);
+    f.write("notes/loose.md", "# Loose\n");
+    let out = f.cmd().args(["--json", "status"]).output().expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["notes"], Json::from(1));
+    assert_eq!(payload["notes_foreign"], Json::from(1));
+}
+
+#[test]
+fn an_adopted_shaped_file_is_deletable_by_id() {
+    let f = VaultFixture::new();
+    f.write("notes/team-sol.md", ADOPTED);
+    f.cmd()
+        .args(["note", "delete", "n-SOL1", "--force", "--quiet"])
+        .assert()
+        .success();
+    assert!(!f.files().contains(&"notes/team-sol.md".to_string()));
+}

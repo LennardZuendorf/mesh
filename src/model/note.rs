@@ -51,10 +51,12 @@ fn optional_string(meta: &Meta, key: &str) -> Option<Option<String>> {
 impl FromMeta for Note {
     /// Validate frontmatter as a note.
     ///
-    /// `id` must be a string carrying the `n-` prefix, `title` a string, `created` and
-    /// `updated` parseable timestamps, and `type` one of [`NOTE_TYPES`] (absent means
-    /// `note`). Anything else is not a note: a listing skips the row silently and a read or
-    /// amend verb reports it as not found.
+    /// `id` must be a string carrying the `n-` prefix, `title` a string, and `created` and
+    /// `updated` parseable timestamps. `type` may be **any** scalar — an adopted file keeps
+    /// the type its vault gave it, and read surfaces treat the value as an opaque label
+    /// (absent means `note`). Write-side verbs still only mint [`NOTE_TYPES`]. Anything
+    /// else is not a note: a listing skips the row silently and a read or amend verb
+    /// reports it as not found.
     fn from_meta(meta: &Meta) -> Option<Note> {
         let id = meta.get("id")?.as_str()?.to_string();
         if !id.starts_with(NOTE_ID_PREFIX) {
@@ -64,9 +66,6 @@ impl FromMeta for Note {
             None | Some(Value::Null) => "note".to_string(),
             Some(value) => value.as_str()?.to_string(),
         };
-        if !NOTE_TYPES.contains(&note_type.as_str()) {
-            return None;
-        }
         Some(Note {
             id,
             note_type,
@@ -165,12 +164,33 @@ mod tests {
             "id: n-1\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
             "id: n-1\ntitle: T\nupdated: 2026-01-02\n",
             "id: n-1\ntitle: T\ncreated: 2026-01-02\n",
-            "id: n-1\ntitle: T\ntype: memo\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
             "id: n-1\ntitle: T\ncreated: nonsense\nupdated: 2026-01-02\n",
             "id: n-1\ntitle: 7\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
         ] {
             assert!(Note::from_meta(&meta(yaml)).is_none(), "{yaml}");
         }
+    }
+
+    #[test]
+    fn a_foreign_type_value_validates_on_read() {
+        // Mesh-native is the id, not the vocabulary: an adopted file keeps whatever type it
+        // had, and read surfaces treat the value as an opaque label.
+        for yaml in [
+            "id: n-1\ntitle: T\ntype: Project\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
+            "id: n-1\ntitle: T\ntype: Team\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
+            "id: n-1\ntitle: T\ntype: memo\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
+        ] {
+            let note = Note::from_meta(&meta(yaml)).expect(yaml);
+            assert!(matches!(
+                note.note_type.as_str(),
+                "Project" | "Team" | "memo"
+            ));
+        }
+        let note = Note::from_meta(&meta(
+            "id: n-1\ntitle: T\ntype: Team\ncreated: 2026-01-02\nupdated: 2026-01-02\n",
+        ))
+        .unwrap();
+        assert_eq!(note.note_type, "Team");
     }
 
     #[test]
