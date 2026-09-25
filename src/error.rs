@@ -54,8 +54,11 @@ pub enum MeshError {
     Empty(String),
     #[error("ambiguous slug '{slug}'{}", slug_detail(ids))]
     AmbiguousSlug { slug: String, ids: Vec<String> },
-    #[error("task {task_id} already claimed by {existing_owner}")]
+    /// A claim held by a different identity. The `noun` names the entity's space in the
+    /// human message (`note`/`task`) while the structured envelope keys stay byte-identical.
+    #[error("{noun} {task_id} already claimed by {existing_owner}")]
     ClaimConflict {
+        noun: &'static str,
         task_id: String,
         existing_owner: String,
     },
@@ -216,6 +219,7 @@ impl MeshError {
         match self.inner() {
             MeshError::TaskNotFound(id) => out.push(("task_id", id.as_str().into())),
             MeshError::ClaimConflict {
+                noun: _,
                 task_id,
                 existing_owner,
             } => {
@@ -285,6 +289,7 @@ mod tests {
         );
         assert_eq!(
             MeshError::ClaimConflict {
+                noun: "task",
                 task_id: "t-1".into(),
                 existing_owner: "bob".into()
             }
@@ -353,6 +358,7 @@ mod tests {
         assert_eq!(MeshError::Lock("lock is held: /x".into()).code(), 4);
         assert_eq!(
             MeshError::ClaimConflict {
+                noun: "task",
                 task_id: "t".into(),
                 existing_owner: "o".into()
             }

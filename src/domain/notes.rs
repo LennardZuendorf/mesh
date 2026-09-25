@@ -667,6 +667,7 @@ pub fn claim(cfg: &Config, target: &str, claimer: &str) -> Result<Note> {
         }
         // Someone else holds it.
         Some(who) => Err(MeshError::ClaimConflict {
+            noun: "note",
             task_id: note_id,
             existing_owner: who,
         }),
@@ -704,6 +705,7 @@ pub fn release(cfg: &Config, target: &str, releaser: &str, force: bool) -> Resul
     // `force` is a cooperation override and an audit affordance, never an auth check.
     if holder != releaser && !force {
         return Err(MeshError::ClaimConflict {
+            noun: "note",
             task_id: note_id,
             existing_owner: holder,
         });
@@ -1519,7 +1521,7 @@ mod tests {
         assert_eq!(err.code(), 4);
         assert_eq!(
             err.to_string(),
-            format!("task {} already claimed by alice", note.id)
+            format!("note {} already claimed by alice", note.id)
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }

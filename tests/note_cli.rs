@@ -1912,8 +1912,8 @@ fn a_foreign_claim_is_exit_four_and_writes_nothing() {
     assert_eq!(code_of(&out), Some(4));
     assert_eq!(
         stderr_of(&out).trim(),
-        format!("task {id} already claimed by alice"),
-        "the note conflict reuses the task claim envelope"
+        format!("note {id} already claimed by alice"),
+        "the note conflict names its own entity, the task claim envelope's keys"
     );
     assert_eq!(f.read(&rel), before, "a conflict writes nothing");
 }
