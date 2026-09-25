@@ -174,17 +174,21 @@ idempotent annotations; adopt over MCP on a fixture vault; SKILL bundle invarian
 
 ### note-adoption/7 — Race and regression hardening
 
-**Goal:** Multi-process claim races and byte-for-byte no-op pins in the suites that guard them.
+**Goal:** Multi-process claim races and byte-for-byte no-op pins in the suites that guard them,
+and a conflict message that names its own entity.
 
 **Requirements:** R1, R6, R7
 
 **Dependencies:** note-adoption/4
 
-**Files:** `tests/race.rs`, `tests/review_regressions.rs`
+**Files:** `tests/race.rs`, `tests/review_regressions.rs`, `src/error.rs` (the ClaimConflict
+display noun — envelope fields byte-identical), `src/domain/tasks.rs` + `src/domain/notes.rs`
+(the call sites passing the noun)
 
 **Test scenarios:** 8-way real-process note claim race → exactly one winner (mirrors the task
 race); concurrent claim/release CAS safety; no-op adopt/claim/release never rewrite
-(byte-for-byte)
+(byte-for-byte); the note conflict message says `note`, the task one says `task`, and neither
+envelope changes shape
 
 **Verification:** `cargo test --test race --test review_regressions`; break the fix and watch
 the race go red, then restore (lesson: a green race test proves nothing until seen red).

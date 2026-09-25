@@ -77,10 +77,14 @@ pub fn release(cfg: &Cfg, id: &str, releaser: &str, force: bool) -> Result<Note>
 id))` → **re-resolve inside the lock** → four-branch test-and-set on `claimed_by` only. Conflict
 = `MeshError::ClaimConflict` (exit 4) with the **same envelope shape as a task claim conflict**
 (`kind: claim_conflict` — deliberately no `retry_after_ms`; task claim conflicts don't carry one
-either). Same-identity re-claim: no-op reporting the found state. `release` mirrors
-`tasks::release`: idempotent, `--force` to override another holder, `claimed_by` emitted as
-`null` when cleared, never a rewrite on a no-op. Identity validated through the existing
-`validate_owner` / `[tasks].collections` boundary — notes already route through it.
+either). The shared variant's **human message names its own entity** — the envelope's structured
+fields stay byte-identical (the `task_id` key included), while the Display message reads
+`note n-…`/`task t-…` per the space. Same-identity re-claim: no-op reporting the found state.
+`release` mirrors `tasks::release`: idempotent, `--force` to override another holder,
+`claimed_by` emitted as `null` when cleared, never a rewrite on a no-op. The claimer identity is
+the CLI `identity(ctx)` (`--owner` else `[core].agent`), exactly as tasks resolve theirs;
+`validate_owner` / `[tasks].collections` gate the owner-writing verbs (`new`, `adopt`,
+`update`), never the claimer.
 
 ### Read-model widening (the load-bearing change)
 

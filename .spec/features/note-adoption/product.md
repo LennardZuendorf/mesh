@@ -134,7 +134,8 @@ The system SHALL record the agent whose area a note belongs to in `owner`. Adopt
 
 The system SHALL provide `note claim` as an atomic test-and-set on `claimed_by`, holding the
 entity's lock and re-resolving the target inside it. A claim by a second identity MUST exit 4
-with the conflict envelope (`retry_after_ms`); a re-claim by the same identity MUST be a no-op
+with the claim-conflict envelope — the same shape as a task claim conflict, carrying no
+`retry_after_ms`; a re-claim by the same identity MUST be a no-op
 that reports the state it found and never rewrites. A claim MUST NOT touch `owner` and MUST NOT
 add a status field — a claimed note is still just a note.
 
