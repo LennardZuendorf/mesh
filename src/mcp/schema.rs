@@ -1,4 +1,4 @@
-//! The tool table: 37 tools, their descriptions, their JSON Schemas and their annotations.
+//! The tool table: 40 tools, their descriptions, their JSON Schemas and their annotations.
 //!
 //! One `ToolDef` per registered tool, in `TOOL_NAMES` order. Every parameter carries a
 //! non-empty description; every enum is generated from the domain's own vocabulary constants
@@ -220,11 +220,11 @@ const D_SECTION_SHORT: &str =
 const D_OWNER_WRITE_SHORT: &str = "Defaults to the configured agent; an explicit value must be in [tasks].collections when that roster is set.";
 
 // ---------------------------------------------------------------------------------------
-// The 37 tools, in registration order.
+// The 40 tools, in registration order.
 // ---------------------------------------------------------------------------------------
 
 /// The registered tool table, in `TOOL_NAMES` order.
-pub const TOOLS: [ToolDef; 37] = [
+pub const TOOLS: [ToolDef; 40] = [
     ToolDef {
         name: "mesh_note_get",
         description: "Read one note by id or title slug: frontmatter, body, and path.",
@@ -413,6 +413,34 @@ pub const TOOLS: [ToolDef; 37] = [
             p("target", Kind::Str, "Note id (n-...) or title slug."),
             p("tags", Kind::OptStr, TAG_SPEC_SEMANTICS),
             p("new_type", Kind::OptEnum(NOTE_TYPE_VALUES), "Moves the file into the matching folder; omit to leave the type unchanged."),
+        ],
+    },
+    ToolDef {
+        name: "mesh_note_adopt",
+        description: "Adopt existing Markdown files in place: mint a mesh id into each, adding only absent keys.",
+        ann: Ann::Idempotent,
+        params: &[
+            p("paths", Kind::ReqList, "Markdown file paths inside a notes space; each is adopted as its own atomic transaction."),
+            p("owner", Kind::OptStr, "Area the note belongs to; inserted only when the key is absent. An explicit value must be in [tasks].collections when that roster is set."),
+        ],
+    },
+    ToolDef {
+        name: "mesh_note_claim",
+        description: "Claim a note for an agent (atomic test-and-set on claimed_by; same-agent reclaim is a no-op).",
+        ann: Ann::Write,
+        params: &[
+            p("target", Kind::Str, "Note id (n-...) or title slug to claim."),
+            p("claimer", Kind::OptStr, "Acting agent identity; defaults to [core].agent. A same-agent reclaim is a no-op; a different agent already holding it raises a conflict."),
+        ],
+    },
+    ToolDef {
+        name: "mesh_note_release",
+        description: "Release a note claim, clearing claimed_by (idempotent; force breaks another holder).",
+        ann: Ann::Idempotent,
+        params: &[
+            p("target", Kind::Str, "Note id (n-...) or title slug to release."),
+            p("owner", Kind::OptStr, "Acting agent identity; defaults to [core].agent. Releasing an unclaimed note is an idempotent no-op."),
+            p("force", Kind::Bool, "Break another agent's live claim. Omit to release only your own."),
         ],
     },
     ToolDef {
@@ -814,8 +842,10 @@ mod tests {
     #[test]
     fn the_serialised_tool_list_fits_the_budget() {
         let text = serde_json::to_string(&tools_list()).unwrap();
+        // Raised 32 -> 40 KiB by note-adoption/6 (three tools) — the 32 KiB table had
+        // ~125 bytes of headroom left, so the growth could not be absorbed by wording.
         assert!(
-            text.len() <= 32 * 1024,
+            text.len() <= 40 * 1024,
             "tools/list is {} bytes",
             text.len()
         );

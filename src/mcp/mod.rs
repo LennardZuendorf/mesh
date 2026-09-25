@@ -1,6 +1,6 @@
 //! The stdio MCP server: JSON-RPC 2.0 over newline-delimited stdin/stdout.
 //!
-//! Thirty-seven tools over the same domain seams the CLI calls, an instructions block built
+//! Forty tools over the same domain seams the CLI calls, an instructions block built
 //! once from the config, and a hand-rolled protocol loop — no MCP crate, no async runtime, and
 //! nothing that can make a tool failure kill the process.
 
@@ -19,8 +19,8 @@ use crate::error::MeshError;
 /// The server name every client sees.
 pub const SERVER_NAME: &str = "mesh";
 
-/// The 37 registered tools, in registration order (final.md §10).
-pub const TOOL_NAMES: [&str; 37] = [
+/// The 40 registered tools, in registration order (final.md §10).
+pub const TOOL_NAMES: [&str; 40] = [
     "mesh_note_get",
     "mesh_note_list",
     "mesh_task_get",
@@ -37,6 +37,9 @@ pub const TOOL_NAMES: [&str; 37] = [
     "mesh_task_new",
     "mesh_task_append",
     "mesh_note_update",
+    "mesh_note_adopt",
+    "mesh_note_claim",
+    "mesh_note_release",
     "mesh_task_claim",
     "mesh_task_release",
     "mesh_task_finish",
@@ -205,11 +208,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_tool_table_is_thirty_seven_unique_names() {
+    fn the_tool_table_is_forty_unique_names() {
         let mut sorted = TOOL_NAMES.to_vec();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), 37);
+        assert_eq!(sorted.len(), 40);
         assert_eq!(TOOL_NAMES.first(), Some(&"mesh_note_get"));
         assert_eq!(TOOL_NAMES.last(), Some(&"mesh_task_next"));
     }

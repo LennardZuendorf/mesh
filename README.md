@@ -564,12 +564,12 @@ roster, the vault path, the current search mode and which-space-wins guidance â€
 oriented before making any tool call, with no separate skill required. A config that fails to
 load is never fatal: tools then fail per call with a structured `config_missing` error.
 
-**37 tools**, each carrying explicit `readOnlyHint` / `idempotentHint` / `destructiveHint`
+**40 tools**, each carrying explicit `readOnlyHint` / `idempotentHint` / `destructiveHint`
 annotations (RO = read-only, IDEM = idempotent):
 
 | Family | Tools |
 |---|---|
-| notes | `mesh_note_get` (RO), `mesh_note_list` (RO), `mesh_note_new`, `mesh_note_append`, `mesh_note_update` (IDEM) |
+| notes | `mesh_note_get` (RO), `mesh_note_list` (RO), `mesh_note_new`, `mesh_note_append`, `mesh_note_update` (IDEM), `mesh_note_adopt` (IDEM), `mesh_note_claim`, `mesh_note_release` (IDEM) |
 | tasks | `mesh_task_get` (RO), `mesh_task_list` (RO), `mesh_task_new`, `mesh_task_append`, `mesh_task_claim` (IDEM), `mesh_task_release` (IDEM), `mesh_task_finish` (IDEM), `mesh_task_update` (IDEM), **`mesh_task_cancel` (DESTRUCTIVE)**, `mesh_task_block` (IDEM), `mesh_task_unblock` (IDEM), `mesh_task_next` |
 | memories | `mesh_memory_new`, `mesh_memory_append`, `mesh_memory_update` (IDEM), `mesh_memory_get` (RO), `mesh_memory_list` (RO), `mesh_memory_recall` (RO) |
 | scratch | `mesh_scratch_set` (IDEM), `mesh_scratch_append`, `mesh_scratch_get` (RO), `mesh_scratch_list` (RO) |
@@ -618,7 +618,7 @@ not a config.
 upload (`name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`), so the
 same file works as this plugin's local skill and as an account-enabled skill for Cowork sessions,
 which never read a local `.claude/skills/` directory â€” those sessions get their orientation from
-the MCP `instructions` block instead. `allowed-tools` lists the 36 non-destructive tools;
+the MCP `instructions` block instead. `allowed-tools` lists the 39 non-destructive tools;
 `mesh_task_cancel` is deliberately left out so it always asks first.
 
 ---

@@ -304,7 +304,7 @@ fn the_shim_binary_speaks_the_same_protocol() {
     let f = VaultFixture::new();
     let out = shim_session(&f, &[initialize(), request(2, "tools/list", json!({}))]);
     assert_eq!(out[0]["result"]["serverInfo"]["name"], json!("mesh"));
-    assert_eq!(out[1]["result"]["tools"].as_array().map(Vec::len), Some(37));
+    assert_eq!(out[1]["result"]["tools"].as_array().map(Vec::len), Some(40));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -312,11 +312,11 @@ fn the_shim_binary_speaks_the_same_protocol() {
 // ---------------------------------------------------------------------------------------
 
 #[test]
-fn the_tool_list_is_thirty_seven_names_in_registration_order() {
+fn the_tool_list_is_forty_names_in_registration_order() {
     let f = VaultFixture::new();
     let all = tools(&f);
     let names: Vec<&str> = all.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert_eq!(names.len(), 37);
+    assert_eq!(names.len(), 40);
     assert_eq!(
         names,
         vec![
@@ -336,6 +336,9 @@ fn the_tool_list_is_thirty_seven_names_in_registration_order() {
             "mesh_task_new",
             "mesh_task_append",
             "mesh_note_update",
+            "mesh_note_adopt",
+            "mesh_note_claim",
+            "mesh_note_release",
             "mesh_task_claim",
             "mesh_task_release",
             "mesh_task_finish",
@@ -413,6 +416,34 @@ fn the_read_only_tools_are_the_eleven_legacy_reads_plus_the_new_ones() {
 }
 
 #[test]
+fn the_note_adoption_tools_carry_their_pinned_annotations() {
+    let f = VaultFixture::new();
+    let all = tools(&f);
+    let find = |name: &str| {
+        all.iter()
+            .find(|t| t["name"] == json!(name))
+            .cloned()
+            .unwrap_or_default()
+    };
+    // Adopt is a write that is safe to re-run.
+    let adopt = find("mesh_note_adopt");
+    assert_eq!(adopt["annotations"]["idempotentHint"], json!(true));
+    assert_eq!(adopt["annotations"]["readOnlyHint"], json!(false));
+    assert_eq!(adopt["annotations"]["destructiveHint"], json!(false));
+    // Claim is a plain write — same-agent reclaim is a no-op, but it is not advertised
+    // as idempotent because it carries no reuse-first contract.
+    let claim = find("mesh_note_claim");
+    assert_eq!(claim["annotations"]["idempotentHint"], json!(false));
+    assert_eq!(claim["annotations"]["readOnlyHint"], json!(false));
+    assert_eq!(claim["annotations"]["destructiveHint"], json!(false));
+    // Release is idempotent.
+    let release = find("mesh_note_release");
+    assert_eq!(release["annotations"]["idempotentHint"], json!(true));
+    assert_eq!(release["annotations"]["readOnlyHint"], json!(false));
+    assert_eq!(release["annotations"]["destructiveHint"], json!(false));
+}
+
+#[test]
 fn no_withheld_verb_is_reachable_by_name() {
     let f = VaultFixture::new();
     for tool in tools(&f) {
@@ -427,12 +458,13 @@ fn no_withheld_verb_is_reachable_by_name() {
 }
 
 #[test]
-fn the_serialised_tool_list_fits_thirty_two_kilobytes() {
+fn the_serialised_tool_list_fits_forty_kilobytes() {
     let f = VaultFixture::new();
     let out = session(&f, &[request(1, "tools/list", json!({}))]);
     let text = serde_json::to_string(&out[0]).expect("serialise the frame");
+    // Raised 32 -> 40 KiB by note-adoption/6 (three tools); see the schema-side test.
     assert!(
-        text.len() <= 32 * 1024,
+        text.len() <= 40 * 1024,
         "tools/list is {} bytes",
         text.len()
     );
@@ -668,6 +700,81 @@ fn a_mixed_tag_spec_is_refused_before_any_write() {
         .unwrap_or_default()
         .contains("ambiguous tag spec"));
     assert_eq!(f.read(&format!("notes/{id}.md")), before);
+}
+
+/// The frontmatter keys of a vault file, in file order.
+fn frontmatter_keys(f: &VaultFixture, rel: &str) -> Vec<String> {
+    let text = f.read(rel);
+    let rest = text
+        .strip_prefix("---\n")
+        .expect("a leading frontmatter fence");
+    let end = rest.find("\n---").expect("a closing fence");
+    rest[..end]
+        .lines()
+        .filter(|l| !l.starts_with(' ') && l.contains(':'))
+        .filter_map(|l| l.split(':').next())
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn note_adopt_over_mcp_mints_an_id_and_only_adds_absent_keys() {
+    let f = VaultFixture::new();
+    f.write(
+        "notes/foreign.md",
+        "---\ntype: Project\nstatus: captured\nbelongs_to: []\nschema: 3\n---\n\n# Team Sol\n\nBody text.\n",
+    );
+    let target = f.vault.join("notes/foreign.md");
+    let result = tool(
+        &f,
+        "mesh_note_adopt",
+        json!({"paths": [target.to_string_lossy()]}),
+    );
+    let rows = list(&result);
+    assert_eq!(rows.len(), 1);
+    // The row is `{id, path}`, id first, and the path is vault-relative.
+    let keys: Vec<&String> = rows[0]
+        .as_object()
+        .map(|m| m.keys().collect())
+        .unwrap_or_default();
+    assert_eq!(keys, ["id", "path"]);
+    assert_eq!(rows[0]["path"], json!("notes/foreign.md"));
+    let id = rows[0]["id"].as_str().expect("a minted id").to_string();
+    assert!(id.starts_with("n-"), "minted id was {id}");
+
+    let after = f.read("notes/foreign.md");
+    // Every foreign key and value survives, and the body is untouched.
+    assert!(after.contains("type: Project"));
+    assert!(after.contains("status: captured"));
+    assert!(after.contains("belongs_to"));
+    assert!(after.contains("schema: 3"));
+    assert!(after.contains("Body text."));
+    // Only the absent mesh keys were added: id, title (from the H1), created, updated.
+    let keys = frontmatter_keys(&f, "notes/foreign.md");
+    for injected in ["id", "title", "created", "updated"] {
+        assert!(keys.contains(&injected.to_string()), "missing {injected}");
+    }
+    assert_eq!(keys.len(), 8, "unexpected keys: {keys:?}");
+}
+
+#[test]
+fn note_claim_and_release_over_mcp_test_and_set_claimed_by() {
+    let f = VaultFixture::new();
+    let id = seed_note(&f, "Alpha", "a");
+    let payload = structured(&tool(&f, "mesh_note_claim", json!({"target": &id})));
+    assert_eq!(payload["claimed_by"], json!("test-agent"));
+
+    // A second identity loses the test-and-set with the task-shaped conflict envelope.
+    let env = envelope(&tool(
+        &f,
+        "mesh_note_claim",
+        json!({"target": &id, "claimer": "other-agent"}),
+    ));
+    assert_eq!(env["kind"], json!("claim_conflict"));
+    assert_eq!(env["existing_owner"], json!("test-agent"));
+
+    let payload = structured(&tool(&f, "mesh_note_release", json!({"target": &id})));
+    assert_eq!(payload["claimed_by"], Json::Null);
 }
 
 #[test]

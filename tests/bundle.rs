@@ -402,7 +402,7 @@ fn allowed_tools_is_every_non_destructive_tool_and_nothing_else() {
         "allowed-tools must be exactly the non-destructive tools"
     );
     assert_eq!(allowed.len(), mesh::mcp::TOOL_NAMES.len() - 1);
-    assert_eq!(allowed.len(), 36);
+    assert_eq!(allowed.len(), 39);
 }
 
 #[test]

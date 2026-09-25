@@ -1,11 +1,11 @@
-//! Tool dispatch: the 37 names, wired to the same domain seams the CLI calls.
+//! Tool dispatch: the 40 names, wired to the same domain seams the CLI calls.
 //!
 //! Every tool builds a `Ctx` (never a tty, always machine mode) around a freshly loaded
 //! config, so a config that appears after startup is picked up on the next call and a missing
 //! one is a per-call `config_missing` envelope rather than a dead server. Nothing here
 //! re-implements domain logic; the tools are adapters over `domain::*` and `search::*`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value as Json};
 
@@ -241,6 +241,9 @@ impl Server {
             "mesh_task_new" => self.task_new(&a),
             "mesh_task_append" => self.task_append(&a),
             "mesh_note_update" => self.note_update(&a),
+            "mesh_note_adopt" => self.note_adopt(&a),
+            "mesh_note_claim" => self.note_claim(&a),
+            "mesh_note_release" => self.note_release(&a),
             "mesh_task_claim" => self.task_claim(&a),
             "mesh_task_release" => self.task_release(&a),
             "mesh_task_finish" => self.terminate(&a, Terminal::Finish),
@@ -352,6 +355,51 @@ impl Server {
                 owner: None,
             },
         )?;
+        Ok(object(entry(&note.meta, NOTE_FIELDS.fields(), None, None)))
+    }
+
+    /// Adopt foreign Markdown files in place, one atomic transaction each. `owner` here is the
+    /// area to stamp into the file (never the acting identity), exactly as the CLI treats it.
+    fn note_adopt(&self, a: &Args) -> Result<Outcome> {
+        let ctx = self.ctx(None)?;
+        let cfg = ctx.cfg()?;
+        let owner = a.str("owner")?;
+        let targets: Vec<PathBuf> = a
+            .req_list("paths")?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let adopted = notes::adopt(cfg, &targets, owner.as_deref())?;
+        Ok(rows(
+            adopted
+                .iter()
+                .map(|one| {
+                    let mut row = Map::new();
+                    row.insert("id".to_string(), Json::String(one.id.clone()));
+                    row.insert("path".to_string(), Json::String(vault_rel(cfg, &one.path)));
+                    Json::Object(row)
+                })
+                .collect(),
+        ))
+    }
+
+    /// Claim a note atomically: a test-and-set on `claimed_by` alone.
+    fn note_claim(&self, a: &Args) -> Result<Outcome> {
+        let ctx = self.ctx(a.str("claimer")?)?;
+        let who = ctx.actor().map(str::to_string).ok_or_else(|| {
+            MeshError::Validation("no agent identity: pass claimer or set [core].agent".to_string())
+        })?;
+        let note = notes::claim(ctx.cfg()?, &a.req_str("target")?, &who)?;
+        Ok(object(entry(&note.meta, NOTE_FIELDS.fields(), None, None)))
+    }
+
+    /// Release a note claim; `force` breaks another holder's live claim.
+    fn note_release(&self, a: &Args) -> Result<Outcome> {
+        let ctx = self.ctx(a.str("owner")?)?;
+        let who = ctx.actor().map(str::to_string).ok_or_else(|| {
+            MeshError::Validation("no agent identity: pass owner or set [core].agent".to_string())
+        })?;
+        let note = notes::release(ctx.cfg()?, &a.req_str("target")?, &who, a.flag("force")?)?;
         Ok(object(entry(&note.meta, NOTE_FIELDS.fields(), None, None)))
     }
 
@@ -1098,6 +1146,14 @@ fn cutoff(a: &Args, key: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>> 
 
 fn strings(values: &[String]) -> Json {
     Json::Array(values.iter().map(|v| Json::String(v.clone())).collect())
+}
+
+/// A path rendered vault-relative when possible, absolute otherwise — the `note adopt`
+/// CLI's own address form, so both surfaces emit identical rows.
+fn vault_rel(cfg: &crate::config::Config, path: &Path) -> String {
+    path.strip_prefix(cfg.vault())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 fn duplicate_warning(existing: Option<&str>) -> Vec<String> {

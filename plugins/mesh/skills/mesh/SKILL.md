@@ -23,6 +23,9 @@ allowed-tools:
   - mcp__mesh__mesh_task_new
   - mcp__mesh__mesh_task_append
   - mcp__mesh__mesh_note_update
+  - mcp__mesh__mesh_note_adopt
+  - mcp__mesh__mesh_note_claim
+  - mcp__mesh__mesh_note_release
   - mcp__mesh__mesh_task_claim
   - mcp__mesh__mesh_task_release
   - mcp__mesh__mesh_task_finish
@@ -169,8 +172,10 @@ mentions and the memories that matter at the start of a session — when this pl
 
 CLI, one verb family per space:
 
-- `note {new,get,list,append,update,delete}` — types `note`, `log`, `decision`, `reference`,
-  `project`.
+- `note {new,get,list,append,update,adopt,claim,release,delete}` — types `note`, `log`,
+  `decision`, `reference`, `project`. `note adopt` mints an id into an existing Markdown file in
+  place; `note claim`/`note release` take and drop a working claim on it, with `--force` to break
+  another holder.
 - `task {new,get,list,append,update,claim,release,finish,cancel,delete,block,unblock,next}`.
   `task list` takes `--stale`/`--available`/`--ready`/`--blocked` alongside
   `--status`/`--owner`/`--mine`/`--tags`; `task claim` takes `--strict` (exit 5 rather than
@@ -195,9 +200,13 @@ folder routing fresh; mesh has no daemon, and every command works without a watc
 `+x,-y` is a delta — `-y` removes exactly the tags you name; `=x,y` replaces the whole list, so
 anything left out of the new list is discarded).
 
-MCP mirrors the safe subset as 37 typed `mesh_*` tools — this skill's `allowed-tools` list, plus
+MCP mirrors the safe subset as 40 typed `mesh_*` tools — this skill's `allowed-tools` list, plus
 `mesh_task_cancel`, which is destructive and left out of that pre-approved list on purpose so it
-always asks first. Every removal verb (`note delete`, `task delete`, `memory forget`,
+always asks first. The note verbs carry the same annotations as the task verbs: `mesh_note_adopt`
+(idempotent) brings an existing Markdown file into the vault by minting an id in place;
+`mesh_note_claim` (a write) and `mesh_note_release` (idempotent) take and drop a working claim on
+a long-lived note — the same claim-before-you-work discipline rule 5 asks of tasks. Every removal
+verb (`note delete`, `task delete`, `memory forget`,
 `scratch clear`, `asset remove`), asset ingest (`asset add`, which reads an arbitrary path on
 your filesystem), `asset gc` and every admin command (`init`, `status`, `reindex`, `watch`,
 `config`, `completions`) are CLI-only, withheld from MCP entirely — a hard `unlink` with no trash
