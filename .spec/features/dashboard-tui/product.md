@@ -24,7 +24,7 @@ and it is for the human operator: not exposed over MCP, no mutations from inside
 | | |
 |---|---|
 | **Owns** | The `dashboard` admin verb; its rendering, key handling and refresh loop; the dashboard-specific composition of existing read surfaces (status, task lists, activity, health) |
-| **Does not own** | Any mutation path (claims, writes, deletes — never, from inside the dashboard); the MCP surface (nothing added); the read surfaces it composes ([note-adoption](../note-adoption/product.md) and existing lenses feed it, they are not changed by it) |
+| **Does not own** | Any mutation path (claims, writes, deletes — never, from inside the dashboard); the MCP surface (nothing added); the read surfaces it composes (note-adoption and existing lenses feed it, they are not changed by it) |
 
 ---
 

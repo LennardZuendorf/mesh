@@ -54,7 +54,7 @@ src/
 ├── domain/                      # verbs + select/tags/owner/wikilinks/deps/activity/context/lenses
 ├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
 ├── cli/                         # one file per verb family + globals, out, admin, watch
-└── mcp/                         # stdio JSON-RPC server, schemas, 37-tool table, instructions
+└── mcp/                         # stdio JSON-RPC server, schemas, 40-tool table, instructions
 tests/                           # one per verb family + compat corpus, race, bundle, review regressions
 ```
 
@@ -160,8 +160,10 @@ families share — never per-verb copies:
 
 ### Note fields
 
-`id`, `type` (note|log|decision|reference|project), `title`, `tags`, `owner`, `created`,
-`updated`, `related` — the shared base block for every space, in declaration order.
+`id`, `type` (any string on read; `note|log|decision|reference|project` on mesh writes), `title`,
+`tags`, `owner`, `claimed_by` (absent when never claimed, `null` after release), `created`,
+`updated`, `related` — the shared base block for every space, in declaration order. Mesh-native
+is the frontmatter id, never the stem: an adopted file keeps its foreign filename.
 
 ### Per-space additions
 
@@ -188,6 +190,18 @@ has to be rebuilt. Phases 1–3 are all delivered; the live sequence is in [plan
 
 Contracts compounded from the (now-deleted) feature specs. Full detail lives in the code plus the
 tests cited.
+
+- **Adoption & note claims** — `note adopt` mints a mesh id into an existing foreign file in
+  place: insert-only-absent keys (`id`, `title`, `created`, `updated`; `owner` additionally only
+  when the flag is given), foreign keys and the filename untouched, byte-identical re-run. A
+  batch is a sequence of single-entity transactions: the first failure stops the run naming what
+  committed; the idempotent re-run heals. `note claim`/`release` are the task machinery minus the
+  lifecycle: test-and-set on `claimed_by` only, conflict = the shared claim-conflict envelope
+  (same shape, message names its own entity), `--force` on release breaks a foreign holder.
+  `--mine` on note list is owner-or-claimed_by. The status census carries per-agent
+  `notes_owned`/`notes_claimed`, JSON keys appended last. Pinned by `tests/note_cli.rs`,
+  `tests/race.rs` (8-way real-process claim race), `tests/review_regressions.rs`, and the MCP
+  parity tests (`src/mcp/`, `tests/mcp_cli.rs`, `tests/bundle.rs`).
 
 - **Wikilinks** — `[[Title]]` → id by title match against the notes index; `[[n-id]]`/`[[t-id]]`/
   `[[m-id]]`/`[[a-id]]` pass through; alias and anchor forms (`|`, `#`, `^`) strip at the lookup
@@ -231,7 +245,7 @@ tests cited.
   adds a `foreign markdown` line when foreign files exist, and the payload **appends** a
   `notes_foreign` count — never mid-payload, per the append contract — so `notes: 0` beside a
   vault full of adopted files cannot read as blindness.
-- **MCP** — stdio JSON-RPC, 37 `mesh_*` tools mirroring the safe verbs plus the read-only
+- **MCP** — stdio JSON-RPC, 40 `mesh_*` tools mirroring the safe verbs plus the read-only
   lenses, each carrying explicit read-only/idempotent/destructive hints with exactly one
   destructive tool (`mesh_task_cancel`). Withheld: every removal verb, asset ingest and gc, and
   all admin. Every parameter carries a description; enums render domain literals; a config-derived

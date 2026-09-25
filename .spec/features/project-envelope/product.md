@@ -12,7 +12,7 @@ A project becomes the workstream envelope: one project note gathering the notes,
 memories that belong to that workstream. `mesh project` grows from "a project note plus its
 tasks" to the full envelope, and `--project` scopes search and memory recall to it. The
 operator's existing workstream/project files become usable the moment
-[note-adoption](../note-adoption/product.md) mints them ids — the envelope hangs off a real id,
+note-adoption mints them ids — the envelope hangs off a real id,
 so foreign workstream notes stop exiting 3.
 
 **Parent:** [../../product.md](../../product.md)
@@ -25,7 +25,7 @@ so foreign workstream notes stop exiting 3.
 | | |
 |---|---|
 | **Owns** | The project lens output extension (notes + memories sections); the `--project` filter on `search` and `memory recall`; the MCP parity for both (mesh_project, mesh_search, mesh_memory_recall params) |
-| **Does not own** | Adoption and id minting ([note-adoption](../note-adoption/product.md) — upstream gate); the memory `scope` enum (untouched — membership uses a new optional `project` field, mirroring tasks); the task model (`project` is reused, not redefined); any new verb family — the envelope extends existing surfaces only |
+| **Does not own** | Adoption and id minting (note-adoption — upstream gate, DONE and compounded into [tech.md](../../tech.md)); the memory `scope` enum (untouched — membership uses a new optional `project` field, mirroring tasks); the task model (`project` is reused, not redefined); any new verb family — the envelope extends existing surfaces only |
 
 ---
 

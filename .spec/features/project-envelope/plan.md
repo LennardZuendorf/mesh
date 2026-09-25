@@ -16,7 +16,7 @@ have.
 **Requirements:** [product.md](product.md)
 **Architecture:** [tech.md](tech.md)
 
-**Feature gate:** starts when [note-adoption](../note-adoption/plan.md) is `DONE` (root
+**Feature gate:** starts when note-adoption is `DONE` (root
 [plan.md](../../plan.md) Feature Sequence) — the envelope hangs off real ids. No unit-level
 cross-feature dependencies.
 

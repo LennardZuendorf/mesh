@@ -47,7 +47,7 @@ fn run(ctx: Ctx, opts: DashOpts) -> Result<()>;   // never returns until quit
 - **`snapshot`** composes: `status_report` (census + health + foreign counts), `tasks::list`
   with `--ready` / `--blocked` / claimed-state filters, `activity` (recent-activity), and the
   search-health line. Every number on screen comes from these calls — the dashboard adds **no
-  second source of truth**. With [note-adoption](../note-adoption/tech.md) landed, the census
+  second source of truth**. With note-adoption landed, the census
   rows already carry note ownership/claims.
 - **Terminal lifecycle**: enter (alternate screen, raw mode) → loop → restore. Restoration is
   a **Drop guard**, so quit, error, and the `main` panic-catch all restore cooked mode, cursor

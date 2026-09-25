@@ -17,7 +17,7 @@ everything meaningful is testable without a tty.
 **Architecture:** [tech.md](tech.md)
 **Design:** [design.md](design.md)
 
-**Feature gate:** none — independent of [note-adoption](../note-adoption/plan.md) and
+**Feature gate:** none — independent of note-adoption and
 [project-envelope](../project-envelope/plan.md); may run in parallel. Its agents pane is richer
 once note-adoption lands, but it reads whatever the census reports.
 

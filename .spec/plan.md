@@ -3,7 +3,6 @@ type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
 children:
-  - features/note-adoption/plan.md
   - features/project-envelope/plan.md
   - features/dashboard-tui/plan.md
 updated: 2026-09-25
@@ -16,10 +15,11 @@ updated: 2026-09-25
 spaces, shipped the deferred dependency graph (phase 3), and removed the daemon. All arcs are
 compounded into this root layer and their feature folders deleted.
 
-**Focus:** the round-2 feedback bundle is in flight: [note-adoption](features/note-adoption/plan.md)
-(adoption + durable ownership + claims — the on-ramp for the operator's existing vault) is
-ACTIVE; [project-envelope](features/project-envelope/plan.md) waits on it; [dashboard-tui](features/dashboard-tui/plan.md)
-is independent and may run in parallel. Two adversarial review sweeps over the landed Rust
+**Focus:** note-adoption is DONE and compounded into
+[tech.md](tech.md) § Implemented surfaces (adopt + durable ownership + note claims, `--mine`,
+census, 40-tool MCP parity). Next: [project-envelope](features/project-envelope/plan.md) is
+unblocked and next up; [dashboard-tui](features/dashboard-tui/plan.md) is independent and may run
+in parallel. Two adversarial review sweeps over the landed Rust
 surface are closed and compounded into [tech.md](tech.md) § Invariants and § Implemented
 surfaces; the open items are the product-positioning review and the two known gaps below.
 
@@ -42,8 +42,8 @@ surfaces; the open items are the product-positioning review and the two known ga
 | 11 | team-awareness | ✅ DONE | inbound mentions, `task append`/`release`, `session-start --team` |
 | 12 | agent-usability | ✅ DONE | MCP instructions, tool schemas, flag contract, `mesh init` |
 | 13 | rust-rewrite | ✅ DONE | the whole `src/` tree and `tests/`; five spaces (`src/spaces.rs`), the 37-tool MCP surface (`src/mcp/`), no daemon → [tech.md](tech.md) |
-| 14 | note-adoption | 🚧 ACTIVE | adopt + durable ownership + note claims → [features/note-adoption/](features/note-adoption/plan.md) |
-| 15 | project-envelope | ⏸ BLOCKED until 14 DONE | workstream envelope lens + `--project` filters → [features/project-envelope/](features/project-envelope/plan.md) |
+| 14 | note-adoption | ✅ DONE | `note adopt/claim/release`, `--mine`, census, 40-tool MCP parity → [tech.md](tech.md) § Implemented surfaces · Adoption & note claims |
+| 15 | project-envelope | 🚧 READY (14 DONE) | workstream envelope lens + `--project` filters → [features/project-envelope/](features/project-envelope/plan.md) |
 | 16 | dashboard-tui | 🚧 READY (independent) | read-only live TUI dashboard → [features/dashboard-tui/](features/dashboard-tui/plan.md) |
 
 ---

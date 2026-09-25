@@ -178,3 +178,9 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** a green test is evidence about the assertion, not about the spec. When a test and the spec disagree the spec wins — so read a test's assertion against the spec sentence it claims to cover before trusting it, especially one whose *name* states a behaviour. Treat a test encoding a behaviour no spec line supports as a finding in its own right, and fix the test in the same commit as the code, or the next reviewer will read it as the contract.
 **Tags:** testing, spec-conformance, search, threshold, review, gates
 **Date:** 2026-09-08
+
+### A silent degrade hides a broken contract
+**Pattern:** `mesh reindex` failed twice before the real cause was found. The first failure was attributed to the 30 s wall clock (a 656-file ingest takes minutes); the second ran with a 600 s budget and still degraded. The actual cause: `indexed index create` prompts `Overwrite? [y/N]` when the collection exists, and mesh passes a null stdin, so the child aborts every refresh. The degrade-to-notice design (exit 0, stderr notice) made the failure look like a timeout unless the notice was read carefully — and the wiring had been declared done on the strength of a degraded exit 0 plus a working search path.
+**Rule:** when a wrapper degrades by design, a green exit proves nothing about the wrapped call: verify the happy path end-to-end against the real dependency before calling the wiring done. Never route a non-interactive caller through an interactive verb — if the dependency prompts on an existing resource, pick the non-interactive sibling (`index update`, not `index create`), because no timeout budget fixes a prompt that will never be answered. Pin the routing in a stub fixture so the contract cannot drift back.
+**Tags:** search, indexed, wrapper, degrade, prompts, wiring, verification
+**Date:** 2026-09-25

@@ -83,7 +83,7 @@ corpus as it does today.
 
 `mesh_search` and `mesh_memory_recall` gain a `project` param; `mesh_memory_new` /
 `mesh_memory_update` gain one too; `mesh_project` extends automatically (same domain function).
-**No tool count change** (37 → 40 belongs to [note-adoption](../note-adoption/tech.md)).
+**No tool count change** (the 40-tool table is owned by the compounded adoption contract in [tech.md](../../tech.md)).
 
 ---
 
