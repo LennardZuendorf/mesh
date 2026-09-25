@@ -245,6 +245,8 @@ pub enum NoteSub {
             help = "Files to adopt: vault-relative or absolute."
         )]
         paths: Vec<PathBuf>,
+        #[arg(long, value_name = "TEXT", help = OWNER_WRITE_HELP)]
+        owner: Option<String>,
         #[command(flatten)]
         out: OutFlags,
     },
@@ -275,6 +277,8 @@ pub enum NoteSub {
         new_type: Option<String>,
         #[arg(long, value_name = "TEXT", help = "Rewrite the note title.")]
         title: Option<String>,
+        #[arg(long, value_name = "TEXT", help = "Set the owner: the long-term area.")]
+        owner: Option<String>,
         #[command(flatten)]
         out: OutFlags,
     },

@@ -1739,3 +1739,91 @@ fn an_adopt_batch_stops_and_heals_on_re_run() {
     );
     assert!(f.read("two.md").contains("\nid: n-"));
 }
+
+/// The brain layout plus a roster: only `alice` and `test-agent` are valid identities.
+const BRAIN_ROSTER_CFG: &str = "[core]\nvault_path = \"{VAULT}\"\nagent = \"test-agent\"\n\n\
+                                [spaces]\nnotes = \".\"\ntasks = \"Agents/tasks\"\n\n\
+                                [tasks]\ncollections = [\"alice\", \"test-agent\"]\n";
+
+const FOREIGN_OWNERED: &str = "---\ntype: Team\ntitle: Owned\nowner: bob\n---\n\n# Owned\n";
+
+#[test]
+fn adopt_stamps_the_owner_when_absent_only() {
+    let f = VaultFixture::with(BRAIN_ROSTER_CFG);
+    f.write("bare.md", FOREIGN);
+    f.write("owned.md", FOREIGN_OWNERED);
+    f.write("quiet.md", FOREIGN);
+
+    // Identity is validated at the write boundary; the file is untouched.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "bare.md", "--owner", "ghost", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+    assert_eq!(stderr_of(&out).trim(), "unknown owner: 'ghost'");
+    assert!(!f.read("bare.md").contains("\nid: n-"));
+
+    // Given and absent: inserted.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "bare.md", "--owner", "alice", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let bare = f.read("bare.md");
+    assert!(bare.contains("owner: alice\n"), "{bare}");
+
+    // Given but present: untouched.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "owned.md", "--owner", "alice", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let owned = f.read("owned.md");
+    assert!(owned.contains("owner: bob\n"), "{owned}");
+    assert!(!owned.contains("owner: alice"), "{owned}");
+
+    // No flag: the key is never injected.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "quiet.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let quiet = f.read("quiet.md");
+    assert!(!quiet.contains("owner:"), "{quiet}");
+}
+
+#[test]
+fn update_owner_sets_the_area_explicitly() {
+    let f = VaultFixture::with(BRAIN_ROSTER_CFG);
+    f.write("one.md", FOREIGN);
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "--owner", "alice", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+
+    let out = f
+        .cmd()
+        .args(["note", "update", &id, "--owner", "test-agent", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let text = f.read("one.md");
+    assert!(text.contains("owner: test-agent\n"), "{text}");
+    assert!(!text.contains("owner: alice"), "{text}");
+
+    // The roster gates the explicit set too.
+    let out = f
+        .cmd()
+        .args(["note", "update", &id, "--owner", "ghost", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+    assert_eq!(stderr_of(&out).trim(), "unknown owner: 'ghost'");
+}

@@ -349,6 +349,7 @@ impl Server {
                 tags: a.str("tags")?,
                 new_type: a.str("new_type")?,
                 title: None,
+                owner: None,
             },
         )?;
         Ok(object(entry(&note.meta, NOTE_FIELDS.fields(), None, None)))

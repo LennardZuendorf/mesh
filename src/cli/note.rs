@@ -37,9 +37,10 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
             ctx.coalesce(out.json, out.quiet, owner);
             new(ctx, &title, &note_type, tags.as_deref(), body, file)
         }
-        NoteSub::Adopt { paths, out } => {
+        NoteSub::Adopt { paths, owner, out } => {
+            // The reassignment --owner is not the global identity --owner (the R6 rule).
             ctx.coalesce(out.json, out.quiet, None);
-            adopt(ctx, paths)
+            adopt(ctx, paths, owner)
         }
         NoteSub::Append {
             target,
@@ -56,10 +57,12 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
             tags,
             new_type,
             title,
+            owner,
             out,
         } => {
+            // The reassignment --owner is not the global identity --owner (the R6 rule).
             ctx.coalesce(out.json, out.quiet, None);
-            update(ctx, &target, tags, new_type, title)
+            update(ctx, &target, tags, new_type, title, owner)
         }
         NoteSub::Get {
             target,
@@ -202,9 +205,9 @@ fn report(ctx: &Ctx, note: &Note, verb: &str) {
 // ---------------------------------------------------------------------------------------
 
 /// Adopt existing foreign Markdown: mint a mesh id into each file, in place.
-fn adopt(ctx: &mut Ctx, paths: Vec<PathBuf>) -> Result<()> {
+fn adopt(ctx: &mut Ctx, paths: Vec<PathBuf>, owner: Option<String>) -> Result<()> {
     let cfg = ctx.cfg()?;
-    let adopted = notes::adopt(cfg, &paths)?;
+    let adopted = notes::adopt(cfg, &paths, owner.as_deref())?;
     let entries: Vec<Json> = adopted
         .iter()
         .map(|a| {
@@ -287,6 +290,7 @@ fn update(
     tags: Option<String>,
     new_type: Option<String>,
     title: Option<String>,
+    owner: Option<String>,
 ) -> Result<()> {
     let cfg = ctx.cfg()?;
     // Count title-form backlinks before the rename: a renamed note silently dangles every
@@ -307,6 +311,7 @@ fn update(
             tags,
             new_type,
             title,
+            owner,
         },
     )?;
     dangling_advisory(ctx, &dangled);

@@ -41,6 +41,7 @@ pub struct UpdateNote {
     pub tags: Option<String>,
     pub new_type: Option<String>,
     pub title: Option<String>,
+    pub owner: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -301,11 +302,16 @@ fn vault_rel(cfg: &Config, path: &Path) -> String {
 /// A batch is a sequence of single-entity transactions: the first failure stops the run
 /// and names what already committed, and because adopt is idempotent, re-running the
 /// same command heals.
-pub fn adopt(cfg: &Config, targets: &[PathBuf]) -> Result<Vec<Adopted>> {
+///
+/// `owner` stamps the long-term area the note belongs to, but only when the key is
+/// absent: adoption never rewrites an area an operator or agent already recorded, and
+/// the identity is validated at the write boundary as everywhere else.
+pub fn adopt(cfg: &Config, targets: &[PathBuf], owner: Option<&str>) -> Result<Vec<Adopted>> {
+    validate_owner(cfg, owner)?;
     let root = cfg.root(Space::Notes)?.to_path_buf();
     let mut adopted = Vec::new();
     for target in targets {
-        match adopt_one(cfg, &root, target) {
+        match adopt_one(cfg, &root, target, owner) {
             Ok(one) => adopted.push(one),
             Err(e) => {
                 if adopted.is_empty() {
@@ -329,7 +335,7 @@ pub fn adopt(cfg: &Config, targets: &[PathBuf]) -> Result<Vec<Adopted>> {
 /// Adopt one file. Sandbox first, then mint and write under the create lock with the file
 /// re-read inside it: a racing adopt of the same file is either already done (a no-op
 /// holding the same lock) or serialized behind this one.
-fn adopt_one(cfg: &Config, root: &Path, target: &Path) -> Result<Adopted> {
+fn adopt_one(cfg: &Config, root: &Path, target: &Path, owner: Option<&str>) -> Result<Adopted> {
     let missing = || note_not_found(&target.display().to_string());
     let Some(path) = adopt_resolve(cfg, target) else {
         return Err(missing());
@@ -401,6 +407,11 @@ fn adopt_one(cfg: &Config, root: &Path, target: &Path) -> Result<Adopted> {
     if meta.get("updated").is_none() {
         meta.insert("updated".to_string(), ts_value(&now));
     }
+    if let Some(owner) = owner {
+        if meta.get("owner").is_none() {
+            meta.insert("owner".to_string(), Value::str(owner));
+        }
+    }
     let doc = Doc::new(meta, body);
     write_doc(&cfg.spaces, &resolved, &ordered(&NOTE_FIELDS, &doc))?;
     Ok(Adopted { id, path: resolved })
@@ -442,6 +453,7 @@ pub fn update(cfg: &Config, target: &str, o: UpdateNote) -> Result<Note> {
     if let Some(new_type) = &o.new_type {
         validate_type(new_type)?;
     }
+    validate_owner(cfg, o.owner.as_deref())?;
     let note_id = resolve_id(cfg, target)?;
     let root = cfg.root(Space::Notes)?.to_path_buf();
 
@@ -461,6 +473,11 @@ pub fn update(cfg: &Config, target: &str, o: UpdateNote) -> Result<Note> {
     if let Some(title) = &o.title {
         doc.meta
             .insert("title".to_string(), Value::str(title.as_str()));
+    }
+    // An explicit `--owner` set: changing an area is an update action, never an
+    // adoption side effect.
+    if let Some(owner) = &o.owner {
+        doc.meta.insert("owner".to_string(), Value::str(owner));
     }
     restamp(cfg, &mut doc);
     let note = Note::from_meta(&doc.meta).ok_or_else(|| note_not_found(target))?;
@@ -1145,7 +1162,7 @@ mod tests {
     fn adopt_mints_the_minimal_mesh_block() {
         let v = vault();
         write(&v.cfg, "notes/team-sol.md", FOREIGN_TEAM);
-        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/team-sol.md")]).unwrap();
+        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/team-sol.md")], None).unwrap();
         assert_eq!(adopted.len(), 1);
         let id = adopted[0].id.clone();
         assert!(id.starts_with(NOTE_ID_PREFIX));
@@ -1180,7 +1197,7 @@ mod tests {
             "notes/pinned.md",
             "---\ntitle: Pinned\ncreated: 2026-01-02\n---\n\n# Pinned\n",
         );
-        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/pinned.md")]).unwrap();
+        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/pinned.md")], None).unwrap();
         let id = adopted[0].id.clone();
         // The existing created is the digest input, so the id is reproducible.
         let expected = generate_id(NOTE_ID_PREFIX, "2026-01-02T00:00:00Z", "Pinned", &|_| false);
@@ -1198,9 +1215,9 @@ mod tests {
         let v = vault();
         write(&v.cfg, "notes/team-sol.md", FOREIGN_TEAM);
         let target = v.cfg.vault().join("notes/team-sol.md");
-        let first = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap();
+        let first = adopt(&v.cfg, std::slice::from_ref(&target), None).unwrap();
         let before = std::fs::read_to_string(&target).unwrap();
-        let second = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap();
+        let second = adopt(&v.cfg, std::slice::from_ref(&target), None).unwrap();
         assert_eq!(second[0].id, first[0].id);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
     }
@@ -1209,7 +1226,7 @@ mod tests {
     fn adopt_prepends_a_block_to_a_frontmatter_less_file() {
         let v = vault();
         write(&v.cfg, "notes/loose.md", "# Just a body\n\ntext\n");
-        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/loose.md")]).unwrap();
+        let adopted = adopt(&v.cfg, &[v.cfg.vault().join("notes/loose.md")], None).unwrap();
         let id = adopted[0].id.clone();
         let Some(doc) = read_doc(&v.cfg.vault().join("notes/loose.md")) else {
             panic!("the adopted file must be readable");
@@ -1230,7 +1247,7 @@ mod tests {
         let text = "---\ntitle: [unclosed\n---\n\nbroken\n";
         write(&v.cfg, "notes/broken.md", text);
         let target = v.cfg.vault().join("notes/broken.md");
-        let err = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap_err();
+        let err = adopt(&v.cfg, std::slice::from_ref(&target), None).unwrap_err();
         assert_eq!(err.code(), 3);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), text);
     }
@@ -1241,7 +1258,7 @@ mod tests {
         let text = "---\nid: mine-1\ntitle: Owned elsewhere\n---\n\nx\n";
         write(&v.cfg, "notes/owned.md", text);
         let target = v.cfg.vault().join("notes/owned.md");
-        let err = adopt(&v.cfg, std::slice::from_ref(&target)).unwrap_err();
+        let err = adopt(&v.cfg, std::slice::from_ref(&target), None).unwrap_err();
         assert_eq!(err.code(), 2);
         let msg = err.to_string();
         assert!(msg.contains("foreign id"), "{msg}");
@@ -1251,7 +1268,7 @@ mod tests {
     #[test]
     fn adopt_reports_a_missing_path_as_not_found() {
         let v = vault();
-        let err = adopt(&v.cfg, &[v.cfg.vault().join("notes/nope.md")]).unwrap_err();
+        let err = adopt(&v.cfg, &[v.cfg.vault().join("notes/nope.md")], None).unwrap_err();
         assert_eq!(err.code(), 3);
     }
 
@@ -1260,13 +1277,13 @@ mod tests {
         let v = vault();
         // Inside the vault, but in another space: not adoptable as a note.
         write(&v.cfg, "tasks/other-space.md", "---\ntitle: X\n---\n\nx\n");
-        let err = adopt(&v.cfg, &[v.cfg.vault().join("tasks/other-space.md")]).unwrap_err();
+        let err = adopt(&v.cfg, &[v.cfg.vault().join("tasks/other-space.md")], None).unwrap_err();
         assert_eq!(err.code(), 2);
         // Outside the vault entirely: sandbox escape, refused.
         let outside = tempfile::tempdir().unwrap();
         let foreign = outside.path().join("elsewhere.md");
         std::fs::write(&foreign, "# Elsewhere\n").unwrap();
-        let err = adopt(&v.cfg, &[foreign]).unwrap_err();
+        let err = adopt(&v.cfg, &[foreign], None).unwrap_err();
         assert_eq!(err.code(), 2);
     }
 
@@ -1282,6 +1299,7 @@ mod tests {
                 v.cfg.vault().join("notes/one.md"),
                 v.cfg.vault().join("notes/two.md"),
             ],
+            None,
         )
         .unwrap();
         assert_ne!(adopted[0].id, adopted[1].id);
@@ -1293,12 +1311,67 @@ mod tests {
         write(&v.cfg, "notes/good.md", FOREIGN_TEAM);
         let good = v.cfg.vault().join("notes/good.md");
         let missing = v.cfg.vault().join("notes/nope.md");
-        let err = adopt(&v.cfg, &[good.clone(), missing]).unwrap_err();
+        let err = adopt(&v.cfg, &[good.clone(), missing], None).unwrap_err();
         assert_eq!(err.code(), 3);
         let msg = err.to_string();
         assert!(msg.contains("re-run"), "{msg}");
         let committed_id = meta_id(&good).expect("good committed");
         assert!(msg.contains(committed_id.as_str()), "{msg}");
         assert!(meta_id(&good).is_some(), "the first file did commit");
+    }
+
+    const FOREIGN_OWNERED: &str = "---\ntype: Team\ntitle: Owned\nowner: bob\n---\n\n# Owned\n";
+
+    #[test]
+    fn adopt_inserts_the_owner_only_when_given_and_absent() {
+        let v = vault();
+        write(&v.cfg, "notes/bare.md", FOREIGN_TEAM);
+        write(&v.cfg, "notes/owned.md", FOREIGN_OWNERED);
+        write(&v.cfg, "notes/quiet.md", FOREIGN_TEAM);
+
+        // Given and absent: inserted.
+        adopt(
+            &v.cfg,
+            &[v.cfg.vault().join("notes/bare.md")],
+            Some("alice"),
+        )
+        .unwrap();
+        let doc = read_doc(&v.cfg.vault().join("notes/bare.md")).expect("readable");
+        assert_eq!(meta_str(&doc.meta, "owner"), Some("alice"));
+
+        // Given but the key is present: untouched — changing an area is an explicit
+        // `note update`, never an adoption side effect.
+        adopt(
+            &v.cfg,
+            &[v.cfg.vault().join("notes/owned.md")],
+            Some("alice"),
+        )
+        .unwrap();
+        let doc = read_doc(&v.cfg.vault().join("notes/owned.md")).expect("readable");
+        assert_eq!(meta_str(&doc.meta, "owner"), Some("bob"));
+
+        // Flag absent: the key is never injected.
+        adopt(&v.cfg, &[v.cfg.vault().join("notes/quiet.md")], None).unwrap();
+        let doc = read_doc(&v.cfg.vault().join("notes/quiet.md")).expect("readable");
+        assert!(!doc.meta.contains_key("owner"));
+    }
+
+    #[test]
+    fn update_owner_is_an_explicit_set() {
+        let v = vault();
+        let note = create(&v.cfg, "T", NewNote::default()).unwrap();
+        let updated = update(
+            &v.cfg,
+            &note.id,
+            UpdateNote {
+                owner: Some("bob".to_string()),
+                ..UpdateNote::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.owner.as_deref(), Some("bob"));
+        let doc = read_doc(&v.cfg.vault().join("notes").join(format!("{}.md", note.id)))
+            .expect("readable");
+        assert_eq!(meta_str(&doc.meta, "owner"), Some("bob"));
     }
 }
