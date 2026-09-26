@@ -231,6 +231,19 @@ fn resolve_project_in(cfg: &Config, project_id: &str, spaces: &[Space]) -> Resul
     }
 }
 
+/// The seed, resolved and gated exactly as the lens and a scoped search gate it, returning
+/// the mesh id every membership rule compares against.
+///
+/// `memory recall --project` needs the resolved id and no envelope, so it reads the gate
+/// directly rather than collecting member lists it would discard. One resolution, one owner:
+/// a miss is `ProjectNotFound` with candidates, a foreign file is `SeedForeign`.
+pub fn resolve_project(cfg: &Config, project_id: &str) -> Result<String> {
+    Ok(resolve_project_in(cfg, project_id, &PROJECT_SPACES)?
+        .item
+        .id
+        .clone())
+}
+
 /// The failure for an unresolvable project seed, carrying the point-read's near-miss
 /// candidates so the JSON envelope names them.
 fn project_seed_error(cfg: &Config, project_id: &str, point_read: &MeshError) -> MeshError {

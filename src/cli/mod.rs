@@ -834,6 +834,12 @@ pub enum MemorySub {
         query: String,
         #[arg(long, value_name = "TEXT", help = "Filter by kind.")]
         kind: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "Scope recall to one project's memories (id or slug)."
+        )]
+        project: Option<String>,
         #[arg(long, value_name = "TEXT", help = TAGS_FILTER_HELP)]
         tags: Option<String>,
         #[arg(long, value_name = "TEXT", help = OWNER_FILTER_HELP)]

@@ -95,6 +95,9 @@ pub struct RecallOpts {
     pub decay: bool,
     pub include_expired: bool,
     pub min_importance: Option<i64>,
+    /// `--project`: keep only the memories scoped to this project. The seed resolves before
+    /// any search I/O through the lens's own gate; the raw caller string, not the resolved id.
+    pub project: Option<String>,
     pub meta_only: bool,
     pub full: bool,
 }
@@ -674,17 +677,29 @@ fn view_index(cfg: &Config) -> HashMap<PathBuf, Memory> {
 /// recency. Emits the standard hit array so one parser serves `search` and `recall` alike.
 pub fn recall(cfg: &Config, query: &str, f: &Filter, o: &RecallOpts) -> Result<Vec<Hit>> {
     cfg.root(Space::Memories)?;
+    // The `--project` scope is an eligibility filter, never a second ranker: the seed resolves
+    // first, through the gate the lens and a scoped search share, so an unresolvable id or a
+    // foreign file is exit 3 before any search I/O. Membership is `project` equality on the
+    // **resolved** id — the same rule the lens's memories section applies — and it composes
+    // with every other recall filter as a plain conjunction inside `matches_filters`.
+    let filter = match o.project.as_deref() {
+        Some(seed) => {
+            let resolved = crate::domain::lenses::resolve_project(cfg, seed)?;
+            f.clone().with_extra("project", Some(resolved.as_str()))
+        }
+        None => f.clone(),
+    };
     let (hits, _mode) = search::query(cfg, query, &recall_search_filter())?;
     let index = view_index(cfg);
     let now = now_utc();
-    let me = f.me.clone();
+    let me = filter.me.clone();
 
     let mut scored: Vec<(f64, Hit)> = Vec::new();
     for mut hit in hits {
         let Some(memory) = index.get(&realpath(&hit.path)) else {
             continue;
         };
-        if !matches_filters(&memory.meta, f) {
+        if !matches_filters(&memory.meta, &filter) {
             continue;
         }
         if o.min_importance

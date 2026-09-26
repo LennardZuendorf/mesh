@@ -815,6 +815,8 @@ impl Server {
             decay: !a.flag("no_decay")?,
             include_expired: a.flag("include_expired")?,
             min_importance: a.int("min_importance")?,
+            // `project` is unit 5's MCP parity work; the field is compile-forced here.
+            project: None,
             meta_only,
             full,
         };

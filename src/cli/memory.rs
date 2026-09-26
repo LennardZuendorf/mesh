@@ -151,6 +151,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
         MemorySub::Recall {
             query,
             kind,
+            project,
             tags,
             owner,
             mine,
@@ -170,6 +171,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
                 &query,
                 RecallFlags {
                     kind,
+                    project,
                     tags,
                     min_importance,
                     limit,
@@ -534,6 +536,7 @@ fn list(ctx: &mut Ctx, flags: ListFlags) -> Result<()> {
 /// The `memory recall` flags, grouped so the verb takes one argument.
 struct RecallFlags {
     kind: Option<String>,
+    project: Option<String>,
     tags: Option<String>,
     min_importance: Option<i64>,
     limit: i64,
@@ -568,6 +571,7 @@ fn recall(ctx: &mut Ctx, query: &str, flags: RecallFlags) -> Result<()> {
         decay: !flags.no_decay,
         include_expired: flags.include_expired,
         min_importance: flags.min_importance,
+        project: flags.project,
         meta_only: flags.meta_only,
         full: flags.full,
     };
