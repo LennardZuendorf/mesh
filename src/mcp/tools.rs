@@ -815,8 +815,9 @@ impl Server {
             decay: !a.flag("no_decay")?,
             include_expired: a.flag("include_expired")?,
             min_importance: a.int("min_importance")?,
-            // `project` is unit 5's MCP parity work; the field is compile-forced here.
-            project: None,
+            // `project` scopes recall to one project's memories; `memories::recall` resolves
+            // the seed before any search I/O, matching the CLI's own gate.
+            project: a.str("project")?,
             meta_only,
             full,
         };
@@ -992,8 +993,9 @@ impl Server {
                 None => None,
             },
             kind: a.str("kind")?,
-            // `--project` reaches the MCP surface in project-envelope/5.
-            project: None,
+            // `project` scopes hits to one envelope; `search::query`/`tag_pull` resolve the
+            // seed before any engine work, so a bad one is exit 3 rather than an empty page.
+            project: a.str("project")?,
             limit: a.int_or("limit", 10)?,
             threshold: search::resolve_effective_threshold(a.num("threshold")?, cfg),
             engine,

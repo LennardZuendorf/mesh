@@ -183,14 +183,15 @@ CLI, one verb family per space:
   `task unblock --on|--all` edit the dependency edges; `task next` selects the next ready task
   and `--claim` takes it in the same call.
 - `memory {new,get,list,append,update,recall,forget}` — `--kind`, `--scope`, `--importance`,
-  `--source`, `--expires`, `--supersedes` on write; `memory recall` ranks by match, importance
-  and recency and takes `--no-decay` for an audit.
+  `--source`, `--expires`, `--supersedes`, `--project` on write; `memory recall` ranks by match,
+  importance and recency, takes `--no-decay` for an audit, and takes `--project` to scope to one
+  project's envelope (the same envelope `search --project` and the `project` lens read).
 - `scratch {set,get,list,append,clear}` — name-addressed per agent; `--agent` addresses a peer's
   namespace.
 - `asset {add,get,path,list,attach,detach,remove,gc}` — `asset add --attach` stores and links in
   one call; `asset path` prints the blob path to pipe into another tool.
 
-Plus `search` (`--space`, `--engine`, `--tags`, `--health`), the session lenses
+Plus `search` (`--space`, `--engine`, `--tags`, `--health`, `--project`), the session lenses
 `recent-activity`, `build-context`, `graph --direction out|in|both`, `project`,
 `session-start --team|--budget`, and the human-only admin commands `init`, `status`,
 `config {path,show,get,set}` and `watch` (a foreground watcher that keeps the search index and

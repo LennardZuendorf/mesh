@@ -1511,3 +1511,254 @@ fn an_invalid_enum_value_is_rejected_by_the_domain_not_by_a_crash() {
         .contains("invalid note type"));
     assert!(!f.files().iter().any(|p| p.starts_with("notes/n-")));
 }
+
+// ---------------------------------------------------------------------------------------
+// project-envelope: MCP parity
+// ---------------------------------------------------------------------------------------
+
+/// Create a `type: project` note and return its id.
+fn seed_project(f: &VaultFixture, title: &str) -> String {
+    let out = f
+        .cmd()
+        .args([
+            "note",
+            "new",
+            title,
+            "--type",
+            "project",
+            "--body",
+            "the workstream umbrella",
+            "--json",
+        ])
+        .output()
+        .expect("seed a project note");
+    let value: Json = serde_json::from_slice(&out.stdout).expect("note new --json");
+    value["id"].as_str().expect("an id").to_string()
+}
+
+/// A project plus its envelope — one linked note, one task and one memory on the project —
+/// and one loose note/task/memory carrying the same query text. Returns the project id.
+fn project_envelope(f: &VaultFixture) -> String {
+    let project = seed_project(f, "Workstream P");
+    f.cmd()
+        .args([
+            "note",
+            "new",
+            "Linked note",
+            "--body",
+            &format!("[[{project}]] pricing"),
+        ])
+        .assert()
+        .success();
+    f.cmd()
+        .args([
+            "task",
+            "new",
+            "Member task",
+            "--project",
+            &project,
+            "--body",
+            "pricing",
+        ])
+        .assert()
+        .success();
+    f.cmd()
+        .args([
+            "memory",
+            "new",
+            "Member memory",
+            "--project",
+            &project,
+            "--body",
+            "pricing",
+        ])
+        .assert()
+        .success();
+    f.cmd()
+        .args(["note", "new", "Loose note", "--body", "pricing"])
+        .assert()
+        .success();
+    f.cmd()
+        .args(["task", "new", "Loose task", "--body", "pricing"])
+        .assert()
+        .success();
+    f.cmd()
+        .args(["memory", "new", "Loose memory", "--body", "pricing"])
+        .assert()
+        .success();
+    project
+}
+
+/// The `id` of every row, in order.
+fn row_ids(rows: &[Json]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Run the CLI and parse its one JSON payload.
+fn cli_json(f: &VaultFixture, args: &[&str]) -> Json {
+    let out = f.cmd().args(args).output().expect("run the cli");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("one JSON payload")
+}
+
+#[test]
+fn mcp_search_with_a_project_matches_the_cli_exactly() {
+    let f = VaultFixture::new();
+    let project = project_envelope(&f);
+    let mcp = list(&tool(
+        &f,
+        "mesh_search",
+        json!({"query": "pricing", "project": &project}),
+    ));
+    let cli = cli_json(&f, &["search", "pricing", "--project", &project, "--json"]);
+    let cli = cli.as_array().cloned().unwrap_or_default();
+    assert_eq!(row_ids(&mcp), row_ids(&cli));
+    // Members only: the linked note, the task and the memory — the loose rows are dropped.
+    assert_eq!(mcp.len(), 3, "expected the three envelope members");
+    let unscoped = list(&tool(&f, "mesh_search", json!({"query": "pricing"})));
+    assert!(
+        unscoped.len() > mcp.len(),
+        "the project scope dropped nothing: {unscoped:?}"
+    );
+}
+
+#[test]
+fn mcp_recall_with_a_project_matches_the_cli_exactly() {
+    let f = VaultFixture::new();
+    let project = project_envelope(&f);
+    let mcp = list(&tool(
+        &f,
+        "mesh_memory_recall",
+        json!({"query": "pricing", "project": &project}),
+    ));
+    let cli = cli_json(
+        &f,
+        &[
+            "memory",
+            "recall",
+            "pricing",
+            "--project",
+            &project,
+            "--json",
+        ],
+    );
+    let cli = cli.as_array().cloned().unwrap_or_default();
+    assert_eq!(row_ids(&mcp), row_ids(&cli));
+    assert_eq!(mcp.len(), 1, "only the project's memory is eligible");
+}
+
+#[test]
+fn mcp_project_scope_rejects_an_unknown_seed_with_candidates() {
+    let f = VaultFixture::new();
+    let project = seed_project(&f, "Workstream P");
+    let near = format!("{project}x");
+    for name in ["mesh_search", "mesh_memory_recall"] {
+        let env = envelope(&tool(&f, name, json!({"query": "x", "project": &near})));
+        assert_eq!(env["kind"], json!("not_found"), "{name}");
+        assert_eq!(env["project_id"], json!(near), "{name}");
+        assert_eq!(env["candidates"], json!([project]), "{name}");
+    }
+}
+
+#[test]
+fn mcp_project_scope_rejects_a_foreign_seed() {
+    let f = VaultFixture::new();
+    f.write(
+        "notes/foreign.md",
+        "---\ntype: Project\n---\n\n# NDC Rollout\n",
+    );
+    for name in ["mesh_search", "mesh_memory_recall"] {
+        let env = envelope(&tool(
+            &f,
+            name,
+            json!({"query": "x", "project": "ndc-rollout"}),
+        ));
+        assert_eq!(env["kind"], json!("not_found"), "{name}");
+        assert!(
+            env["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("seed is not mesh-native"),
+            "{name}: {}",
+            env["message"]
+        );
+    }
+}
+
+#[test]
+fn mcp_memory_project_round_trips_on_new_and_update() {
+    let f = VaultFixture::new();
+    let project = seed_project(&f, "Workstream P");
+    let payload = structured(&tool(
+        &f,
+        "mesh_memory_new",
+        json!({"title": "Scoped", "project": &project}),
+    ));
+    assert_eq!(payload["project"], json!(project));
+    let id = payload["id"].as_str().unwrap_or_default().to_string();
+    let got = structured(&tool(&f, "mesh_memory_get", json!({"target": &id})));
+    assert_eq!(got["project"], json!(project));
+    let payload = structured(&tool(
+        &f,
+        "mesh_memory_update",
+        json!({"target": &id, "project": "n-OTHER"}),
+    ));
+    assert_eq!(payload["project"], json!("n-OTHER"));
+}
+
+#[test]
+fn the_project_parameter_is_generated_for_the_scoping_and_memory_tools() {
+    let f = VaultFixture::new();
+    let all = tools(&f);
+    let find = |name: &str| {
+        all.iter()
+            .find(|t| t["name"] == json!(name))
+            .cloned()
+            .unwrap_or_default()
+    };
+    for name in [
+        "mesh_search",
+        "mesh_memory_recall",
+        "mesh_memory_new",
+        "mesh_memory_update",
+    ] {
+        let project = &find(name)["inputSchema"]["properties"]["project"];
+        // A project is a free-form id or slug — a nullable string, never an invented enum.
+        assert_eq!(project["type"], json!(["string", "null"]), "{name}");
+        assert!(
+            project.get("enum").is_none(),
+            "{name} invented an enum for a free-form id"
+        );
+        assert!(
+            !project["description"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "{name}.project has no description"
+        );
+    }
+}
+
+#[test]
+fn mesh_project_documents_the_envelope_it_returns() {
+    let f = VaultFixture::new();
+    let all = tools(&f);
+    let project = all
+        .iter()
+        .find(|t| t["name"] == json!("mesh_project"))
+        .cloned()
+        .unwrap_or_default();
+    let description = project["description"].as_str().unwrap_or_default();
+    for section in ["project", "tasks", "notes", "memories"] {
+        assert!(
+            description.contains(section),
+            "mesh_project description omits {section}: {description}"
+        );
+    }
+}
