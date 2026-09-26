@@ -190,3 +190,9 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** treat a pre-written merge block as a draft, never as scripture: at wrap-up, re-verify every concrete claim it makes — orders, counts, names — against the landed code before promoting it into the root layer. Code is truth, and the root spec must never describe an ordering the model does not declare.
 **Tags:** spec, compounding, merge-blocks, field-order, code-is-truth
 **Date:** 2026-09-26
+
+### A wall-clock pin asserts the minimum of N runs, never one sample
+**Pattern:** the cold-start budget (under 10 ms) had been documented for the whole Rust rewrite but never tested — a trace finding the dashboard feature was created to close. A single timed run is noise-dominated (locally 6.8–24.9 ms on the same binary, first-run cache effects worse), and a p-quantile pin would flake under CI load. Pinning min-of-ten is monotone against scheduling noise — noise only ever slows a run — so it stays stable under load while still lifting the moment startup work is actually added.
+**Rule:** pin a startup/wall-clock budget on the **minimum of several** warm end-to-end runs, with one discard pass to warm the loader and page cache; choose the bound from measured distribution (idle floor AND full-load floor), with generous-but-real headroom, and print the full timing vector in the failure message so a red pin is diagnosable, not mysterious. Calibrate with real measurements recorded in the spec, never by copying the marketing number into the assert.
+**Tags:** performance, cold-start, testing, wall-clock, pins, noise
+**Date:** 2026-09-26

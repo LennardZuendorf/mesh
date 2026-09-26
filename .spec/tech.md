@@ -25,6 +25,7 @@ CLI and MCP are two thin renderers over the same domain.
 | Config | `toml` (read) + `toml_edit` (format-preserving edits) |
 | Time / hashing / syscalls | `chrono`, `sha2`, `rustix` (O_EXCL, flock, fstat, kill, umask) |
 | Walking / watching | `walkdir`, `notify` + `notify-debouncer-full` |
+| Terminal UI | `ratatui` + `crossterm` — the dashboard only, feature-trimmed to the crossterm backend, imported only by `src/cli/dashboard.rs` |
 | Agents | Hand-rolled JSON-RPC 2.0 over stdio (no MCP SDK) |
 | Search engine | `indexed` (first-party hybrid; mesh wraps its CLI) |
 | Dev | `assert_cmd`, `predicates`, `tempfile`, `serial_test`; `cargo llvm-cov`, `cargo deny` |
@@ -53,7 +54,7 @@ src/
 ├── model/                       # per-space typed views + FieldOrder (note, task, memory, scratch, asset)
 ├── domain/                      # verbs + select/tags/owner/wikilinks/deps/activity/context/lenses
 ├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
-├── cli/                         # one file per verb family + globals, out, admin, watch
+├── cli/                         # one file per verb family + globals, out, admin, watch, dashboard
 └── mcp/                         # stdio JSON-RPC server, schemas, 40-tool table, instructions
 tests/                           # one per verb family + compat corpus, race, bundle, review regressions
 ```
@@ -116,8 +117,13 @@ tests/                           # one per verb family + compat corpus, race, bu
 
 **Goal:** instant CLI. **Target:** cold start under 10 ms for a read command on a warm
 filesystem, asserted by a wall-clock test that also proves the MCP tool table is never
-constructed off the MCP path. Heavy work does not exist: a full-vault scan of thousands of files
-in Rust is milliseconds, which is what let the warm daemon be deleted rather than ported.
+constructed off the MCP path. The pin asserts the **minimum of ten** warm end-to-end runs of
+the suite's own binary stays under 50 ms — min-of-N is monotone against scheduling noise, so it
+is stable under CI load while still lifting on a real regression — with ~6× headroom over the
+measured ~7.5 ms idle floor. Heavy work does not exist: a full-vault scan of thousands of files
+in Rust is milliseconds, which is what let the warm daemon be deleted rather than ported. The
+dashboard's TUI crates are linked into the binary but imported only by
+`src/cli/dashboard.rs`, and the same pin proves they tax no other verb's startup.
 
 **The Rust rewrite decision was reversed (2026-09).** It was shelved when the trade was a ~2–10 ms
 Rust floor against a ~150–180 ms Python floor for a three-verb CLI a human invoked occasionally.
@@ -263,6 +269,21 @@ tests cited.
   adds a `foreign markdown` line when foreign files exist, and the payload **appends** a
   `notes_foreign` count — never mid-payload, per the append contract — so `notes: 0` beside a
   vault full of adopted files cannot read as blindness.
+
+- **Dashboard** — `mesh dashboard [--interval]` (default 2 s): a foreground, read-only, human-only
+  terminal view of the vault — one screen, four fixed panes (agents census incl. note
+  ownership/claims, tasks by ready/blocked/claimed, recent activity, vault health). Every number
+  comes from the same domain reads the CLI uses (`status_report`, `tasks::list`, the
+  recent-activity lens, the search-health line) — the dashboard adds no second source of truth.
+  Every refresh is a direct read (identical with no watcher); a failed refresh keeps the last
+  good frame with a dim status line, never a crash. Terminal restoration is a Drop guard, so
+  quit, error and the panic-catch all restore cooked mode, cursor and colors; no tty → exit 2
+  `dashboard needs a terminal`. Keys are minimal and read-only: `q`/Ctrl-C quit, `r` refresh, `m`
+  mine-only (seeds from the global `--mine`), `Tab` pane focus, arrows scroll the focused pane.
+  Not exposed over MCP (asserted). No lock, no signal handler: two dashboards are two harmless
+  readers. Pinned by `src/cli/dashboard.rs` unit tests (headless snapshot composition), the
+  `Session`/`FrameSource` seams, `tests/dashboard_cli.rs`, and the cold-start pin in
+  `tests/foundation_cli.rs` → § Performance.
 - **MCP** — stdio JSON-RPC, 40 `mesh_*` tools mirroring the safe verbs plus the read-only
   lenses, each carrying explicit read-only/idempotent/destructive hints with exactly one
   destructive tool (`mesh_task_cancel`). Withheld: every removal verb, asset ingest and gc, and

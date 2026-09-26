@@ -31,7 +31,8 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
 1. **One verb family per space.** `note`, `task`, `memory`, `scratch`, `asset` — plus `search`
    over any subset of them, read-only lenses (`recent-activity`, `build-context`, `graph`,
    `project`, `session-start`) and human-only admin (`init`, `status`, `reindex`, `watch`,
-   `config`, `completions`). No sixth space and no lens becomes a space without a spec change.
+   `dashboard`, `config`, `completions`). No sixth space and no lens becomes a space without a
+   spec change.
    → [tech.md](tech.md) § Implemented surfaces
 2. **Spaces are configuration, not layout.** Each space is a folder relative to the vault root,
    an absolute folder, the vault root itself, or disabled. The notes space may *be* the vault, so
