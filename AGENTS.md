@@ -72,7 +72,7 @@ process, or an external task tracker.
 |---|---|---|
 | **The vault folder** | One Markdown folder divided into five configurable spaces — source of truth | Mesh **owns writes** and direct reads inside the enabled space roots; it **coexists** with any other tool on the same folder (a Markdown editor and its plugins, another MCP server, git). If `[search].collection` is set, `mesh reindex` refreshes the whole configured vault through `indexed` — an initial ingest (`index create files`) when the collection is missing, an incremental `index update` when it exists — covering everything under the vault root, not just the spaces. Versioning, sync and backup are the vault owner's job, never mesh's |
 | **`indexed`** | First-party hybrid-search engine (ingest + embeddings + ranked retrieval, CLI/MCP) | Mesh's `search` is a thin wrapper with a 30 s wall clock; the mesh↔indexed contract is co-designed; a missing, failing or slow binary degrades to the built-in BM25-lite engine, never an error |
-| **Cowork agents** | Consumers (flights-agent, notes-agent, …) | Call mesh via CLI (`--json`) and the 37 `mesh_*` MCP tools |
+| **Cowork agents** | Consumers (flights-agent, notes-agent, …) | Call mesh via CLI (`--json`) and the 40 `mesh_*` MCP tools |
 | **`$MESH_AGENT`** | Per-session agent identity | Drives `--owner` defaults and `--mine`; validated against `[tasks].collections` across every space |
 | **`mesh watch`** | Optional foreground watcher: folder reconciliation + `indexed index update` | An accelerator, never a dependency — every command behaves identically with no watcher running |
 
@@ -118,7 +118,7 @@ cargo run -q -- --help                         # CLI help
 cargo install --path .                         # install `mesh` and `mesh-mcp`
 ```
 
-> The Rust rewrite delivers phases 1–3: five spaces, the live task dependency graph, the 37-tool
+> The Rust rewrite delivers phases 1–3: five spaces, the live task dependency graph, the 40-tool
 > MCP surface, and the daemon's removal. `mesh --version` prints `0.2.0`.
 
 **Lints are load-bearing.** `unwrap` / `expect` / `panic` / `todo` / `string_slice` are denied in
@@ -174,7 +174,7 @@ mesh/
     ├── domain/                      # the verbs + select/tags/owner/wikilinks/deps/lenses
     ├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
     ├── cli/                         # one file per verb family + globals, out, admin, watch, dashboard
-    └── mcp/                         # stdio JSON-RPC server, schemas, the 37-tool table
+    └── mcp/                         # stdio JSON-RPC server, schemas, the 40-tool table
 tests/                               # one integration file per verb family, plus
                                      #   compat_corpus, race, bundle, foundation_cli,
                                      #   review_regressions
