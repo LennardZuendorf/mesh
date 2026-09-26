@@ -1130,6 +1130,12 @@ pub struct SearchArgs {
     pub status: Option<String>,
     #[arg(long, value_name = "TEXT", help = "Filter by memory kind.")]
     pub kind: Option<String>,
+    #[arg(
+        long,
+        value_name = "TEXT",
+        help = "Scope hits to a project's envelope (id or slug)."
+    )]
+    pub project: Option<String>,
     #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
     pub space: Option<String>,
     #[arg(

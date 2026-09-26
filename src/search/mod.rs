@@ -13,12 +13,14 @@ pub mod indexed;
 pub mod tagpull;
 pub mod tokenize;
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
 use crate::config::Config;
+use crate::domain::lenses;
 use crate::domain::select::parse_csv;
 use crate::error::{MeshError, Result};
 use crate::fm::{read_body, Row};
@@ -92,6 +94,9 @@ pub struct SearchFilter {
     pub owner: Option<String>,
     pub status: Option<Vec<String>>,
     pub kind: Option<String>,
+    /// `--project`: scope hits to one project's envelope. The seed resolves before any
+    /// engine I/O; an unresolvable or foreign one is exit 3, never an empty page.
+    pub project: Option<String>,
     pub limit: i64,
     pub threshold: Option<f64>,
     pub engine: Engine,
@@ -107,6 +112,7 @@ impl Default for SearchFilter {
             owner: None,
             status: None,
             kind: None,
+            project: None,
             limit: 10,
             threshold: None,
             engine: Engine::Auto,
@@ -150,6 +156,9 @@ impl IndexOutcome {
 
 /// A ranked search. Returns the hits and the branch that produced them.
 pub fn query(cfg: &Config, q: &str, f: &SearchFilter) -> Result<(Vec<Hit>, Mode)> {
+    // The `--project` scope resolves here, before any engine I/O: an unresolvable id or a
+    // foreign seed is exit 3, never an empty page (product R3/R6).
+    let members = project_members(cfg, f)?;
     if wants_indexed(cfg, f.engine) {
         if let Some(collection) = cfg.search.collection.clone() {
             if indexed::available() {
@@ -160,6 +169,9 @@ pub fn query(cfg: &Config, q: &str, f: &SearchFilter) -> Result<(Vec<Hit>, Mode)
                 // uses below.
                 let threshold = f.threshold.unwrap_or(builtin::DEFAULT_THRESHOLD_FLOOR);
                 if let Ok(mut hits) = indexed::search(cfg, &collection, q, f, threshold) {
+                    // `indexed` fetched unbounded because the scope is an active filter; the
+                    // member filter runs before the display cap, never after it.
+                    retain_members(&mut hits, members.as_ref());
                     apply_limit(&mut hits, f.limit);
                     return Ok((hits, Mode::Indexed));
                 }
@@ -178,13 +190,57 @@ pub fn query(cfg: &Config, q: &str, f: &SearchFilter) -> Result<(Vec<Hit>, Mode)
     let threshold = f.threshold.unwrap_or(builtin::DEFAULT_THRESHOLD_FLOOR);
     let docs = corpus::docs(cfg, &f.spaces);
     let mut hits = builtin::search(&docs, q, f, threshold, f.engine.is_substring());
+    // Filter after scoring (so the ranking stays the corpus-wide one) and before the limit.
+    retain_members(&mut hits, members.as_ref());
     apply_limit(&mut hits, f.limit);
     Ok((hits, Mode::Builtin))
 }
 
 /// A tag pull: metadata only, `score = 1.0`, no snippet.
 pub fn tag_pull(cfg: &Config, f: &SearchFilter) -> Result<Vec<Hit>> {
-    tagpull::tag_pull(cfg, f)
+    let Some(members) = project_members(cfg, f)? else {
+        return tagpull::tag_pull(cfg, f);
+    };
+    // A scoped tag pull fetches unbounded and caps after the member filter, exactly like the
+    // indexed branch: `select`'s own limit would truncate before the filter and under-return.
+    let unbounded = SearchFilter {
+        limit: -1,
+        ..f.clone()
+    };
+    let mut hits = tagpull::tag_pull(cfg, &unbounded)?;
+    retain_members(&mut hits, Some(&members));
+    apply_limit(&mut hits, f.limit);
+    Ok(hits)
+}
+
+/// The member-id set a `--project` scope keeps, resolved **before** any engine I/O.
+///
+/// The rules are [`lenses::envelope_in`]'s — one membership walk, shared with the lens, so a
+/// scoped search and `mesh project` cannot disagree. The set is built over the envelope's
+/// spaces as this vault enables them (the lens's own default corpus): the scope is a property
+/// of the project, not of `--space`. A seed that does not resolve, or that names a foreign
+/// file, is `Err` here rather than a silent empty result.
+fn project_members(cfg: &Config, f: &SearchFilter) -> Result<Option<HashSet<String>>> {
+    let Some(project_id) = f.project.as_deref() else {
+        return Ok(None);
+    };
+    let spaces: Vec<Space> = lenses::PROJECT_SPACES
+        .iter()
+        .copied()
+        .filter(|space| cfg.root(*space).is_ok())
+        .collect();
+    Ok(Some(
+        lenses::envelope_in(cfg, project_id, &spaces)?.member_ids(),
+    ))
+}
+
+/// Keep only member hits. A hit with no id — foreign Markdown — is never a member: the
+/// envelope is a set of mesh ids.
+fn retain_members(hits: &mut Vec<Hit>, members: Option<&HashSet<String>>) {
+    let Some(members) = members else {
+        return;
+    };
+    hits.retain(|hit| hit.id.as_deref().is_some_and(|id| members.contains(id)));
 }
 
 /// The `--health` payload.
@@ -407,6 +463,64 @@ mod tests {
         cfg.search.threshold = 0.65;
         assert_eq!(resolve_effective_threshold(None, &cfg), Some(0.65));
         assert_eq!(resolve_effective_threshold(Some(0.2), &cfg), Some(0.2));
+    }
+
+    #[test]
+    fn a_project_scope_keeps_members_only_and_resolves_before_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_for(dir.path());
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let write = |id: &str, related: &str| {
+            std::fs::write(
+                notes.join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntype: note\ntitle: {id}\ntags: []\nowner: test-agent\n\
+                     created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+                     related: {related}\n---\n\nzebra body\n"
+                ),
+            )
+            .unwrap();
+        };
+        write("n-p", "[]");
+        write("n-linked", "[n-p]");
+        write("n-other", "[]");
+        let base = SearchFilter {
+            spaces: vec![Space::Notes],
+            engine: Engine::Substring,
+            quiet: true,
+            limit: -1,
+            threshold: resolve_effective_threshold(None, &cfg),
+            ..SearchFilter::default()
+        };
+        // The seed outscores the member and is still not a member of its own envelope.
+        let (hits, _) = query(
+            &cfg,
+            "zebra",
+            &SearchFilter {
+                project: Some("n-p".into()),
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        let ids: Vec<&str> = hits.iter().filter_map(|h| h.id.as_deref()).collect();
+        assert_eq!(ids, ["n-linked"]);
+        // Every note still matches without the scope.
+        let (all, _) = query(&cfg, "zebra", &base).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // A seed that does not resolve is exit 3 before any engine work.
+        let err = query(
+            &cfg,
+            "zebra",
+            &SearchFilter {
+                project: Some("n-nope".into()),
+                ..base
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert_eq!(err.to_string(), "project not found: n-nope");
     }
 
     #[test]

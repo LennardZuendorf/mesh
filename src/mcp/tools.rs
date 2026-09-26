@@ -990,6 +990,8 @@ impl Server {
                 None => None,
             },
             kind: a.str("kind")?,
+            // `--project` reaches the MCP surface in project-envelope/5.
+            project: None,
             limit: a.int_or("limit", 10)?,
             threshold: search::resolve_effective_threshold(a.num("threshold")?, cfg),
             engine,

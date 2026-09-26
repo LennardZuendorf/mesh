@@ -65,27 +65,99 @@ pub fn project_view_in(
     project_id: &str,
     spaces: &[Space],
 ) -> Result<serde_json::Value> {
-    let note = if spaces.contains(&Space::Notes) {
-        crate::domain::notes::get(cfg, project_id).ok()
-    } else {
-        None
-    };
-    let Some(view) = note else {
-        return Err(MeshError::ProjectNotFound(project_id.to_string()));
-    };
+    let envelope = envelope_in(cfg, project_id, spaces)?;
     let project = render::entry(
-        &view.item.meta,
+        &envelope.project.item.meta,
         NOTE_FIELDS.fields(),
         None,
-        Some(&view.path),
+        Some(&envelope.project.path),
     );
-    // Membership reads the *resolved* id, never the caller's string: `related` and `project`
-    // are written by mesh as ids, so a slug seed still finds its envelope.
-    let resolved = view.item.id.as_str();
-    let mut tasks: Vec<Json> = Vec::new();
-    // A disabled tasks space is already filtered out of `spaces` upstream — a lens narrows
-    // its corpus, it does not fail (README §config). Any *other* listing failure is still an
-    // error: `unwrap_or_default` used to report it as "this project has no tasks".
+    let tasks: Vec<Json> = envelope
+        .tasks
+        .iter()
+        .map(|view| {
+            render::entry(
+                &view.item.meta,
+                TASK_FIELDS.fields(),
+                None,
+                Some(&view.path),
+            )
+        })
+        .collect();
+    let notes: Vec<Json> = envelope
+        .notes
+        .iter()
+        .map(|view| {
+            render::entry(
+                &view.item.meta,
+                NOTE_FIELDS.fields(),
+                None,
+                Some(&view.path),
+            )
+        })
+        .collect();
+    let memories: Vec<Json> = envelope
+        .memories
+        .iter()
+        .map(|view| {
+            render::entry(
+                &view.item.meta,
+                MEMORY_FIELDS.fields(),
+                None,
+                Some(&view.path),
+            )
+        })
+        .collect();
+    let mut out = Map::new();
+    out.insert("project".to_string(), project);
+    out.insert("tasks".to_string(), Json::Array(tasks));
+    out.insert("notes".to_string(), Json::Array(notes));
+    out.insert("memories".to_string(), Json::Array(memories));
+    Ok(Json::Object(out))
+}
+
+/// One project's envelope: the seed note plus its member lists, one rule per space.
+///
+/// The rows are exactly what [`project_view_in`] renders, and the lists are the same ones the
+/// search `--project` scope filters hits against — one membership walk, so the lens and a
+/// scoped search cannot drift (the one-primitive rule).
+#[derive(Debug)]
+pub struct Envelope {
+    /// The resolved seed note (an `n-` id or a title slug).
+    pub project: View<Note>,
+    /// Tasks whose raw `project` is the **caller's** string — the lens's task rule.
+    pub tasks: Vec<View<Task>>,
+    /// Notes whose stored `related` names the resolved id, the seed itself excluded.
+    pub notes: Vec<View<Note>>,
+    /// Memories whose `project` is the resolved id.
+    pub memories: Vec<View<Memory>>,
+}
+
+impl Envelope {
+    /// Every member id, across the three envelope spaces — the set a `--project` filter keeps.
+    pub fn member_ids(&self) -> HashSet<String> {
+        self.tasks
+            .iter()
+            .map(|view| view.item.id.clone())
+            .chain(self.notes.iter().map(|view| view.item.id.clone()))
+            .chain(self.memories.iter().map(|view| view.item.id.clone()))
+            .collect()
+    }
+}
+
+/// Resolve `project_id` and collect its envelope over `spaces`.
+///
+/// Membership reads the *resolved* id for notes and memories, never the caller's string:
+/// `related` and `project` are written by mesh as ids, so a slug seed still finds its
+/// envelope. Tasks keep the raw-string rule the lens has always applied. Each space
+/// contributes only when it is in `spaces` — a lens narrows its corpus, it does not fail.
+pub fn envelope_in(cfg: &Config, project_id: &str, spaces: &[Space]) -> Result<Envelope> {
+    let project = resolve_project_in(cfg, project_id, spaces)?;
+    let resolved = project.item.id.clone();
+
+    let mut tasks: Vec<View<Task>> = Vec::new();
+    // Any *other* listing failure is still an error: `unwrap_or_default` would report it as
+    // "this project has no tasks".
     if spaces.contains(&Space::Tasks) {
         let filter = Filter {
             limit: None,
@@ -93,44 +165,34 @@ pub fn project_view_in(
             ..Filter::default()
         }
         .with_extra("project", Some(project_id));
-        for task in crate::domain::tasks::list(cfg, &filter, Availability::Any)? {
-            tasks.push(render::entry(
-                &task.item.meta,
-                TASK_FIELDS.fields(),
-                None,
-                Some(&task.path),
-            ));
-        }
+        tasks = crate::domain::tasks::list(cfg, &filter, Availability::Any)?;
     }
+
     // Notes join by containment of their stored `related` list. The predicate is not
     // expressible as `Filter.extra` (that is scalar equality), so it is applied here, over
     // the same rows every other listing reads. The seed note is skipped: a task is never a
     // member of its own envelope either (the seed gate resolves the project as a note, so a
     // task id can never be the seed), and containment alone would otherwise admit a
     // self-link.
-    let mut notes: Vec<Json> = Vec::new();
+    let mut notes: Vec<View<Note>> = Vec::new();
     if spaces.contains(&Space::Notes) {
         let filter = Filter {
             limit: None,
             sort: SortKey::Updated,
             ..Filter::default()
         };
-        for linked in crate::domain::notes::list(cfg, &filter, false)? {
-            if linked.item.id == resolved || !linked.item.related.iter().any(|r| r == resolved) {
-                continue;
-            }
-            notes.push(render::entry(
-                &linked.item.meta,
-                NOTE_FIELDS.fields(),
-                None,
-                Some(&linked.path),
-            ));
-        }
+        notes = crate::domain::notes::list(cfg, &filter, false)?
+            .into_iter()
+            .filter(|linked| {
+                linked.item.id != resolved && linked.item.related.iter().any(|r| r == &resolved)
+            })
+            .collect();
     }
+
     // Memories join by `project` equality. The listing defaults apply (live, un-superseded,
     // visible to the effective agent) — the lens reads the same rows every other memory
     // listing reads, and invents no membership policy of its own.
-    let mut memories: Vec<Json> = Vec::new();
+    let mut memories: Vec<View<Memory>> = Vec::new();
     if spaces.contains(&Space::Memories) {
         let filter = Filter {
             limit: None,
@@ -139,24 +201,44 @@ pub fn project_view_in(
             ..Filter::default()
         };
         let opts = crate::domain::memories::ListMemoryOpts::default();
-        for tagged in crate::domain::memories::list(cfg, &filter, &opts)? {
-            if tagged.item.project.as_deref() != Some(resolved) {
-                continue;
-            }
-            memories.push(render::entry(
-                &tagged.item.meta,
-                MEMORY_FIELDS.fields(),
-                None,
-                Some(&tagged.path),
-            ));
-        }
+        memories = crate::domain::memories::list(cfg, &filter, &opts)?
+            .into_iter()
+            .filter(|tagged| tagged.item.project.as_deref() == Some(resolved.as_str()))
+            .collect();
     }
-    let mut out = Map::new();
-    out.insert("project".to_string(), project);
-    out.insert("tasks".to_string(), Json::Array(tasks));
-    out.insert("notes".to_string(), Json::Array(notes));
-    out.insert("memories".to_string(), Json::Array(memories));
-    Ok(Json::Object(out))
+
+    Ok(Envelope {
+        project,
+        tasks,
+        notes,
+        memories,
+    })
+}
+
+/// The project seed, resolved the one way every lens resolves it: an id or title slug point
+/// read over the notes space.
+///
+/// A miss is `ProjectNotFound`; a string that names a file `search` can see but mesh never
+/// authored is `SeedForeign` — the gate `build-context` and `graph` already share, so a
+/// foreign workstream stays unaddressable until adoption and never reads as a typo.
+fn resolve_project_in(cfg: &Config, project_id: &str, spaces: &[Space]) -> Result<View<Note>> {
+    if !spaces.contains(&Space::Notes) {
+        return Err(MeshError::ProjectNotFound(project_id.to_string()));
+    }
+    match crate::domain::notes::get(cfg, project_id) {
+        Ok(view) => Ok(view),
+        Err(point_read) => Err(project_seed_error(cfg, project_id, &point_read)),
+    }
+}
+
+/// The failure for an unresolvable project seed, carrying the point-read's near-miss
+/// candidates so the JSON envelope names them.
+fn project_seed_error(cfg: &Config, project_id: &str, point_read: &MeshError) -> MeshError {
+    if crate::domain::notes::find_foreign(cfg, project_id).is_some() {
+        return MeshError::SeedForeign(project_id.to_string());
+    }
+    MeshError::ProjectNotFound(project_id.to_string())
+        .with_candidates(point_read.candidates().to_vec())
 }
 
 // --------------------------------------------------------------------------------------------
@@ -855,6 +937,61 @@ mod tests {
         let err = project_view(&cfg, "n-nope").unwrap_err();
         assert_eq!(err.code(), 3);
         assert_eq!(err.to_string(), "project not found: n-nope");
+    }
+
+    #[test]
+    fn envelope_member_ids_are_the_lens_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_for(dir.path());
+        note(dir.path(), "n-p", "Proj", "test-agent", "x");
+        fs::write(
+            dir.path().join("notes/n-linked.md"),
+            "---\nid: n-linked\ntype: note\ntitle: Linked\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated:\n  - n-p\n\
+             ---\n\nx\n",
+        )
+        .unwrap();
+        task_file(dir.path(), "t-a", "open", "test-agent", "null", "n-p");
+        task_file(
+            dir.path(),
+            "t-other",
+            "open",
+            "test-agent",
+            "null",
+            "n-elsewhere",
+        );
+        let payload = project_view(&cfg, "n-p").unwrap();
+        let from_the_lens: HashSet<String> = ["tasks", "notes", "memories"]
+            .iter()
+            .flat_map(|key| ids(payload[key].as_array().unwrap()))
+            .collect();
+        assert_eq!(
+            from_the_lens,
+            HashSet::from(["n-linked".to_string(), "t-a".to_string()])
+        );
+        // The search `--project` scope reads the same walk, never a second one.
+        let envelope = envelope_in(&cfg, "n-p", &PROJECT_SPACES).unwrap();
+        assert_eq!(envelope.member_ids(), from_the_lens);
+    }
+
+    #[test]
+    fn an_unresolvable_seed_carries_candidates_and_a_foreign_one_is_not_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_for(dir.path());
+        note(dir.path(), "n-p", "Proj", "test-agent", "x");
+        let err = envelope_in(&cfg, "n-nope", &PROJECT_SPACES).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert_eq!(err.to_string(), "project not found: n-nope");
+        assert_eq!(err.candidates(), ["n-p"]);
+
+        fs::write(
+            dir.path().join("notes/ndc.md"),
+            "---\ntype: Project\ntitle: NDC Rollout Status\n---\n\nforeign workstream\n",
+        )
+        .unwrap();
+        let err = envelope_in(&cfg, "ndc", &PROJECT_SPACES).unwrap_err();
+        assert_eq!(err.code(), 3);
+        assert_eq!(err.to_string(), "seed is not mesh-native (no mesh id): ndc");
     }
 
     #[test]

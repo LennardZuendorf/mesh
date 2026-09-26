@@ -43,6 +43,9 @@ pub fn run(ctx: &mut Ctx, args: SearchArgs) -> Result<()> {
             None => None,
         },
         kind: args.kind,
+        // `--project` scopes hits to one envelope; `search::query`/`tag_pull` resolve the seed
+        // before any engine work, so a bad one is exit 3 rather than an empty page.
+        project: args.project,
         limit: args.limit,
         threshold: search::resolve_effective_threshold(args.threshold, cfg),
         engine,

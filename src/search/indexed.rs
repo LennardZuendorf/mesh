@@ -329,6 +329,9 @@ fn filters_any(f: &SearchFilter) -> bool {
         || f.status.is_some()
         || f.kind.is_some()
         || f.owner.is_some()
+        // `--project` filters by membership after the fetch (`search::query`), so it
+        // under-returns exactly like the others unless the fetch is unbounded too.
+        || f.project.is_some()
 }
 
 /// Query `indexed`, then sandbox-check, re-read and filter every hit it returned.
@@ -407,6 +410,17 @@ mod tests {
             path: PathBuf::from("/v/x.md"),
             space: Space::Notes,
         }
+    }
+
+    #[test]
+    fn a_project_scope_forces_the_unbounded_fetch() {
+        // `--project` is applied by `search::query` after this fetch, so it under-returns
+        // unless the fetch is unbounded like every other active filter.
+        assert!(filters_any(&SearchFilter {
+            project: Some("n-p".into()),
+            ..SearchFilter::default()
+        }));
+        assert!(!filters_any(&SearchFilter::default()));
     }
 
     #[test]

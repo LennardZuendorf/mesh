@@ -1273,6 +1273,7 @@ fn search_help_lists_the_whole_flag_surface() {
         "--meta-only",
         "--full",
         "--health",
+        "--project",
     ] {
         assert!(text.contains(flag), "{flag} missing from help");
     }
@@ -1293,4 +1294,337 @@ fn the_payload_path_is_the_file_on_disk() {
     let got = hits(&f, &["search", "--space", "memories"]);
     let path = PathBuf::from(got[0]["path"].as_str().expect("path string"));
     assert!(path.is_file(), "{path:?}");
+}
+
+// ---------------------------------------------------------------- project scoping
+
+/// A vault holding one project envelope: the seed, members in the three envelope spaces,
+/// non-members that match the same query in each, and an asset that is never a member.
+///
+/// Every body says `pricing`, so every entity matches the query and only membership decides
+/// what a scoped search returns.
+fn project_envelope(cfg: &str) -> VaultFixture {
+    let f = VaultFixture::with(cfg);
+    scoped_note(&f, "n-PROJ", &[]);
+    scoped_note(&f, "n-MEMB", &["n-PROJ"]);
+    scoped_note(&f, "n-MEMB2", &["n-PROJ"]);
+    scoped_note(&f, "n-OTHER", &["n-elsewhere"]);
+    scoped_task(&f, "t-MEMB", "open", "n-PROJ", &["b"]);
+    scoped_task(&f, "t-DONE", "done", "n-PROJ", &[]);
+    scoped_task(&f, "t-OPEN", "open", "null", &["b"]);
+    scoped_memory(&f, "m-MEMB", "n-PROJ");
+    scoped_memory(&f, "m-OTHER", "");
+    f.write(
+        "assets/a-ONE.md",
+        "---\nid: a-ONE\ntype: asset\ntitle: pricing asset\nfilename: p.png\n\
+         updated: 2026-02-01T00:00:00Z\n---\n\npricing body\n",
+    );
+    f
+}
+
+fn scoped_note(f: &VaultFixture, id: &str, related: &[&str]) {
+    f.write(
+        &format!("notes/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: note\ntitle: {id} note\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+             related:{}\n---\n\npricing body\n",
+            yaml_list(related)
+        ),
+    );
+}
+
+fn scoped_task(f: &VaultFixture, id: &str, status: &str, project: &str, tags: &[&str]) {
+    let folder = if status == "done" { "done" } else { "open" };
+    f.write(
+        &format!("tasks/{folder}/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: task\ntitle: {id} task\nstatus: {status}\ntags:{}\n\
+             owner: test-agent\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+             related: []\npriority: null\nclaimed_by: null\nproject: {project}\nblocks: []\n\
+             blocked_by: []\n---\n\npricing body\n",
+            yaml_list(tags)
+        ),
+    );
+}
+
+fn scoped_memory(f: &VaultFixture, id: &str, project: &str) {
+    let project_line = if project.is_empty() {
+        String::new()
+    } else {
+        format!("project: {project}\n")
+    };
+    f.write(
+        &format!("memories/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: memory\ntitle: {id} memory\ntags: []\nowner: null\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n\
+             kind: fact\nscope: shared\n{project_line}importance: 3\nsource: null\n\
+             expires: null\nsuperseded_by: null\n---\n\npricing body\n"
+        ),
+    );
+}
+
+fn yaml_list(items: &[&str]) -> String {
+    if items.is_empty() {
+        " []".to_string()
+    } else {
+        format!(
+            "\n{}",
+            items
+                .iter()
+                .map(|item| format!("  - {item}\n"))
+                .collect::<String>()
+        )
+    }
+}
+
+fn sorted_ids(hits: &[Json]) -> Vec<String> {
+    let mut out = ids(hits);
+    out.sort();
+    out
+}
+
+#[test]
+fn a_scoped_search_returns_only_envelope_members() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    let got = hits(
+        &f,
+        &[
+            "search",
+            "pricing",
+            "--project",
+            "n-PROJ",
+            "--engine",
+            "builtin",
+            "--limit=-1",
+            "--quiet",
+        ],
+    );
+    // Notes by `related` containment, tasks and memories by `project` equality.
+    assert_eq!(
+        sorted_ids(&got),
+        ["m-MEMB", "n-MEMB", "n-MEMB2", "t-DONE", "t-MEMB"]
+    );
+    // The seed itself outscores every member and is still not a member of its own envelope.
+    assert!(!ids(&got).contains(&"n-PROJ".to_string()));
+}
+
+#[test]
+fn a_scoped_search_composes_with_tags_and_status() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    // Tag `b` and status `open` together: the member task survives, the non-member that
+    // carries both attributes stays out.
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--tags",
+                "b",
+                "--status",
+                "open",
+                "--limit=-1",
+                "--quiet",
+            ]
+        )),
+        ["t-MEMB"]
+    );
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--status",
+                "done",
+                "--limit=-1",
+                "--quiet",
+            ]
+        )),
+        ["t-DONE"]
+    );
+    // A conjunction that matches nothing is an empty page, never an error.
+    assert!(hits(
+        &f,
+        &[
+            "search",
+            "pricing",
+            "--project",
+            "n-PROJ",
+            "--tags",
+            "no-such-tag",
+            "--limit=-1",
+            "--quiet",
+        ]
+    )
+    .is_empty());
+}
+
+#[test]
+fn a_scoped_tag_pull_keeps_members_only() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &["search", "--project", "n-PROJ", "--tags", "b", "--limit=-1"]
+        )),
+        ["t-MEMB"]
+    );
+}
+
+#[test]
+fn the_space_flag_narrows_the_corpus_not_the_envelope() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--space",
+                "notes",
+                "--limit=-1",
+                "--quiet",
+            ]
+        )),
+        ["n-MEMB", "n-MEMB2"]
+    );
+    // An asset is never an envelope member, so a project-scoped asset search is an empty
+    // page — the envelope is a property of the project, not of the space flag.
+    assert!(!hits(
+        &f,
+        &["search", "pricing", "--space", "assets", "--limit=-1"]
+    )
+    .is_empty());
+    assert!(hits(
+        &f,
+        &[
+            "search",
+            "pricing",
+            "--project",
+            "n-PROJ",
+            "--space",
+            "assets",
+            "--limit=-1",
+            "--quiet",
+        ]
+    )
+    .is_empty());
+}
+
+#[test]
+fn a_scoped_indexed_search_fetches_unbounded_filters_then_caps() {
+    let f = project_envelope(&hybrid_config());
+    // More hits than the display limit, with non-members ranked above the members: asking
+    // `indexed` for `--limit 2` would fill the page with rows the envelope excludes.
+    f.fake_indexed(&envelope_for(
+        &f,
+        &[
+            ("notes/n-OTHER.md", 0.95, None),
+            ("notes/n-PROJ.md", 0.90, None),
+            ("notes/n-MEMB.md", 0.80, None),
+            ("notes/n-MEMB2.md", 0.70, None),
+            ("memories/m-MEMB.md", 0.60, None),
+            ("memories/m-OTHER.md", 0.50, None),
+        ],
+    ));
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--limit",
+                "2",
+                "--threshold",
+                "0",
+            ]
+        )),
+        ["n-MEMB", "n-MEMB2"]
+    );
+    // The fetch itself was unbounded, and the display cap came after the member filter.
+    assert!(
+        f.indexed_argv()
+            .iter()
+            .all(|line| line.ends_with("--limit -1")),
+        "{:?}",
+        f.indexed_argv()
+    );
+    // The scope composes with the other filters on this branch too.
+    f.fake_indexed(&envelope_for(
+        &f,
+        &[
+            ("tasks/open/t-OPEN.md", 0.90, None),
+            ("tasks/open/t-MEMB.md", 0.80, None),
+        ],
+    ));
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--tags",
+                "b",
+                "--limit=-1",
+                "--threshold",
+                "0",
+            ]
+        )),
+        ["t-MEMB"]
+    );
+}
+
+#[test]
+fn an_unknown_project_exits_three_with_the_not_found_envelope_and_candidates() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    let out = run(&f, &["search", "--project", "n-NOPE", "pricing"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(stderr_of(&out).trim_end(), "project not found: n-NOPE");
+    assert_eq!(stdout_of(&out), "");
+
+    let out = run(&f, &["--json", "search", "--project", "n-NOPE", "pricing"]);
+    assert_eq!(out.status.code(), Some(3));
+    let payload: Json = serde_json::from_str(stderr_of(&out).trim()).expect("json envelope");
+    assert_eq!(payload["kind"], Json::String("not_found".into()));
+    assert_eq!(
+        payload["message"],
+        Json::String("project not found: n-NOPE".into())
+    );
+    assert!(
+        payload["candidates"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|id| id == "n-PROJ")),
+        "{payload}"
+    );
+}
+
+#[test]
+fn a_foreign_project_seed_is_never_a_project() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    f.write(
+        "notes/ndc-rollout-status.md",
+        "---\ntype: Project\ntitle: NDC Rollout Status\n---\n\nforeign workstream\n",
+    );
+    let out = run(
+        &f,
+        &["search", "--project", "ndc-rollout-status", "pricing"],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        stderr_of(&out).trim_end(),
+        "seed is not mesh-native (no mesh id): ndc-rollout-status"
+    );
 }

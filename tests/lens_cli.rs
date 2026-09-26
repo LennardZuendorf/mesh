@@ -1365,6 +1365,52 @@ fn project_reports_an_unknown_id_as_not_found() {
 }
 
 #[test]
+fn project_not_found_carries_the_near_miss_candidates() {
+    let fixture = VaultFixture::new();
+    note(
+        &fixture,
+        "n-PROJ",
+        "Pricing Workstream",
+        "test-agent",
+        &[],
+        "pricing body",
+    );
+    let out = fixture
+        .cmd()
+        .args(["--json", "project", "n-nope"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(3));
+    let payload: Json = serde_json::from_str(stderr_of(&out).trim()).expect("json envelope");
+    assert_eq!(payload["kind"], Json::String("not_found".into()));
+    assert!(
+        payload["candidates"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|id| id == "n-PROJ")),
+        "{payload}"
+    );
+}
+
+#[test]
+fn project_seed_naming_a_foreign_file_is_not_mesh_native() {
+    let fixture = VaultFixture::new();
+    fixture.write(
+        "notes/ndc-rollout-status.md",
+        "---\ntype: Project\ntitle: NDC Rollout Status\n---\n\nforeign workstream\n",
+    );
+    let out = fixture
+        .cmd()
+        .args(["project", "ndc-rollout-status"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        stderr_of(&out).trim(),
+        "seed is not mesh-native (no mesh id): ndc-rollout-status"
+    );
+}
+
+#[test]
 fn project_matches_the_python_golden() {
     let fixture = corpus();
     let out = fixture

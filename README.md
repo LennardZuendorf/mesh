@@ -428,7 +428,7 @@ an image tool. `asset remove` on a still-referenced asset is exit 2 unless you p
 
 ```
 mesh search [QUERY] [--type T] [--tags CSV]... [--owner O] [--status CSV] [--kind K]
-            [--space CSV] [--engine auto|indexed|builtin|substring] [--limit 10]
+            [--project ID] [--space CSV] [--engine auto|indexed|builtin|substring] [--limit 10]
             [--threshold F] [--meta-only] [--full] [--health]
 ```
 
@@ -437,6 +437,10 @@ every tag is ANDed; `--status` is a CSV union whose unknown value is exit 2, exa
 `task list`. With no query it becomes an exact tag pull (`score = 1.0`, metadata only). Hit keys,
 in order: `id`, `type`, `title`, `score`, `path` always; then `tags`, `owner`, `updated`,
 `snippet` and `space` when they apply. There is no `body` key — `--full` overloads `snippet`.
+`--project ID` scopes hits to one project's envelope — its notes, tasks and memories, by the
+same rules `mesh project` reports. The seed resolves before any engine work: an id that does not
+resolve exits 3 with `candidates`, and a foreign file answers
+`seed is not mesh-native (no mesh id)`.
 
 Engines:
 
