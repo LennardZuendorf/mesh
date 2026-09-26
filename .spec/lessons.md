@@ -184,3 +184,9 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** when a wrapper degrades by design, a green exit proves nothing about the wrapped call: verify the happy path end-to-end against the real dependency before calling the wiring done. Never route a non-interactive caller through an interactive verb — if the dependency prompts on an existing resource, pick the non-interactive sibling (`index update`, not `index create`), because no timeout budget fixes a prompt that will never be answered. Pin the routing in a stub fixture so the contract cannot drift back.
 **Tags:** search, indexed, wrapper, degrade, prompts, wiring, verification
 **Date:** 2026-09-25
+
+### A merge block drafted before the code is a claim to re-verify
+**Pattern:** the project-envelope feature tech.md carried a pre-written `<!-- merge -->` block listing the memory per-space additions as `kind, scope, importance, source, project, …`, but the landed model declares `project` directly after `scope` (exactly as the same file's Files section specified). Compounding the block verbatim would have written a field order into the root spec that the code does not have.
+**Rule:** treat a pre-written merge block as a draft, never as scripture: at wrap-up, re-verify every concrete claim it makes — orders, counts, names — against the landed code before promoting it into the root layer. Code is truth, and the root spec must never describe an ordering the model does not declare.
+**Tags:** spec, compounding, merge-blocks, field-order, code-is-truth
+**Date:** 2026-09-26

@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-09-25
+updated: 2026-09-26
 ---
 
 # Mesh — Technical Architecture
@@ -170,7 +170,7 @@ is the frontmatter id, never the stem: an adopted file keeps its foreign filenam
 | Space | Adds |
 |---|---|
 | tasks | `status` (open|claimed|done|cancelled), `priority`, `claimed_by`, `project`, `blocks`, `blocked_by` — readiness derived from both directions |
-| memories | `kind`, `scope`, `importance`, `source`, `expires`, `superseded_by` |
+| memories | `kind`, `scope`, `project` (optional raw string mirroring the task field — workstream-envelope membership; the shared/private `scope` axis is untouched), `importance`, `source`, `expires`, `superseded_by` |
 | scratch | `type`, `name`, `agent`, `tags`, `created`, `updated` — name-addressed, no id |
 | assets | `filename`, `media_type`, `bytes`, `sha256`, `blob` on the sidecar; the blob is written first |
 
@@ -203,6 +203,22 @@ tests cited.
   `tests/race.rs` (8-way real-process claim race), `tests/review_regressions.rs`, and the MCP
   parity tests (`src/mcp/`, `tests/mcp_cli.rs`, `tests/bundle.rs`).
 
+- **Project envelope** — one membership rule per space, all read-time: tasks by `project`
+  equality, notes by `related` containment (the stored, wikilink-backfilled list), memories by
+  `project` equality over the optional field. The `project` lens appends the `notes` then
+  `memories` sections last (append contract, pinned key order); `search --project` and
+  `memory recall --project` scope to the members — recall as an eligibility filter before the
+  unchanged ranking rules, search as an active filter on both engine branches (built-in: after
+  scoring, before `--limit`; `indexed`: unbounded fetch, post-filter, display cap, the tag pull
+  included) — and both compose with every other filter as a plain conjunction; a zero-row
+  conjunction is an empty result, never an error. Membership reads the envelope spaces the vault
+  enables, so `--space` narrows the corpus, never the envelope. MCP carries the `project` param
+  on `mesh_search`, `mesh_memory_recall` and the memory write tools with CLI-identical
+  semantics; the tool count stays 40. The seed gate is unchanged and shared by lens, search and
+  recall: an unknown id → exit 3 with candidates; a foreign seed → `seed is not mesh-native`.
+  Unknown and dangling `project` values stay tolerated (zero-member envelopes) — a read-time
+  join, never a validated reference. Pinned by `tests/{lens,search,memory,mcp}_cli.rs`.
+
 - **Wikilinks** — `[[Title]]` → id by title match against the notes index; `[[n-id]]`/`[[t-id]]`/
   `[[m-id]]`/`[[a-id]]` pass through; alias and anchor forms (`|`, `#`, `^`) strip at the lookup
   boundary; `related` is deduped; unresolvable links are dangling and counted by `mesh status`.
@@ -217,7 +233,9 @@ tests cited.
   comma-split and ANDed, `--status` is a membership union whose unknown value is exit 2, the same
   rule `task list` obeys. Under an active filter the `indexed` fetch is unbounded and `--limit` is
   a display cap applied after filtering, so a filtered page is never short of rows that were
-  simply never fetched.
+  simply never fetched. `--project` scopes the corpus to one project's envelope members
+  (→ Project envelope): the seed resolves through the shared gate before any engine I/O, and the
+  member filter composes with every other filter as a plain conjunction.
 - **Tasks** — atomic `O_EXCL` claim; idempotent release/finish/cancel that never rewrite a
   no-op and that report the status they *found*, not the one asked for; `--available` unchanged
   and dependency-blind; `--ready`/`--blocked` are the dependency-aware filters; a strict claim on
@@ -252,8 +270,8 @@ tests cited.
   instructions block is sent on connect and degrades to naming `mesh init`. Failures cross as
   the structured error envelope, never a trace.
 - **Session lenses** — `recent-activity`, `build-context`, `graph` (`--direction in|out|both`,
-  inbound index inverted at read time), `project` (a `type: project` note plus every task
-  pointing at it), and `session-start` (tasks → mentions → memories → activity, deduped by id,
+  inbound index inverted at read time), `project` (the workstream envelope — the `type: project`
+  note plus the notes, tasks and memories that belong to it; → Project envelope), and `session-start` (tasks → mentions → memories → activity, deduped by id,
   a `reason` on every entry, `--team` widening only the activity half, `--budget` trimming bodies
   before entries and recording the drop). All are read-only and accept a space filter. `--mine`
   resolves against the **acting** identity — `--owner` when given, else `[core].agent` — on every

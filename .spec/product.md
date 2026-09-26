@@ -5,7 +5,7 @@ children:
   - tech.md
   - design.md
   - plan.md
-updated: 2026-09-25
+updated: 2026-09-26
 ---
 
 # Mesh — Product
@@ -45,8 +45,9 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
    `finish` / `cancel` / `list`, plus `blocks` / `blocked_by` readiness derived at read time,
    `block` / `unblock`, a strict claim gate and `task next`. Phase 3 is delivered.
 5. **Memories are recall, not a memory subsystem.** Note-shaped Markdown files with a kind,
-   scope, importance, optional source, soft expiry and supersession; recall ranks by match,
-   importance and recency. Nothing is ever deleted automatically.
+   scope, importance, optional source, soft expiry and supersession, and an optional `project`
+   that joins a memory to a workstream envelope; recall ranks by match, importance and recency,
+   and `--project` scopes it to one envelope. Nothing is ever deleted automatically.
 6. **Hybrid recall via `indexed`.** Ranked search over the configured spaces; a built-in ranked
    engine when `indexed` is absent, and a substring mode that reproduces the legacy scoring.
 7. **`$MESH_AGENT` identity.** Defaults `--owner`, drives `--mine`, validated against

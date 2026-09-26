@@ -3,7 +3,7 @@ type: feature-plan
 feature: dashboard-tui
 sibling: tech.md
 parent: ../../plan.md
-updated: 2026-09-25
+updated: 2026-09-26
 ---
 
 # Feature: Dashboard TUI — Implementation Plan
@@ -17,9 +17,9 @@ everything meaningful is testable without a tty.
 **Architecture:** [tech.md](tech.md)
 **Design:** [design.md](design.md)
 
-**Feature gate:** none — independent of note-adoption and
-[project-envelope](../project-envelope/plan.md); may run in parallel. Its agents pane is richer
-once note-adoption lands, but it reads whatever the census reports.
+**Feature gate:** none — independent of note-adoption and project-envelope (both DONE and
+compounded into [root tech.md](../../tech.md) § Implemented surfaces); may run in parallel. Its
+agents pane is richer once note-adoption lands, but it reads whatever the census reports.
 
 ---
 
