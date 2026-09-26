@@ -23,10 +23,12 @@ path = "src/bin/mesh-mcp.rs"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.5", features = ["derive", "env", "wrap_help", "string"] }
 clap_complete = "4.5"
+crossterm = "0.29"
 dirs = "6"
 indexmap = { version = "2", features = ["serde"] }
 notify = "8"
 notify-debouncer-full = "0.6"
+ratatui = "0.30"
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

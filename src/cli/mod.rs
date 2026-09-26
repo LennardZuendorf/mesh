@@ -6,6 +6,7 @@
 
 pub mod admin;
 pub mod asset;
+pub mod dashboard;
 pub mod globals;
 pub mod lens;
 pub mod memory;
