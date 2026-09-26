@@ -214,7 +214,7 @@ mesh [--version] [--json] [--quiet] [--owner ID] [--mine] [--config PATH] [--vau
 
 `--json`, `--quiet`, `--owner` and `--mine` are accepted **on either side of the command name**
 on every non-admin command, with identical effect. Admin commands (`init`, `status`, `reindex`,
-`watch`, `config`, `completions`, `mcp`) take them on the global side only.
+`watch`, `dashboard`, `config`, `completions`, `mcp`) take them on the global side only.
 
 **Output classes.** Every command declares one, so precedence is never a guess:
 
@@ -489,6 +489,7 @@ every entry; `--budget N` trims bodies first, then whole entries, and records th
 final `{"reason": "truncated", "dropped": N}` entry.
 
 Admin: `mesh init`, `mesh status`, `mesh reindex`, `mesh watch`,
+`mesh dashboard` (a live read-only terminal screen over the vault; `q` quits),
 `mesh config {path,show,get,set}`, `mesh completions SHELL`, `mesh mcp`. `mesh status` is
 strictly read-only and reports counts per space, freshness, dangling links (capped at 50, with
 the real total alongside), stale locks, the per-agent claim breakdown, the dependency summary
@@ -583,8 +584,9 @@ annotations (RO = read-only, IDEM = idempotent):
 `mesh_task_cancel` is the **only** destructive tool, which is exactly why every removal verb is
 withheld. **Not exposed over MCP:** `note delete`, `task delete`, `memory forget`,
 `scratch clear`, `asset remove`, `asset add` (it reads an arbitrary filesystem path — a human
-act), `asset gc`, and all admin (`init`, `status`, `reindex`, `watch`, `config`, `completions`,
-`daemon`). No registered tool name contains `delete`, `daemon`, `reindex` or `status`. Failures
+act), `asset gc`, and all admin (`init`, `status`, `reindex`, `watch`, `dashboard`, `config`,
+`completions`, `daemon`). No registered tool name contains `delete`, `daemon`, `reindex` or
+`status`. Failures
 cross as the same structured envelope the CLI emits under `--json`, never a stack trace.
 
 Register the server by hand with any MCP-capable client:

@@ -458,6 +458,22 @@ fn no_withheld_verb_is_reachable_by_name() {
 }
 
 #[test]
+fn the_dashboard_is_not_an_mcp_tool() {
+    let f = VaultFixture::new();
+    let names: Vec<String> = tools(&f)
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect();
+    // R4: the dashboard is human-only. The forty-name count pin already covers the *size* of
+    // the table; this names the verb, so a later lane that wires `mesh dashboard` into the
+    // tool table fails here with the offending name in the message.
+    assert!(
+        !names.iter().any(|name| name.contains("dashboard")),
+        "the dashboard leaked into the MCP tool table: {names:?}"
+    );
+}
+
+#[test]
 fn the_serialised_tool_list_fits_forty_kilobytes() {
     let f = VaultFixture::new();
     let out = session(&f, &[request(1, "tools/list", json!({}))]);

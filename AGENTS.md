@@ -173,7 +173,7 @@ mesh/
     ├── model/                       # per-space typed views + field order
     ├── domain/                      # the verbs + select/tags/owner/wikilinks/deps/lenses
     ├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
-    ├── cli/                         # one file per verb family + globals, out, admin, watch
+    ├── cli/                         # one file per verb family + globals, out, admin, watch, dashboard
     └── mcp/                         # stdio JSON-RPC server, schemas, the 37-tool table
 tests/                               # one integration file per verb family, plus
                                      #   compat_corpus, race, bundle, foundation_cli,
