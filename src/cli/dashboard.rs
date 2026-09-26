@@ -1,22 +1,41 @@
 //! `mesh dashboard` — the operator's read-only screen.
 //!
-//! This module owns the **snapshot**: one read pass that composes the same domain surfaces
-//! the CLI verbs already print — the `status` census, the `task list` slices, the
-//! recent-activity lens and the search-health report — into a plain frame model. It adds no
-//! second source of truth, holds no lock and writes nothing.
+//! Two halves, one verb.
 //!
-//! The terminal lifecycle (tty guard, alternate screen, event loop, keys) and the render
-//! mapping are the next units' work; they are the only places `ratatui` and `crossterm` may
-//! be imported.
+//! The **snapshot**: one read pass that composes the same domain surfaces the CLI verbs already
+//! print — the `status` census, the `task list` slices, the recent-activity lens and the
+//! search-health report — into a plain frame model. It adds no second source of truth, holds
+//! no lock and writes nothing.
+//!
+//! The **terminal shell**: a tty guard, an alternate-screen lifecycle whose restoration is a
+//! `Drop` guard (so a quit, an error and the panic unwinding through `main`'s catch all give
+//! the shell back), and an event loop that re-reads the folder on a tick. This module is the
+//! only place `ratatui` and `crossterm` are imported.
 
-use std::time::Duration;
+use std::io::{self, IsTerminal, Stdout};
+use std::time::{Duration, Instant};
 
+use crossterm::cursor;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph};
+use ratatui::{Frame, Terminal};
 use serde_json::Value as Json;
 
+use crate::cli::DashboardArgs;
 use crate::config::Config;
+use crate::ctx::Ctx;
 use crate::domain::activity;
 use crate::domain::select::{Filter, SortKey};
 use crate::domain::tasks::{self, Availability};
+use crate::error::{MeshError, Result};
 
 /// How the dashboard is run.
 #[derive(Clone, Debug)]
@@ -296,6 +315,597 @@ fn string_list(value: Option<&Json>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------------------
+// the terminal shell
+// ---------------------------------------------------------------------------------------
+
+/// The four panes, in `Tab` order: design.md's fixed quadrants, never reordered.
+const PANE_TITLES: [&str; 4] = ["agents", "tasks", "recent activity", "vault health"];
+
+/// design.md's four calm empty states: never an error, never a spinner.
+const EMPTY_AGENTS: &str = "no agents yet";
+const EMPTY_TASKS: &str = "no tasks — all clear";
+const EMPTY_ACTIVITY: &str = "no recent activity";
+const EMPTY_HEALTH: &str = "healthy — nothing to report";
+
+/// What one key asks the loop to do. This enum is the whole of R3: five keys, read-only, and
+/// not one of them claims, edits or deletes anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    /// `q`, or Ctrl-C read as a key event in raw mode.
+    Quit,
+    /// `r`: re-read the folder now, without waiting for the tick.
+    Refresh,
+    /// `m`: flip the mine-only filter.
+    ToggleMine,
+    /// `Tab`: hand the focus to the next pane.
+    FocusNext,
+    /// `↑`: scroll the focused pane up one row.
+    ScrollUp,
+    /// `↓`: scroll the focused pane down one row.
+    ScrollDown,
+    /// No key this version acts on — and no key event that is not a key press.
+    Ignore,
+}
+
+/// What the loop must do after one action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Effect {
+    /// Nothing beyond the next draw pass: an ignored key, a moved focus, a scroll.
+    Idle,
+    /// Re-read the folder now.
+    Refresh,
+    /// Leave the loop; the guard restores the terminal on the way out.
+    Quit,
+}
+
+/// Everything one render pass reads: the last good frame, the filter, the focus.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct DashState {
+    /// The last frame read from the folder. A failed refresh never replaces it.
+    frame: DashFrame,
+    /// The mine-only filter: seeded from the global `--mine`, flipped by `m`.
+    mine: bool,
+    /// The focused pane, as an index into [`PANE_TITLES`].
+    focus: usize,
+    /// Per-pane scroll offset in rows, one slot per [`PANE_TITLES`] entry.
+    scroll: [usize; PANE_TITLES.len()],
+    /// The vault clock of the last successful refresh (`HH:MM:SS`, UTC).
+    refreshed_at: Option<String>,
+    /// The last refresh failure, dimmed under the chrome; `None` while the frame is fresh.
+    status: Option<String>,
+}
+
+/// `mesh dashboard` — the whole verb. Never returns until the operator quits.
+pub fn run(ctx: &mut Ctx, args: DashboardArgs) -> Result<()> {
+    // The gate comes first: with no terminal there is nothing to read keys from or draw on,
+    // and an agent that asked for a dashboard should be told so, not left hanging.
+    terminal_gate(ctx.tty, io::stdout().is_terminal())?;
+    let opts = DashOpts {
+        interval: Duration::from_secs(args.interval),
+    };
+    let cfg = ctx.cfg()?.clone();
+
+    let session = CrosstermSession::enter()?;
+    // From here on every exit path is the guard's: a quit, an error, or the unwind `main`
+    // catches.
+    let mut guard = SessionGuard::new(session);
+    let mut source = VaultSource { cfg: &cfg };
+    let mut state = DashState {
+        mine: ctx.g.mine,
+        ..DashState::default()
+    };
+    // The first frame is read before the first draw, so the screen opens populated.
+    let outcome = source.read(state.mine);
+    apply_refresh(&mut state, outcome, clock_now());
+
+    drive(guard.session(), &mut source, &mut state, opts.interval)?;
+    Ok(())
+}
+
+/// The tty gate: the dashboard reads keys on stdin and draws on stdout, so both must be a
+/// terminal. A headless agent gets an error at exit 2, never a hang.
+fn terminal_gate(stdin_tty: bool, stdout_tty: bool) -> Result<()> {
+    if stdin_tty && stdout_tty {
+        Ok(())
+    } else {
+        Err(MeshError::validation("dashboard needs a terminal"))
+    }
+}
+
+/// The key map, in one place.
+fn action_for(key: KeyEvent) -> Action {
+    // Windows reports a Release beside every Press; acting on both would double every key.
+    if key.kind != KeyEventKind::Press {
+        return Action::Ignore;
+    }
+    match key.code {
+        // Ctrl-C is a key event in raw mode, not a signal — there is no signal handler here.
+        KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+        // A terminal reports the shifted letter as its uppercase form, so Shift-Q quits too.
+        KeyCode::Char('q' | 'Q') => Action::Quit,
+        KeyCode::Char('r' | 'R') => Action::Refresh,
+        KeyCode::Char('m' | 'M') => Action::ToggleMine,
+        KeyCode::Tab => Action::FocusNext,
+        KeyCode::Up => Action::ScrollUp,
+        KeyCode::Down => Action::ScrollDown,
+        _ => Action::Ignore,
+    }
+}
+
+/// Fold one action into the state. Pure: the loop renders whatever this leaves behind.
+fn apply_action(state: &mut DashState, action: Action) -> Effect {
+    match action {
+        Action::Quit => Effect::Quit,
+        Action::Refresh => Effect::Refresh,
+        // The filter changes what the next frame holds, so it re-reads at once.
+        Action::ToggleMine => {
+            state.mine = !state.mine;
+            Effect::Refresh
+        }
+        Action::FocusNext => {
+            state.focus = (state.focus + 1) % PANE_TITLES.len();
+            Effect::Idle
+        }
+        Action::ScrollUp => {
+            state.scroll[state.focus] = state.scroll[state.focus].saturating_sub(1);
+            Effect::Idle
+        }
+        Action::ScrollDown => {
+            let last = pane_rows(state, state.focus).saturating_sub(1);
+            let offset = state.scroll[state.focus].saturating_add(1).min(last);
+            state.scroll[state.focus] = offset;
+            Effect::Idle
+        }
+        Action::Ignore => Effect::Idle,
+    }
+}
+
+/// One refresh attempt: the frame read from the folder, or why the read failed.
+///
+/// `snapshot` is total — every pane degrades on its own — so the production source below
+/// cannot fail today. The seam is a `Result` anyway, because R2's fail-soft rule (keep the
+/// last good frame, dim a status line, never crash the loop) is behaviour a headless test must
+/// be able to watch, and because a read surface may become fallible without the loop changing.
+trait FrameSource {
+    fn read(&mut self, mine: bool) -> std::result::Result<DashFrame, String>;
+}
+
+/// The production refresh: one direct read pass over the folder, every tick.
+struct VaultSource<'a> {
+    cfg: &'a Config,
+}
+
+impl FrameSource for VaultSource<'_> {
+    fn read(&mut self, mine: bool) -> std::result::Result<DashFrame, String> {
+        Ok(snapshot(self.cfg, mine))
+    }
+}
+
+/// Record one refresh attempt: a good frame replaces it and stamps the clock; a failed one
+/// keeps the last good frame and shows a dim status line. Never fails.
+fn apply_refresh(
+    state: &mut DashState,
+    outcome: std::result::Result<DashFrame, String>,
+    clock: String,
+) {
+    match outcome {
+        Ok(frame) => {
+            state.frame = frame;
+            state.refreshed_at = Some(clock);
+            state.status = None;
+        }
+        Err(reason) => state.status = Some(format!("refresh failed: {reason}")),
+    }
+}
+
+/// Now, on the vault's clock.
+fn clock_now() -> String {
+    crate::timefmt::clock_utc(&crate::timefmt::now_utc())
+}
+
+/// What the loop needs from the terminal: draw one frame, and give the operator's shell back.
+///
+/// The restore half is a seam, so the `Drop` guard below is testable without a real tty; the
+/// production session runs the real crossterm calls.
+trait Session {
+    /// Paint the state. A failure here is fatal — the terminal is gone.
+    fn draw(&mut self, state: &DashState, interval: Duration) -> io::Result<()>;
+    /// Restore cooked mode, the main screen buffer and the cursor.
+    fn restore(&mut self);
+}
+
+/// The real terminal: raw mode plus the alternate screen, drawn through crossterm.
+struct CrosstermSession {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl CrosstermSession {
+    /// Enter the alternate screen and raw mode.
+    fn enter() -> io::Result<CrosstermSession> {
+        enable_raw_mode()?;
+        // Anything that fails past this point must undo the raw mode it already set, or a
+        // failure that never reached the guard would leave the shell broken.
+        let entered = (|| -> io::Result<CrosstermSession> {
+            execute!(io::stdout(), EnterAlternateScreen)?;
+            Ok(CrosstermSession {
+                terminal: Terminal::new(CrosstermBackend::new(io::stdout()))?,
+            })
+        })();
+        if entered.is_err() {
+            let _ = disable_raw_mode();
+        }
+        entered
+    }
+}
+
+impl Session for CrosstermSession {
+    fn draw(&mut self, state: &DashState, interval: Duration) -> io::Result<()> {
+        self.terminal
+            .draw(|frame| draw_ui(frame, state, interval))
+            .map(|_| ())
+    }
+
+    fn restore(&mut self) {
+        // Cooked mode first: it has the most side effects. The failures are ignored on
+        // purpose — a dashboard that cannot restore has nothing useful left to say.
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+    }
+}
+
+/// Owns the session and gives the terminal back when it goes away — on a normal quit, on an
+/// error, and on the unwind that `main`'s panic-catch swallows. Nothing else calls `restore`.
+struct SessionGuard<S: Session> {
+    session: S,
+}
+
+impl<S: Session> SessionGuard<S> {
+    /// Take ownership of an entered session; dropping the guard restores it.
+    fn new(session: S) -> SessionGuard<S> {
+        SessionGuard { session }
+    }
+
+    /// The session, for the loop to draw on.
+    fn session(&mut self) -> &mut S {
+        &mut self.session
+    }
+}
+
+impl<S: Session> Drop for SessionGuard<S> {
+    fn drop(&mut self) {
+        self.session.restore();
+    }
+}
+
+/// The foreground loop: draw, wait for a key or the tick deadline, act, repeat. Returns when
+/// the operator quits, or when the terminal can no longer be drawn on.
+fn drive<S: Session>(
+    session: &mut S,
+    source: &mut dyn FrameSource,
+    state: &mut DashState,
+    interval: Duration,
+) -> io::Result<()> {
+    let mut last_tick = Instant::now();
+    loop {
+        session.draw(state, interval)?;
+        let action = match event::poll(interval.saturating_sub(last_tick.elapsed())) {
+            Ok(true) => next_action()?,
+            // The tick landed with no key waiting: re-read the folder.
+            Ok(false) => Action::Refresh,
+            Err(error) => return Err(error),
+        };
+        match apply_action(state, action) {
+            Effect::Quit => return Ok(()),
+            Effect::Refresh => {
+                let outcome = source.read(state.mine);
+                apply_refresh(state, outcome, clock_now());
+                last_tick = Instant::now();
+            }
+            Effect::Idle => {}
+        }
+    }
+}
+
+/// Read one event and map it: only keys act, and a resize simply redraws on the next pass.
+fn next_action() -> io::Result<Action> {
+    match event::read()? {
+        Event::Key(key) => Ok(action_for(key)),
+        _ => Ok(Action::Ignore),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// the render mapping: the frame model rendered once into widgets
+// ---------------------------------------------------------------------------------------
+
+/// Paint one frame: the four fixed quadrants, the chrome and the status line.
+fn draw_ui(frame: &mut Frame, state: &DashState, interval: Duration) {
+    let [body, chrome_row, status_row] = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body);
+    let [agents, activity] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(left);
+    let [tasks, health] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(right);
+
+    // The panes fill the left column top-to-bottom, then the right column: the fleet and what
+    // changed on the left, the work and the machine on the right.
+    for (pane, area) in [(0, agents), (2, activity), (1, tasks), (3, health)] {
+        render_pane(frame, area, pane, state);
+    }
+    frame.render_widget(Paragraph::new(chrome(state, interval)), chrome_row);
+    frame.render_widget(status_line(state), status_row);
+}
+
+/// Draw one pane: the frame's lines for it, scrolled by the state's offset, under a titled
+/// border. The focused pane's border is bright; the others stay dim.
+fn render_pane(frame: &mut Frame, area: Rect, pane: usize, state: &DashState) {
+    let lines = pane_lines(&state.frame, pane);
+    let offset = state.scroll[pane].min(lines.len());
+    let border = if state.focus == pane {
+        Style::default().fg(Color::Cyan)
+    } else {
+        dim_style()
+    };
+    let block = Block::bordered()
+        .title(Line::from(format!(" {} ", pane_title(pane))))
+        .border_style(border);
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().skip(offset).collect::<Vec<Line>>()).block(block),
+        area,
+    );
+}
+
+/// The rendered rows of one pane, before the border and the scroll offset.
+fn pane_lines(frame: &DashFrame, pane: usize) -> Vec<Line<'static>> {
+    match pane {
+        0 => agents_lines(frame),
+        1 => task_lines(frame),
+        2 => activity_lines(frame),
+        _ => health_lines(frame),
+    }
+}
+
+/// How many rows a pane holds, for the scroll clamp.
+fn pane_rows(state: &DashState, pane: usize) -> usize {
+    pane_lines(&state.frame, pane).len()
+}
+
+/// The title of a pane, by index.
+fn pane_title(pane: usize) -> &'static str {
+    PANE_TITLES.get(pane).copied().unwrap_or("")
+}
+
+/// The agents pane: one row per identity — open tasks, claims, stale claims, then notes owned
+/// and notes claimed, abbreviated `2o 1c 0s · 0n 0nc` as the design's compact rows are.
+fn agents_lines(frame: &DashFrame) -> Vec<Line<'static>> {
+    if frame.agents.is_empty() {
+        return vec![Line::styled(EMPTY_AGENTS, dim_style())];
+    }
+    frame
+        .agents
+        .iter()
+        .map(|row| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {:<16}", row.identity),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                count_span(row.owns_open, "o"),
+                count_span(row.claimed, "c"),
+                count_span(row.stale_claims, "s"),
+                Span::styled("· ", dim_style()),
+                count_span(row.notes_owned, "n"),
+                count_span(row.notes_claimed, "nc"),
+            ])
+        })
+        .collect()
+}
+
+/// The tasks pane: the ready, blocked and claimed slices in that order, each row carrying its
+/// state word in its status colour, the id, the title, and — on a claim — who holds it.
+fn task_lines(frame: &DashFrame) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    push_task_slice(&mut lines, "ready", &frame.tasks.ready, Color::Green);
+    push_task_slice(&mut lines, "blocked", &frame.tasks.blocked, Color::Yellow);
+    push_task_slice(&mut lines, "claimed", &frame.tasks.claimed, Color::Yellow);
+    if lines.is_empty() {
+        return vec![Line::styled(EMPTY_TASKS, dim_style())];
+    }
+    lines
+}
+
+/// One tasks-pane slice, appended in slice order.
+fn push_task_slice(
+    lines: &mut Vec<Line<'static>>,
+    state: &'static str,
+    rows: &[TaskRow],
+    colour: Color,
+) {
+    for row in rows {
+        let mut spans = vec![
+            Span::styled(format!(" {state:<8}"), Style::default().fg(colour)),
+            Span::styled(format!(" {:<8}", row.id), dim_style()),
+            Span::raw(format!(" {}", row.title)),
+        ];
+        if let Some(claimer) = &row.claimed_by {
+            spans.push(Span::styled(format!(" ({claimer})"), dim_style()));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
+/// The recent-activity pane: the vault clock, the id and the title, in the lens's own
+/// newest-first order.
+fn activity_lines(frame: &DashFrame) -> Vec<Line<'static>> {
+    if frame.activity.is_empty() {
+        return vec![Line::styled(EMPTY_ACTIVITY, dim_style())];
+    }
+    frame
+        .activity
+        .iter()
+        .map(|row| {
+            let mut spans = vec![
+                Span::styled(format!(" {} ", clock_of(row.mtime_seconds)), dim_style()),
+                Span::styled(
+                    format!("{:<10}", row.id),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {}", row.title)),
+            ];
+            if let Some(claimer) = &row.claimed_by {
+                spans.push(Span::styled(format!(" ({claimer})"), dim_style()));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The vault clock of one file's mtime. An instant mesh cannot place renders as a placeholder
+/// rather than failing the frame.
+fn clock_of(mtime_seconds: f64) -> String {
+    chrono::DateTime::from_timestamp_secs(mtime_seconds as i64).map_or_else(
+        || "--:--:--".to_string(),
+        |at| crate::timefmt::clock_utc(&at),
+    )
+}
+
+/// The vault-health pane: the corpus split, the findings, then the watcher and index lines.
+fn health_lines(frame: &DashFrame) -> Vec<Line<'static>> {
+    let health = &frame.health;
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(vec![
+            Span::styled(" notes   ", dim_style()),
+            Span::styled(
+                format!("{} mesh-native", health.notes_native),
+                count_style(health.notes_native),
+            ),
+            Span::styled(
+                format!(" · {} foreign", health.notes_foreign),
+                count_style(health.notes_foreign),
+            ),
+        ]),
+        findings_line(health),
+        Line::from(vec![
+            Span::styled(" watcher ", dim_style()),
+            Span::styled(
+                watcher_text(health),
+                if health.watcher_running {
+                    Style::default().fg(Color::Green)
+                } else {
+                    dim_style()
+                },
+            ),
+            Span::styled(
+                format!(" · index {}", health.search_mode),
+                if health.search_mode == "indexed" {
+                    Style::default().fg(Color::Green)
+                } else {
+                    dim_style()
+                },
+            ),
+        ]),
+    ];
+    if let Some(reason) = &health.search_reason {
+        lines.push(Line::styled(format!("         {reason}"), dim_style()));
+    }
+    if !health.dangling_links.is_empty() {
+        lines.push(Line::styled(
+            format!("         {}", health.dangling_links.join(", ")),
+            dim_style(),
+        ));
+    }
+    lines
+}
+
+/// The findings line: the dangling-link and stale-lock counts in alert red, or the design's
+/// calm empty state when there is nothing to report.
+fn findings_line(health: &HealthSummary) -> Line<'static> {
+    if health.dangling_links_total == 0 && health.stale_locks == 0 {
+        return Line::from(vec![
+            Span::styled(" links   ", dim_style()),
+            Span::styled(EMPTY_HEALTH, dim_style()),
+        ]);
+    }
+    Line::from(vec![
+        Span::styled(" links   ", dim_style()),
+        Span::styled(
+            format!("{} dangling", health.dangling_links_total),
+            count_style(health.dangling_links_total),
+        ),
+        Span::styled(" · ", dim_style()),
+        Span::styled(
+            format!("locks {} stale", health.stale_locks),
+            count_style(health.stale_locks),
+        ),
+    ])
+}
+
+/// The watcher line: running with its pid, or stopped.
+fn watcher_text(health: &HealthSummary) -> String {
+    match health.watcher_pid {
+        Some(pid) if health.watcher_running => format!("running (pid {pid})"),
+        _ => "stopped".to_string(),
+    }
+}
+
+/// The chrome: design.md's one help line — the tick, the mine badge, the clock of the frame on
+/// screen, the focused pane and the five keys.
+fn chrome(state: &DashState, interval: Duration) -> Line<'static> {
+    let badge = if state.mine {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        dim_style()
+    };
+    let clock = state.refreshed_at.as_deref().unwrap_or("--:--:--");
+    Line::from(vec![
+        Span::styled(format!(" {}s ", interval.as_secs()), dim_style()),
+        Span::styled("· ", dim_style()),
+        Span::styled(if state.mine { "mine:on" } else { "mine:off" }, badge),
+        Span::styled(
+            format!(
+                " · refreshed {clock} UTC · focus {} · q quit · r refresh · m mine · tab focus \
+                 · arrows scroll",
+                pane_title(state.focus)
+            ),
+            dim_style(),
+        ),
+    ])
+}
+
+/// The status line under the chrome: the last refresh failure in dim type, or empty while the
+/// frame on screen is the folder.
+fn status_line(state: &DashState) -> Paragraph<'static> {
+    Paragraph::new(state.status.clone().unwrap_or_default()).style(dim_style())
+}
+
+/// One `12o`-style count, dimmed at zero — the design's "quiet when healthy" rule.
+fn count_span(value: u64, suffix: &'static str) -> Span<'static> {
+    Span::styled(format!("{value}{suffix} "), count_style(value))
+}
+
+/// The style of a count: dim at zero, default otherwise.
+fn count_style(value: u64) -> Style {
+    if value == 0 {
+        dim_style()
+    } else {
+        Style::default()
+    }
+}
+
+/// The dim style: labels, zero counts, the status line.
+fn dim_style() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -306,8 +916,11 @@ fn string_list(value: Option<&Json>) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::config::test_support::config_for;
+    use std::cell::RefCell;
     use std::fs;
     use std::path::Path;
+    use std::rc::Rc;
+    use std::time::Duration;
 
     /// A fresh `updated` stamp, so no fixture task reads as stale against the status window.
     fn stamp() -> String {
@@ -586,6 +1199,412 @@ mod tests {
         assert_eq!(
             after, before,
             "a corrupt file must not move any other number"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------
+    // the terminal shell: every part of the loop that needs no real terminal
+    // ------------------------------------------------------------------------------------
+
+    /// The chrome as text, at the default tick.
+    fn chrome_text(state: &DashState) -> String {
+        chrome(state, Duration::from_secs(2)).to_string()
+    }
+
+    /// One pane's rendered rows as text. The render mapping has no pixel tests, so this is
+    /// what the tests below assert on.
+    fn pane_text(frame: &DashFrame, pane: usize) -> String {
+        pane_lines(frame, pane)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+
+    fn agent(identity: &str) -> AgentRow {
+        AgentRow {
+            identity: identity.to_string(),
+            ..AgentRow::default()
+        }
+    }
+
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    /// The headless stand-in for the real terminal: records what the loop asked of it.
+    #[derive(Default)]
+    struct RecordingSession {
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Session for RecordingSession {
+        fn draw(&mut self, state: &DashState, _interval: Duration) -> std::io::Result<()> {
+            self.log
+                .borrow_mut()
+                .push(format!("draw mine={}", state.mine));
+            Ok(())
+        }
+
+        fn restore(&mut self) {
+            self.log.borrow_mut().push("restore".to_string());
+        }
+    }
+
+    /// The refresh seam: one scripted outcome per call, the last one repeating.
+    struct ScriptedSource {
+        outcomes: Vec<std::result::Result<DashFrame, String>>,
+        calls: usize,
+    }
+
+    impl FrameSource for ScriptedSource {
+        fn read(&mut self, _mine: bool) -> std::result::Result<DashFrame, String> {
+            let index = self.calls.min(self.outcomes.len().saturating_sub(1));
+            self.calls += 1;
+            self.outcomes
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| Ok(DashFrame::default()))
+        }
+    }
+
+    #[test]
+    fn the_tty_gate_needs_a_terminal_on_both_streams() {
+        assert!(terminal_gate(true, true).is_ok());
+        for (stdin_tty, stdout_tty) in [(false, false), (false, true), (true, false)] {
+            let error = terminal_gate(stdin_tty, stdout_tty).unwrap_err();
+            assert_eq!(error.code(), 2);
+            assert_eq!(error.to_string(), "dashboard needs a terminal");
+        }
+    }
+
+    #[test]
+    fn the_key_map_is_the_whole_of_r3() {
+        let plain = KeyModifiers::NONE;
+        assert_eq!(action_for(press(KeyCode::Char('q'), plain)), Action::Quit);
+        assert_eq!(
+            action_for(press(KeyCode::Char('r'), plain)),
+            Action::Refresh
+        );
+        assert_eq!(
+            action_for(press(KeyCode::Char('m'), plain)),
+            Action::ToggleMine
+        );
+        assert_eq!(action_for(press(KeyCode::Tab, plain)), Action::FocusNext);
+        assert_eq!(action_for(press(KeyCode::Up, plain)), Action::ScrollUp);
+        assert_eq!(action_for(press(KeyCode::Down, plain)), Action::ScrollDown);
+        // Ctrl-C arrives as a key event in raw mode, never as a signal.
+        assert_eq!(
+            action_for(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+        // A plain `c` is not Ctrl-C.
+        assert_eq!(action_for(press(KeyCode::Char('c'), plain)), Action::Ignore);
+        // v1 is read-only: no other key claims, edits, deletes or leaves the screen.
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Char('d'),
+            KeyCode::Char('x'),
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::PageDown,
+            KeyCode::Backspace,
+        ] {
+            assert_eq!(action_for(press(code, plain)), Action::Ignore, "{code:?}");
+        }
+        // A Windows Release event beside the Press is not a second action.
+        let mut release = press(KeyCode::Char('q'), plain);
+        release.kind = KeyEventKind::Release;
+        assert_eq!(action_for(release), Action::Ignore);
+    }
+
+    #[test]
+    fn r_refreshes_at_once_and_m_changes_what_the_next_frame_holds() {
+        let mut state = DashState::default();
+        assert_eq!(apply_action(&mut state, Action::Refresh), Effect::Refresh);
+        assert_eq!(apply_action(&mut state, Action::Quit), Effect::Quit);
+        assert_eq!(apply_action(&mut state, Action::Ignore), Effect::Idle);
+
+        // `m` flips the filter and re-reads, so the panes change in the same tick.
+        assert_eq!(
+            apply_action(&mut state, Action::ToggleMine),
+            Effect::Refresh
+        );
+        assert!(state.mine);
+        assert_eq!(
+            apply_action(&mut state, Action::ToggleMine),
+            Effect::Refresh
+        );
+        assert!(!state.mine);
+    }
+
+    #[test]
+    fn the_chrome_carries_the_tick_the_mine_badge_the_clock_and_the_focus() {
+        let state = DashState {
+            refreshed_at: Some("09:41:07".to_string()),
+            ..DashState::default()
+        };
+        let text = chrome_text(&state);
+        assert!(text.contains(" 2s "), "{text}");
+        assert!(text.contains("mine:off"), "{text}");
+        assert!(text.contains("refreshed 09:41:07 UTC"), "{text}");
+        assert!(text.contains("focus agents"), "{text}");
+        assert!(text.contains("q quit"), "{text}");
+
+        // The badge follows the filter, so the mine state is visible in the chrome.
+        let on = DashState {
+            mine: true,
+            ..state.clone()
+        };
+        assert!(chrome_text(&on).contains("mine:on"), "{}", chrome_text(&on));
+        assert!(!chrome_text(&on).contains("mine:off"));
+    }
+
+    #[test]
+    fn tab_cycles_the_focus_and_the_arrows_scroll_only_the_focused_pane() {
+        let mut state = DashState {
+            frame: DashFrame {
+                agents: vec![agent("alice"), agent("bob")],
+                ..DashFrame::default()
+            },
+            ..DashState::default()
+        };
+        assert_eq!(apply_action(&mut state, Action::FocusNext), Effect::Idle);
+        assert_eq!(state.focus, 1);
+        // Tab cycles through the four panes and never leaves them.
+        for _ in 0..PANE_TITLES.len() {
+            apply_action(&mut state, Action::FocusNext);
+        }
+        assert_eq!(state.focus, 1);
+
+        // The tasks pane is empty: there is nothing to scroll past.
+        apply_action(&mut state, Action::ScrollDown);
+        assert_eq!(state.scroll[1], 0);
+
+        // The arrows move the focused pane only, and stop at its last row.
+        state.focus = 0;
+        apply_action(&mut state, Action::ScrollDown);
+        assert_eq!(state.scroll[0], 1);
+        assert_eq!(state.scroll[1], 0);
+        apply_action(&mut state, Action::ScrollDown);
+        assert_eq!(state.scroll[0], 1, "two rows: one scroll and no further");
+        apply_action(&mut state, Action::ScrollUp);
+        assert_eq!(state.scroll[0], 0);
+        apply_action(&mut state, Action::ScrollUp);
+        assert_eq!(state.scroll[0], 0);
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_last_good_frame_and_dims_a_status_line() {
+        let first = DashFrame {
+            agents: vec![agent("alice")],
+            ..DashFrame::default()
+        };
+        let second = DashFrame {
+            agents: vec![agent("alice"), agent("bob")],
+            ..DashFrame::default()
+        };
+        let mut source = ScriptedSource {
+            outcomes: vec![
+                Ok(first.clone()),
+                Err("a pane could not be read".to_string()),
+                Ok(second.clone()),
+            ],
+            calls: 0,
+        };
+        let mut state = DashState::default();
+
+        // The first read lands: frame in, clock stamped, no status line.
+        let outcome = source.read(state.mine);
+        apply_refresh(&mut state, outcome, "10:00:00".to_string());
+        assert_eq!(state.frame, first);
+        assert_eq!(state.refreshed_at.as_deref(), Some("10:00:00"));
+        assert_eq!(state.status, None);
+
+        // The failed read keeps the last good frame and says so — never a crash.
+        let outcome = source.read(state.mine);
+        apply_refresh(&mut state, outcome, "10:00:02".to_string());
+        assert_eq!(state.frame, first, "the previous frame stays on screen");
+        assert_eq!(state.refreshed_at.as_deref(), Some("10:00:00"));
+        assert_eq!(
+            state.status.as_deref(),
+            Some("refresh failed: a pane could not be read")
+        );
+
+        // The next good read replaces the frame and clears the status line.
+        let outcome = source.read(state.mine);
+        apply_refresh(&mut state, outcome, "10:00:04".to_string());
+        assert_eq!(state.frame, second);
+        assert_eq!(state.refreshed_at.as_deref(), Some("10:00:04"));
+        assert_eq!(state.status, None);
+    }
+
+    #[test]
+    fn the_drop_guard_restores_the_terminal() {
+        let session = RecordingSession::default();
+        let log = Rc::clone(&session.log);
+        {
+            let mut guard = SessionGuard::new(session);
+            guard
+                .session()
+                .draw(&DashState::default(), Duration::from_secs(2))
+                .unwrap();
+            assert_eq!(log.borrow().as_slice(), ["draw mine=false"]);
+        }
+        // Leaving the scope restored the terminal — the one exit path the guard owns.
+        assert_eq!(log.borrow().as_slice(), ["draw mine=false", "restore"]);
+    }
+
+    #[test]
+    fn the_frame_draws_into_a_terminal_buffer() {
+        // Not a pixel test: it only proves the whole mapping runs — every pane, the chrome
+        // and the status line — and lands on a real buffer without failing.
+        let state = DashState {
+            refreshed_at: Some("09:41:07".to_string()),
+            status: Some("refresh failed: a pane could not be read".to_string()),
+            ..DashState::default()
+        };
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw_ui(frame, &state, Duration::from_secs(2)))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        let mut rendered = String::new();
+        for (index, cell) in buffer.content.iter().enumerate() {
+            if index > 0 && index % width == 0 {
+                rendered.push('\n');
+            }
+            rendered.push_str(cell.symbol());
+        }
+        for expected in [
+            "agents",
+            "tasks",
+            "recent activity",
+            "vault health",
+            "no agents yet",
+            "mine:off",
+            "2s",
+            "refresh failed: a pane could not be read",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{expected} missing:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_vault_renders_the_four_calm_empty_states() {
+        let frame = DashFrame::default();
+        for (pane, expected) in [
+            (0, "no agents yet"),
+            (1, "no tasks — all clear"),
+            (2, "no recent activity"),
+            (3, "healthy — nothing to report"),
+        ] {
+            let text = pane_text(&frame, pane);
+            assert!(text.contains(expected), "pane {pane}: {text}");
+        }
+    }
+
+    #[test]
+    fn the_panes_render_the_frame_they_are_given() {
+        let mtime = 1_772_000_000.0;
+        let clock = crate::timefmt::clock_utc(
+            &chrono::DateTime::from_timestamp_secs(mtime as i64).unwrap(),
+        );
+        let frame = DashFrame {
+            agents: vec![AgentRow {
+                identity: "alice".to_string(),
+                owns_open: 2,
+                claimed: 1,
+                stale_claims: 0,
+                notes_owned: 0,
+                notes_claimed: 0,
+            }],
+            tasks: TasksByState {
+                ready: vec![TaskRow {
+                    id: "t-A".to_string(),
+                    title: "Ready work".to_string(),
+                    claimed_by: None,
+                }],
+                blocked: vec![TaskRow {
+                    id: "t-B".to_string(),
+                    title: "Blocked work".to_string(),
+                    claimed_by: None,
+                }],
+                claimed: vec![TaskRow {
+                    id: "t-C".to_string(),
+                    title: "Claimed work".to_string(),
+                    claimed_by: Some("alice".to_string()),
+                }],
+            },
+            activity: vec![ActivityRow {
+                id: "n-1".to_string(),
+                kind: "note".to_string(),
+                title: "A note".to_string(),
+                owner: Some("alice".to_string()),
+                claimed_by: None,
+                path: "/vault/n-1.md".to_string(),
+                mtime_seconds: mtime,
+            }],
+            health: HealthSummary {
+                notes_native: 2,
+                notes_foreign: 1,
+                dangling_links: vec!["Missing Page".to_string()],
+                dangling_links_total: 1,
+                stale_locks: 0,
+                watcher_running: true,
+                watcher_pid: Some(42),
+                search_mode: "indexed".to_string(),
+                search_reason: None,
+            },
+        };
+
+        let agents = pane_text(&frame, 0);
+        assert!(agents.contains("alice"), "{agents}");
+        assert!(agents.contains("2o") && agents.contains("1c"), "{agents}");
+
+        let tasks = pane_text(&frame, 1);
+        for expected in [
+            "ready",
+            "t-A",
+            "Ready work",
+            "blocked",
+            "t-B",
+            "claimed",
+            "(alice)",
+        ] {
+            assert!(tasks.contains(expected), "{expected} missing from {tasks}");
+        }
+
+        let activity = pane_text(&frame, 2);
+        assert!(activity.contains(&clock), "{activity}");
+        assert!(
+            activity.contains("n-1") && activity.contains("A note"),
+            "{activity}"
+        );
+
+        let health = pane_text(&frame, 3);
+        for expected in [
+            "2 mesh-native",
+            "1 foreign",
+            "1 dangling",
+            "Missing Page",
+            "running (pid 42)",
+            "index indexed",
+        ] {
+            assert!(
+                health.contains(expected),
+                "{expected} missing from {health}"
+            );
+        }
+        assert!(
+            !health.contains("nothing to report"),
+            "findings are on screen: {health}"
         );
     }
 }

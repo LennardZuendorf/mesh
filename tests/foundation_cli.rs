@@ -262,6 +262,7 @@ fn no_invocation_ever_prints_a_rust_panic() {
         vec!["session-start"],
         vec!["status"],
         vec!["reindex"],
+        vec!["dashboard"],
         vec!["config", "path"],
         vec!["config", "show"],
         vec!["daemon", "status"],

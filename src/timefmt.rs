@@ -37,6 +37,11 @@ pub fn iso_seconds_z(dt: &DateTime<Utc>) -> String {
     )
 }
 
+/// `HH:MM:SS` in UTC — the short clock the dashboard prints beside a row and in its chrome.
+pub fn clock_utc(dt: &DateTime<Utc>) -> String {
+    format!("{:02}:{:02}:{:02}", dt.hour(), dt.minute(), dt.second())
+}
+
 /// A naive datetime in `YYYY-MM-DDTHH:MM:SS[.ffffff]` form, no offset.
 pub fn naive_iso(dt: &NaiveDateTime) -> String {
     format!(
@@ -241,6 +246,17 @@ mod tests {
             iso_seconds_z(&dt("2026-09-05T07:27:02.307028Z")),
             "2026-09-05T07:27:02Z"
         );
+    }
+
+    #[test]
+    fn clock_utc_is_a_bare_utc_clock() {
+        assert_eq!(clock_utc(&dt("2026-09-05T07:27:02Z")), "07:27:02");
+        assert_eq!(
+            clock_utc(&dt("2026-09-05 08:45:37.739036+00:00")),
+            "08:45:37"
+        );
+        // An offset timestamp is placed on the UTC clock, never on its own wall clock.
+        assert_eq!(clock_utc(&dt("2026-09-05T01:00:00+02:00")), "23:00:00");
     }
 
     #[test]

@@ -189,11 +189,16 @@ pub enum Command {
         about = "Watch the vault and keep the search index fresh (foreground)."
     )]
     Watch(WatchArgs),
-    #[command(display_order = 16, about = "Inspect and edit the mesh config.")]
+    #[command(
+        display_order = 16,
+        about = "Live read-only dashboard over the vault (foreground; q quits)."
+    )]
+    Dashboard(DashboardArgs),
+    #[command(display_order = 17, about = "Inspect and edit the mesh config.")]
     Config(ConfigArgs),
-    #[command(display_order = 17, about = "Print a shell completion script.")]
+    #[command(display_order = 18, about = "Print a shell completion script.")]
     Completions(CompletionsArgs),
-    #[command(display_order = 18, about = "Run the stdio MCP server.")]
+    #[command(display_order = 19, about = "Run the stdio MCP server.")]
     Mcp(McpArgs),
     #[command(hide = true, about = "Removed — use 'mesh watch'.")]
     Daemon(DaemonArgs),
@@ -1377,6 +1382,18 @@ pub struct ReindexArgs {
     pub space: Option<String>,
 }
 
+/// `mesh dashboard` — the human-only live screen (admin family: no local output flags).
+#[derive(Args, Debug)]
+pub struct DashboardArgs {
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_name = "SECONDS",
+        help = "Seconds between refreshes (the tick)."
+    )]
+    pub interval: u64,
+}
+
 /// `mesh watch`.
 #[derive(Args, Debug)]
 pub struct WatchArgs {
@@ -1514,6 +1531,7 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<i32> {
         Command::Project(args) => lens::project(ctx, args).map(|()| 0),
         Command::SessionStart(args) => lens::session_start(ctx, args).map(|()| 0),
         Command::Watch(args) => watch::run(ctx, args).map(|()| 0),
+        Command::Dashboard(args) => dashboard::run(ctx, args).map(|()| 0),
         Command::Config(args) => match args.sub {
             None => Ok(help_to_stdout(&["config"])),
             Some(sub) => admin::config(ctx, sub).map(|()| 0),
@@ -1581,6 +1599,7 @@ mod tests {
                 "project",
                 "session-start",
                 "watch",
+                "dashboard",
                 "config",
                 "completions",
                 "mcp"
@@ -1640,7 +1659,14 @@ mod tests {
     #[test]
     fn admin_commands_declare_no_local_output_flags() {
         let command = Cli::command();
-        for name in ["init", "status", "reindex", "completions", "mcp"] {
+        for name in [
+            "init",
+            "status",
+            "reindex",
+            "dashboard",
+            "completions",
+            "mcp",
+        ] {
             let sub = command.find_subcommand(name).unwrap();
             let has = sub.get_arguments().any(|a| a.get_id() == "json");
             assert!(!has, "{name} must not declare a local --json");
