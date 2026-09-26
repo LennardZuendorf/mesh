@@ -34,8 +34,11 @@ pub const STATUS_STALE_WINDOW: &str = "2d";
 /// How many dangling links `status` lists before it just reports the count.
 pub const DANGLING_CAP: usize = 50;
 
-/// The corpus `session-start` and `project` read when no `--space` is given.
+/// The corpus `session-start`'s mention pass reads when no `--space` is given.
 pub const DEFAULT_SPACES: [Space; 2] = [Space::Notes, Space::Tasks];
+
+/// The corpus `project` reads when no `--space` is given: the three envelope spaces.
+pub const PROJECT_SPACES: [Space; 3] = [Space::Notes, Space::Tasks, Space::Memories];
 
 // --------------------------------------------------------------------------------------------
 // project
@@ -43,15 +46,20 @@ pub const DEFAULT_SPACES: [Space; 2] = [Space::Notes, Space::Tasks];
 
 /// `project` over the default corpus.
 pub fn project_view(cfg: &Config, project_id: &str) -> Result<serde_json::Value> {
-    project_view_in(cfg, project_id, &DEFAULT_SPACES)
+    project_view_in(cfg, project_id, &PROJECT_SPACES)
 }
 
-/// A project note plus the tasks scoped to it: `{"project": <node>, "tasks": [<node>, …]}`.
+/// A project note plus the envelope scoped to it:
+/// `{"project": <node>, "tasks": […], "notes": […], "memories": […]}`.
 ///
 /// The note is a point read (an `n-` id or a title slug). Tasks are filtered by **exact
 /// string equality** against the raw `project` frontmatter value — the caller's string, not
-/// the resolved id — with every status, unbounded, `updated` descending. A project with no
-/// scoped tasks yields `"tasks": []`, never an error.
+/// the resolved id — with every status, unbounded, `updated` descending. Notes are the
+/// **containment** rule over the resolved id: a note joins when its stored `related` list
+/// names the project, and the seed note is never a member of its own section. Memories are
+/// the **equality** rule over the resolved id on `project`. The two envelope sections are
+/// appended **last**, after the keys that predate them. A project with no members yields
+/// empty sections, never an error.
 pub fn project_view_in(
     cfg: &Config,
     project_id: &str,
@@ -71,6 +79,9 @@ pub fn project_view_in(
         None,
         Some(&view.path),
     );
+    // Membership reads the *resolved* id, never the caller's string: `related` and `project`
+    // are written by mesh as ids, so a slug seed still finds its envelope.
+    let resolved = view.item.id.as_str();
     let mut tasks: Vec<Json> = Vec::new();
     // A disabled tasks space is already filtered out of `spaces` upstream — a lens narrows
     // its corpus, it does not fail (README §config). Any *other* listing failure is still an
@@ -91,9 +102,60 @@ pub fn project_view_in(
             ));
         }
     }
+    // Notes join by containment of their stored `related` list. The predicate is not
+    // expressible as `Filter.extra` (that is scalar equality), so it is applied here, over
+    // the same rows every other listing reads. The seed note is skipped: a task is never a
+    // member of its own envelope either (the seed gate resolves the project as a note, so a
+    // task id can never be the seed), and containment alone would otherwise admit a
+    // self-link.
+    let mut notes: Vec<Json> = Vec::new();
+    if spaces.contains(&Space::Notes) {
+        let filter = Filter {
+            limit: None,
+            sort: SortKey::Updated,
+            ..Filter::default()
+        };
+        for linked in crate::domain::notes::list(cfg, &filter, false)? {
+            if linked.item.id == resolved || !linked.item.related.iter().any(|r| r == resolved) {
+                continue;
+            }
+            notes.push(render::entry(
+                &linked.item.meta,
+                NOTE_FIELDS.fields(),
+                None,
+                Some(&linked.path),
+            ));
+        }
+    }
+    // Memories join by `project` equality. The listing defaults apply (live, un-superseded,
+    // visible to the effective agent) — the lens reads the same rows every other memory
+    // listing reads, and invents no membership policy of its own.
+    let mut memories: Vec<Json> = Vec::new();
+    if spaces.contains(&Space::Memories) {
+        let filter = Filter {
+            limit: None,
+            sort: SortKey::Updated,
+            me: cfg.agent().map(str::to_string),
+            ..Filter::default()
+        };
+        let opts = crate::domain::memories::ListMemoryOpts::default();
+        for tagged in crate::domain::memories::list(cfg, &filter, &opts)? {
+            if tagged.item.project.as_deref() != Some(resolved) {
+                continue;
+            }
+            memories.push(render::entry(
+                &tagged.item.meta,
+                MEMORY_FIELDS.fields(),
+                None,
+                Some(&tagged.path),
+            ));
+        }
+    }
     let mut out = Map::new();
     out.insert("project".to_string(), project);
     out.insert("tasks".to_string(), Json::Array(tasks));
+    out.insert("notes".to_string(), Json::Array(notes));
+    out.insert("memories".to_string(), Json::Array(memories));
     Ok(Json::Object(out))
 }
 
@@ -713,12 +775,70 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["project", "tasks"]);
+        assert_eq!(keys, ["project", "tasks", "notes", "memories"]);
         assert_eq!(payload["project"]["id"], Json::String("n-p".into()));
         let task_ids = ids(payload["tasks"].as_array().unwrap());
         assert_eq!(task_ids.len(), 2);
         assert!(task_ids.contains(&"t-a".to_string()));
         assert!(task_ids.contains(&"t-b".to_string()));
+        // Zero members is an empty section, never an error.
+        assert_eq!(payload["notes"], serde_json::json!([]));
+        assert_eq!(payload["memories"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn project_view_appends_the_notes_and_memories_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_for(dir.path());
+        fs::create_dir_all(dir.path().join("notes")).unwrap();
+        // The seed links itself: membership is inbound only, so it never joins its own
+        // notes section even though containment alone would match.
+        fs::write(
+            dir.path().join("notes/n-p.md"),
+            "---\nid: n-p\ntype: note\ntitle: Proj\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated:\n  - n-p\n\
+             ---\n\nself\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/n-linked.md"),
+            "---\nid: n-linked\ntype: note\ntitle: Linked\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated:\n  - n-p\n\
+             ---\n\nx\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("notes/n-other.md"),
+            "---\nid: n-other\ntype: note\ntitle: Other\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated:\n  - n-else\n\
+             ---\n\nx\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("memories")).unwrap();
+        fs::write(
+            dir.path().join("memories/m-a.md"),
+            "---\nid: m-a\ntype: memory\ntitle: Fact\ntags: []\nowner: null\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n\
+             kind: fact\nscope: shared\nproject: n-p\nimportance: 3\nsource: null\n\
+             expires: null\nsuperseded_by: null\n---\n\nmemory body\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("memories/m-other.md"),
+            "---\nid: m-other\ntype: memory\ntitle: Other\ntags: []\nowner: null\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n\
+             kind: fact\nscope: shared\nproject: n-else\nimportance: 3\nsource: null\n\
+             expires: null\nsuperseded_by: null\n---\n\nmemory body\n",
+        )
+        .unwrap();
+        let payload = project_view(&cfg, "n-p").unwrap();
+        assert_eq!(ids(payload["notes"].as_array().unwrap()), ["n-linked"]);
+        assert_eq!(ids(payload["memories"].as_array().unwrap()), ["m-a"]);
+        assert_eq!(payload["notes"][0]["title"], Json::String("Linked".into()));
+        assert_eq!(
+            payload["memories"][0]["project"],
+            Json::String("n-p".into())
+        );
     }
 
     #[test]

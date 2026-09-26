@@ -301,11 +301,28 @@ fn task(
 }
 
 fn memory(fixture: &VaultFixture, id: &str, title: &str, importance: i64, scope: &str) {
+    write_memory(fixture, id, title, importance, scope, None);
+}
+
+/// A memory whose `project` names the envelope seed — declared after `scope`, as on disk.
+fn memory_in_project(fixture: &VaultFixture, id: &str, title: &str, project: &str) {
+    write_memory(fixture, id, title, 3, "shared", Some(project));
+}
+
+fn write_memory(
+    fixture: &VaultFixture,
+    id: &str,
+    title: &str,
+    importance: i64,
+    scope: &str,
+    project: Option<&str>,
+) {
+    let project_line = project.map_or(String::new(), |value| format!("project: {value}\n"));
     let text = format!(
         "---\nid: {id}\ntype: memory\ntitle: {title}\ntags: []\nowner: null\n\
          created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n\
-         kind: fact\nscope: {scope}\nimportance: {importance}\nsource: null\nexpires: null\n\
-         superseded_by: null\n---\n\nmemory body\n"
+         kind: fact\nscope: {scope}\n{project_line}importance: {importance}\nsource: null\n\
+         expires: null\nsuperseded_by: null\n---\n\nmemory body\n"
     );
     fixture.write(&format!("memories/{id}.md"), &text);
 }
@@ -1067,7 +1084,7 @@ fn project_renders_the_note_then_indented_tasks() {
 }
 
 #[test]
-fn project_json_has_project_and_tasks() {
+fn project_json_appends_notes_and_memories_after_project_and_tasks() {
     let fixture = VaultFixture::new();
     note(&fixture, "n-p", "Proj", "test-agent", &[], "b");
     task(
@@ -1081,11 +1098,23 @@ fn project_json_has_project_and_tasks() {
         &[],
         "b",
     );
+    // The containment rule: a note joins by naming the project in its `related` list, which
+    // is what a `[[n-p]]` body link backfills to.
+    note(
+        &fixture,
+        "n-linked",
+        "Linked",
+        "test-agent",
+        &["n-p"],
+        "links [[n-p]]",
+    );
+    memory_in_project(&fixture, "m-a", "Fact", "n-p");
     let out = fixture
         .cmd()
         .args(["project", "n-p", "--json"])
         .output()
         .expect("run mesh");
+    assert_eq!(out.status.code(), Some(0));
     let payload = json_of(&out);
     let keys: Vec<&str> = payload
         .as_object()
@@ -1093,10 +1122,22 @@ fn project_json_has_project_and_tasks() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["project", "tasks"]);
+    // Append only: the two pre-existing keys keep their positions, the envelope sections
+    // land last, `notes` before `memories`.
+    assert_eq!(keys, ["project", "tasks", "notes", "memories"]);
     assert_eq!(payload["project"]["id"], Json::String("n-p".into()));
     assert_eq!(ids_of(&payload["tasks"]), ["t-a"]);
-    assert!(payload["tasks"][0]["path"].as_str().is_some());
+    assert_eq!(ids_of(&payload["notes"]), ["n-linked"]);
+    assert_eq!(ids_of(&payload["memories"]), ["m-a"]);
+    // Every envelope entry reads like the other lens entries: frontmatter plus a path, no body.
+    for section in ["tasks", "notes", "memories"] {
+        assert!(payload[section][0]["path"].as_str().is_some(), "{section}");
+        assert!(payload[section][0].get("body").is_none(), "{section}");
+    }
+    assert_eq!(
+        payload["memories"][0]["project"],
+        Json::String("n-p".into())
+    );
 }
 
 #[test]
@@ -1190,7 +1231,125 @@ fn project_with_no_tasks_is_still_a_result() {
         .output()
         .expect("run mesh");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(json_of(&out)["tasks"], serde_json::json!([]));
+    let payload = json_of(&out);
+    // Zero members is an empty envelope, never an error — in every section.
+    assert_eq!(payload["tasks"], serde_json::json!([]));
+    assert_eq!(payload["notes"], serde_json::json!([]));
+    assert_eq!(payload["memories"], serde_json::json!([]));
+}
+
+#[test]
+fn project_envelope_holds_only_members_and_never_the_seed_itself() {
+    let fixture = VaultFixture::new();
+    // The seed links itself: containment alone would match, so the self-member rule is pinned
+    // here. Nothing else about the seed makes it a member of its own envelope.
+    note(&fixture, "n-p", "Proj", "test-agent", &["n-p"], "self");
+    note(&fixture, "n-linked", "Linked", "test-agent", &["n-p"], "b");
+    note(
+        &fixture,
+        "n-other",
+        "Other",
+        "test-agent",
+        &["n-elsewhere"],
+        "b",
+    );
+    task(
+        &fixture,
+        "t-other",
+        "Other",
+        "open",
+        "test-agent",
+        "",
+        "n-elsewhere",
+        &[],
+        "b",
+    );
+    memory_in_project(&fixture, "m-mine", "Mine", "n-p");
+    memory_in_project(&fixture, "m-other", "Other", "n-elsewhere");
+    let out = fixture
+        .cmd()
+        .args(["project", "n-p", "--json"])
+        .output()
+        .expect("run mesh");
+    let payload = json_of(&out);
+    assert_eq!(ids_of(&payload["notes"]), ["n-linked"]);
+    assert_eq!(ids_of(&payload["memories"]), ["m-mine"]);
+    assert_eq!(payload["tasks"], serde_json::json!([]));
+}
+
+#[test]
+fn project_space_narrows_each_envelope_section() {
+    let fixture = VaultFixture::new();
+    note(&fixture, "n-p", "Proj", "test-agent", &[], "b");
+    task(
+        &fixture,
+        "t-a",
+        "Scoped",
+        "open",
+        "test-agent",
+        "",
+        "n-p",
+        &[],
+        "b",
+    );
+    note(&fixture, "n-linked", "Linked", "test-agent", &["n-p"], "b");
+    memory_in_project(&fixture, "m-a", "Fact", "n-p");
+    let out = fixture
+        .cmd()
+        .args(["project", "n-p", "--space", "notes", "--json"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(0));
+    let payload = json_of(&out);
+    // `--space notes` narrows the corpus each section reads, exactly as it does for `tasks`
+    // today: the keys stay in place and the sections outside the corpus read empty.
+    assert_eq!(
+        payload.as_object().expect("object").keys().count(),
+        4,
+        "the payload shape does not change with --space"
+    );
+    assert_eq!(ids_of(&payload["notes"]), ["n-linked"]);
+    assert_eq!(payload["tasks"], serde_json::json!([]));
+    assert_eq!(payload["memories"], serde_json::json!([]));
+}
+
+#[test]
+fn project_renders_the_envelope_sections_after_the_tasks() {
+    let fixture = VaultFixture::new();
+    note(&fixture, "n-p", "Proj", "test-agent", &[], "b");
+    task(
+        &fixture,
+        "t-a",
+        "Scoped",
+        "open",
+        "test-agent",
+        "",
+        "n-p",
+        &[],
+        "b",
+    );
+    note(&fixture, "n-linked", "Linked", "test-agent", &["n-p"], "b");
+    memory_in_project(&fixture, "m-a", "Fact", "n-p");
+    let human = fixture
+        .cmd()
+        .args(["project", "n-p"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(
+        lines(&human),
+        [
+            "n-p\tnote\tProj",
+            "  t-a\topen\tScoped",
+            "  n-linked\tnote\tLinked",
+            "  m-a\tmemory\tFact",
+        ]
+    );
+    let quiet = fixture
+        .cmd()
+        .args(["project", "n-p", "--quiet"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(lines(&quiet), ["n-p", "t-a", "n-linked", "m-a"]);
 }
 
 #[test]
@@ -1213,10 +1372,23 @@ fn project_matches_the_python_golden() {
         .args(["project", "n-19EP", "--json"])
         .output()
         .expect("run mesh");
-    assert_eq!(
-        normalise(&json_of(&out)),
-        normalise(&golden("project_p1.json"))
-    );
+    let got = json_of(&out);
+    let want = golden("project_p1.json");
+    // The golden stays authoritative over the two keys the Python era wrote. The payload
+    // extends by append, so the comparison is per key and the appended sections are pinned
+    // against the corpus itself — a whole-document comparison would fail on the append.
+    assert_eq!(normalise(&got["project"]), normalise(&want["project"]));
+    assert_eq!(normalise(&got["tasks"]), normalise(&want["tasks"]));
+    let keys: Vec<&str> = got
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["project", "tasks", "notes", "memories"]);
+    // No corpus note names n-19EP, and the corpus holds no memories.
+    assert_eq!(got["notes"], serde_json::json!([]));
+    assert_eq!(got["memories"], serde_json::json!([]));
 }
 
 #[test]

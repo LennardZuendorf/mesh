@@ -1048,6 +1048,25 @@ fn list_json_beats_quiet_on_a_class_l_verb() {
 }
 
 #[test]
+fn list_json_shows_the_project_field_when_set() {
+    let f = VaultFixture::new();
+    let id = new_memory(&f, "Scoped", "x");
+    f.cmd()
+        .args(["memory", "update", &id, "--project", "n-P1"])
+        .assert()
+        .success();
+    let out = f
+        .cmd()
+        .args(["memory", "list", "--json"])
+        .output()
+        .expect("run");
+    let payload = json_of(&out);
+    assert_eq!(ids_of(&payload), vec![id.clone()]);
+    assert_eq!(payload[0]["id"], Json::String(id));
+    assert_eq!(payload[0]["project"], Json::String("n-P1".into()));
+}
+
+#[test]
 fn list_quiet_prints_ids_alone() {
     let f = VaultFixture::new();
     seed(&f, Seed::default());
