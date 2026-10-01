@@ -198,8 +198,9 @@ impl MeshError {
     /// The `next_action` line of the JSON error envelope (map/mcp.md §5.4, plus `blocked`).
     pub fn next_action(&self) -> &'static str {
         if let MeshError::SeedForeign(_) = self.inner() {
-            return "read it with `mesh search` or `mesh note get --foreign <slug>`; \
-                    graph lenses walk mesh-authored entities only";
+            return "adopt it with `mesh note adopt <path>`, or read it with `mesh search` or \
+                    `mesh note get --foreign <stem-or-path>`; graph lenses walk mesh-authored \
+                    entities only";
         }
         match self.kind() {
             "config_missing" => "run `mesh init` to create a config, then retry",
@@ -316,6 +317,9 @@ mod tests {
             vec![("seed_id", serde_json::json!("ndc-rollout-status"))]
         );
         assert!(err.next_action().contains("foreign"));
+        // `note get --foreign` matches a file stem or path, not a slug; adopt is the way in.
+        assert!(!err.next_action().contains("<slug>"));
+        assert!(err.next_action().contains("mesh note adopt <path>"));
     }
 
     #[test]
