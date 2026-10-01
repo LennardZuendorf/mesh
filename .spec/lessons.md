@@ -196,3 +196,9 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** pin a startup/wall-clock budget on the **minimum of several** warm end-to-end runs, with one discard pass to warm the loader and page cache; choose the bound from measured distribution (idle floor AND full-load floor), with generous-but-real headroom, and print the full timing vector in the failure message so a red pin is diagnosable, not mysterious. Calibrate with real measurements recorded in the spec, never by copying the marketing number into the assert.
 **Tags:** performance, cold-start, testing, wall-clock, pins, noise
 **Date:** 2026-09-26
+
+### A libc type alias has a different width on every target
+**Pattern:** `2f6dab8` fixed a macOS compile error by narrowing the mode to `u16` before `rustix::fs::Mode::from_bits`. On macOS `mode_t` is `u16`; on Linux it is `u32`. The branch was verified on macOS only, so `check (ubuntu-latest)`, `coverage` and `package` all failed with E0631 on the pushed head.
+**Rule:** never name a concrete width for a libc alias (`mode_t`, `dev_t`, `ino_t`, `off_t`). Use the std API that fixes the width (`Permissions::from_mode(u32)`, `File::set_permissions`), or convert through the alias with a scoped `#[allow(clippy::useless_conversion)]`. A fix to platform-dependent code is verified only when CI is green on both matrix targets.
+**Tags:** portability, linux, macos, rustix, ci, verification
+**Date:** 2026-10-01
