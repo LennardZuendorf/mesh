@@ -1284,3 +1284,108 @@ fn an_update_leaves_a_note_in_the_folder_the_operator_filed_it_in() {
 // finds a hand-made duplicate before the rename is ever reached. The guard mirrors the one
 // `watch.rs` reconciliation carries and stays as cheap insurance — but a test that has to
 // contrive an unreachable state proves nothing, so there isn't one.
+
+// ---------------------------------------------------------------------------------------
+// an idempotent note verb reports the state it found and never rewrites the file
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn an_idempotent_note_verb_never_rewrites_the_file() {
+    // The per-verb feature pins live in note_cli.rs (`adopt_is_idempotent_byte_for_byte`,
+    // `a_same_identity_reclaim_leaves_the_bytes_untouched`,
+    // `release_is_idempotent_and_force_breaks_a_foreign_claim`); this is the regression-level
+    // guard that all three no-ops hold byte-for-byte under the default layout.
+    let f = VaultFixture::new();
+
+    // Adopt of an already-adopted file reports the id it found and rewrites nothing.
+    let adopted = ok(&f, &["--quiet", "note", "new", "Adopted", "--body", "b"]);
+    let adopted_rel = format!("notes/{adopted}.md");
+    let adopted_before = f.read(&adopted_rel);
+    assert_eq!(ok(&f, &["--quiet", "note", "adopt", &adopted_rel]), adopted);
+    assert_eq!(
+        f.read(&adopted_rel),
+        adopted_before,
+        "a re-adopt rewrote the file"
+    );
+
+    // Claim by the identity that already holds it.
+    ok(
+        &f,
+        &["--owner", "alice", "note", "claim", &adopted, "--quiet"],
+    );
+    let held = f.read(&adopted_rel);
+    assert_eq!(
+        ok(&f, &["--owner", "alice", "note", "claim", &adopted]),
+        format!("claimed {adopted}")
+    );
+    assert_eq!(
+        f.read(&adopted_rel),
+        held,
+        "a same-identity re-claim rewrote the file"
+    );
+
+    // Release of an unclaimed note.
+    let unclaimed = ok(&f, &["--quiet", "note", "new", "Unclaimed", "--body", "b"]);
+    let unclaimed_rel = format!("notes/{unclaimed}.md");
+    let unclaimed_before = f.read(&unclaimed_rel);
+    assert_eq!(
+        ok(&f, &["note", "release", &unclaimed]),
+        format!("released {unclaimed}")
+    );
+    assert_eq!(
+        f.read(&unclaimed_rel),
+        unclaimed_before,
+        "an unclaimed release rewrote the file"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// a note claim conflict wears the task claim conflict's envelope
+// ---------------------------------------------------------------------------------------
+
+fn envelope_keys(value: &Json) -> Vec<String> {
+    value
+        .as_object()
+        .expect("object")
+        .keys()
+        .cloned()
+        .collect::<Vec<String>>()
+}
+
+#[test]
+fn a_note_claim_conflict_has_the_task_claim_envelope_shape() {
+    let f = VaultFixture::new();
+    let note = ok(&f, &["--quiet", "note", "new", "N", "--body", "b"]);
+    ok(&f, &["--owner", "alice", "note", "claim", &note]);
+    let (_, note_stderr, note_code) =
+        run(&f, &["--json", "--owner", "bob", "note", "claim", &note]);
+    assert_eq!(note_code, 4);
+    let note_env: Json = serde_json::from_str(&note_stderr).expect("note envelope");
+
+    let task = ok(&f, &["--quiet", "task", "new", "T"]);
+    ok(&f, &["--owner", "alice", "task", "claim", &task]);
+    let (_, task_stderr, task_code) =
+        run(&f, &["--json", "--owner", "bob", "task", "claim", &task]);
+    assert_eq!(task_code, 4);
+    let task_env: Json = serde_json::from_str(&task_stderr).expect("task envelope");
+
+    // Shape parity: the note conflict carries byte-identical keys, in order, to the task one.
+    assert_eq!(envelope_keys(&note_env), envelope_keys(&task_env));
+    assert_eq!(
+        envelope_keys(&note_env),
+        [
+            "kind",
+            "message",
+            "next_action",
+            "task_id",
+            "existing_owner"
+        ]
+    );
+    assert_eq!(note_env["kind"], Json::String("claim_conflict".into()));
+    assert_eq!(note_env["task_id"], Json::String(note));
+    assert_eq!(note_env["existing_owner"], Json::String("alice".into()));
+    assert_eq!(note_env["next_action"], task_env["next_action"]);
+    // A durable claim carries no retry advice — that belongs to a contended lock.
+    assert!(note_env.get("retry_after_ms").is_none());
+    assert!(task_env.get("retry_after_ms").is_none());
+}

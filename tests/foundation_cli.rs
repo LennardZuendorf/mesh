@@ -262,6 +262,7 @@ fn no_invocation_ever_prints_a_rust_panic() {
         vec!["session-start"],
         vec!["status"],
         vec!["reindex"],
+        vec!["dashboard"],
         vec!["config", "path"],
         vec!["config", "show"],
         vec!["daemon", "status"],
@@ -335,6 +336,60 @@ fn help_text_prints_raw_bracketed_strings() {
         .stdout(predicate::str::contains(
             "Owner identity (checked against [tasks].collections",
         ));
+}
+
+/// The cold-start wall-clock pin: with the dashboard and its `ratatui`/`crossterm` link in the
+/// shipped binary, a warm read command still starts in single-digit milliseconds.
+///
+/// `AGENTS.md` documents a 10 ms goal; that is a floor, not a wall-clock bound — process spawn
+/// alone costs several milliseconds, and a single run swings with scheduler noise. So the pin
+/// is the **minimum of ten warm runs**: noise only ever makes a run slower, so the fastest of
+/// ten approximates the unloaded startup cost, and any regression that adds startup work lifts
+/// it. The bound is generous — more than six times the measured minimum — but real: a
+/// regression that loads or initialises the TUI crates on every command, or otherwise adds tens
+/// of milliseconds of startup work, trips it.
+#[test]
+fn a_warm_read_command_starts_under_the_cold_start_bound() {
+    use std::time::{Duration, Instant};
+
+    let fixture = VaultFixture::new();
+    // A little content, so the read does real work rather than short-circuiting on an empty
+    // vault.
+    fixture
+        .cmd()
+        .args(["note", "new", "warm one", "--body", "hello"])
+        .assert()
+        .success();
+    fixture
+        .cmd()
+        .args(["note", "new", "warm two", "--body", "world"])
+        .assert()
+        .success();
+    // One discard run warms the page cache and the dynamic loader, so the loop below measures
+    // steady-state startup rather than a cold first touch.
+    fixture
+        .cmd()
+        .args(["note", "list"])
+        .output()
+        .expect("warmup");
+
+    let bound = Duration::from_millis(50);
+    let mut timings = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let started = Instant::now();
+        fixture
+            .cmd()
+            .args(["note", "list"])
+            .output()
+            .expect("run mesh");
+        timings.push(started.elapsed());
+    }
+    let fastest = timings.iter().min().copied().expect("ten runs recorded");
+    assert!(
+        fastest < bound,
+        "cold-start budget: the fastest of ten warm `note list` runs was {fastest:?}, over the \
+         {bound:?} bound; all timings: {timings:?}"
+    );
 }
 
 #[test]

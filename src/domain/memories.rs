@@ -55,6 +55,7 @@ pub struct NewMemory {
     pub scope: String,
     pub importance: Option<i64>,
     pub source: Option<String>,
+    pub project: Option<String>,
     pub expires: Option<DateTime<Utc>>,
     pub supersedes: Option<String>,
     pub tags: Vec<String>,
@@ -71,6 +72,7 @@ pub struct UpdateMemory {
     pub scope: Option<String>,
     pub importance: Option<i64>,
     pub source: Option<String>,
+    pub project: Option<String>,
     pub expires: Option<Option<DateTime<Utc>>>,
     pub owner: Option<String>,
 }
@@ -93,6 +95,9 @@ pub struct RecallOpts {
     pub decay: bool,
     pub include_expired: bool,
     pub min_importance: Option<i64>,
+    /// `--project`: keep only the memories scoped to this project. The seed resolves before
+    /// any search I/O through the lens's own gate; the raw caller string, not the resolved id.
+    pub project: Option<String>,
     pub meta_only: bool,
     pub full: bool,
 }
@@ -334,6 +339,11 @@ pub fn create_with_warnings(
         );
         meta.insert("kind".to_string(), Value::str(kind.as_str()));
         meta.insert("scope".to_string(), Value::str(scope.as_str()));
+        // `project` is optional and insert-only: a memory created without one stays absent
+        // (the note `claimed_by` convention), never written as `project: null`.
+        if let Some(project) = o.project.as_deref() {
+            meta.insert("project".to_string(), Value::str(project));
+        }
         meta.insert("importance".to_string(), Value::Int(importance));
         meta.insert("source".to_string(), optional_str(o.source.as_deref()));
         meta.insert(
@@ -465,6 +475,11 @@ pub fn update(cfg: &Config, target: &str, o: UpdateMemory) -> Result<Memory> {
             doc.meta
                 .insert("source".to_string(), Value::str(source.as_str()));
         }
+        // Insert-only: an update that names no project leaves any existing one in place.
+        if let Some(project) = &o.project {
+            doc.meta
+                .insert("project".to_string(), Value::str(project.as_str()));
+        }
         if let Some(expires) = &o.expires {
             doc.meta.insert(
                 "expires".to_string(),
@@ -579,7 +594,7 @@ pub fn session_picks(cfg: &Config, me: Option<&str>, cap: usize) -> Vec<View<Mem
         .retain(|v| !v.item.is_expired(now) && !v.item.is_superseded() && v.item.is_visible_to(me));
     // Stable composition: the weakest key first, the strongest last.
     views.sort_by(|a, b| a.path.to_string_lossy().cmp(&b.path.to_string_lossy()));
-    views.sort_by(|a, b| b.item.updated.cmp(&a.item.updated));
+    views.sort_by_key(|a| std::cmp::Reverse(a.item.updated));
     views.sort_by(|a, b| {
         b.item
             .effective_importance()
@@ -662,17 +677,29 @@ fn view_index(cfg: &Config) -> HashMap<PathBuf, Memory> {
 /// recency. Emits the standard hit array so one parser serves `search` and `recall` alike.
 pub fn recall(cfg: &Config, query: &str, f: &Filter, o: &RecallOpts) -> Result<Vec<Hit>> {
     cfg.root(Space::Memories)?;
+    // The `--project` scope is an eligibility filter, never a second ranker: the seed resolves
+    // first, through the gate the lens and a scoped search share, so an unresolvable id or a
+    // foreign file is exit 3 before any search I/O. Membership is `project` equality on the
+    // **resolved** id — the same rule the lens's memories section applies — and it composes
+    // with every other recall filter as a plain conjunction inside `matches_filters`.
+    let filter = match o.project.as_deref() {
+        Some(seed) => {
+            let resolved = crate::domain::lenses::resolve_project(cfg, seed)?;
+            f.clone().with_extra("project", Some(resolved.as_str()))
+        }
+        None => f.clone(),
+    };
     let (hits, _mode) = search::query(cfg, query, &recall_search_filter())?;
     let index = view_index(cfg);
     let now = now_utc();
-    let me = f.me.clone();
+    let me = filter.me.clone();
 
     let mut scored: Vec<(f64, Hit)> = Vec::new();
     for mut hit in hits {
         let Some(memory) = index.get(&realpath(&hit.path)) else {
             continue;
         };
-        if !matches_filters(&memory.meta, f) {
+        if !matches_filters(&memory.meta, &filter) {
             continue;
         }
         if o.min_importance
@@ -703,7 +730,7 @@ pub fn recall(cfg: &Config, query: &str, f: &Filter, o: &RecallOpts) -> Result<V
 
     // Stable composition: path ascending, then `updated` descending, then the final score.
     scored.sort_by(|a, b| a.1.path.cmp(&b.1.path));
-    scored.sort_by(|a, b| b.1.updated.cmp(&a.1.updated));
+    scored.sort_by_key(|a| std::cmp::Reverse(a.1.updated));
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
 
     let mut out: Vec<Hit> = scored.into_iter().map(|(_, hit)| hit).collect();
@@ -833,11 +860,83 @@ mod tests {
         assert!(path.is_file(), "{}", path.display());
         let doc = read_doc(&path).unwrap();
         let keys: Vec<&str> = doc.meta.keys().map(String::as_str).collect();
-        assert_eq!(keys, MEMORY_FIELDS.fields());
+        // `project` is declared but optional: a memory created without one carries no key.
+        let mut expected: Vec<&str> = MEMORY_FIELDS.fields().to_vec();
+        expected.retain(|key| *key != "project");
+        assert_eq!(keys, expected);
+        assert!(!doc.meta.contains_key("project"));
         assert_eq!(m.kind, "fact");
         assert_eq!(m.scope, "shared");
         assert_eq!(m.importance, Some(3));
         assert_eq!(m.superseded_by, None);
+    }
+
+    #[test]
+    fn create_with_a_project_writes_it_after_scope() {
+        let v = vault();
+        let m = create(
+            &v.cfg,
+            "Scoped",
+            NewMemory {
+                project: Some("n-P1".into()),
+                ..new_memory()
+            },
+        )
+        .unwrap();
+        assert_eq!(m.project.as_deref(), Some("n-P1"));
+        let doc = read_doc(&v.cfg.vault().join(format!("memories/{}.md", m.id))).unwrap();
+        let keys: Vec<&str> = doc.meta.keys().map(String::as_str).collect();
+        assert_eq!(keys, MEMORY_FIELDS.fields());
+        let scope = keys.iter().position(|k| *k == "scope").unwrap();
+        let project = keys.iter().position(|k| *k == "project").unwrap();
+        assert_eq!(project, scope + 1, "project lands directly after scope");
+    }
+
+    #[test]
+    fn create_tolerates_a_dangling_project_id() {
+        let v = vault();
+        let m = create(
+            &v.cfg,
+            "Dangling",
+            NewMemory {
+                project: Some("n-NOPE".into()),
+                ..new_memory()
+            },
+        )
+        .unwrap();
+        assert_eq!(m.project.as_deref(), Some("n-NOPE"));
+    }
+
+    #[test]
+    fn update_sets_a_project_and_leaves_an_absent_one_absent() {
+        let v = vault();
+        let m = create(&v.cfg, "Alpha", new_memory()).unwrap();
+        let path = resolve(&v.cfg, &m.id).unwrap();
+        assert!(!read_doc(&path).unwrap().meta.contains_key("project"));
+        let updated = update(
+            &v.cfg,
+            &m.id,
+            UpdateMemory {
+                project: Some("n-P1".into()),
+                ..UpdateMemory::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.project.as_deref(), Some("n-P1"));
+        assert_eq!(
+            meta_str(&read_doc(&path).unwrap().meta, "project"),
+            Some("n-P1")
+        );
+        let renamed = update(
+            &v.cfg,
+            &m.id,
+            UpdateMemory {
+                title: Some("Renamed".into()),
+                ..UpdateMemory::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(renamed.project.as_deref(), Some("n-P1"));
     }
 
     #[test]

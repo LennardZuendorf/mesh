@@ -402,7 +402,7 @@ fn allowed_tools_is_every_non_destructive_tool_and_nothing_else() {
         "allowed-tools must be exactly the non-destructive tools"
     );
     assert_eq!(allowed.len(), mesh::mcp::TOOL_NAMES.len() - 1);
-    assert_eq!(allowed.len(), 36);
+    assert_eq!(allowed.len(), 39);
 }
 
 #[test]
@@ -661,10 +661,14 @@ fn the_example_config_loads_through_from_table() {
     );
     assert!((cfg.search.threshold - 0.65).abs() < f64::EPSILON);
 
-    // Every space resolves, and none is disabled.
+    // Every space resolves, and none is disabled. The loader canonicalises `vault_path`,
+    // so the comparison must speak the same path space (on macOS a tempdir is `/var/...`,
+    // canonicalised to `/private/var/...`).
+    // `MESH_VAULT` may override the vault, so compare against the one the loader resolved.
+    let vault_real = cfg.vault().to_path_buf();
     for space in mesh::spaces::Space::ALL {
         let root = cfg.root(space).expect("every example space is enabled");
-        assert!(root.starts_with(&vault) || root == vault);
+        assert!(root.starts_with(&vault_real) || root == vault_real);
     }
 }
 

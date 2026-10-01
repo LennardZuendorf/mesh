@@ -685,7 +685,11 @@ fn health_reports_hybrid_disabled_first() {
 #[test]
 fn health_reports_a_missing_binary_last() {
     let f = seeded_with(&hybrid_config());
-    let out = run(&f, &["search", "--health"]);
+    // Hermetic: the operator's own PATH may carry a real `indexed` (the dev machine does),
+    // so this one command sees only the fixture's bin dir — where no binary was installed.
+    let mut cmd = f.cmd();
+    cmd.env("PATH", f.dir.path().join("bin"));
+    let out = cmd.args(["search", "--health"]).output().expect("run mesh");
     let json: Json = serde_json::from_str(stdout_of(&out).trim_end()).expect("json");
     assert_eq!(
         json["reason"],
@@ -708,7 +712,7 @@ fn health_reports_indexed_when_every_gate_is_open() {
 #[test]
 fn health_short_circuits_a_query_and_never_shells_indexed() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed("{\"path\":\"/nope.md\",\"score\":0.9}");
+    f.fake_indexed("{\"query\":\"q\",\"results\":[]}");
     let out = run(&f, &["search", "zebra", "--health"]);
     let json: Json = serde_json::from_str(stdout_of(&out).trim_end()).expect("json");
     assert_eq!(json["mode"], Json::String("indexed".into()));
@@ -725,31 +729,74 @@ fn health_reports_watcher_liveness_as_daemon_up() {
 
 // ---------------------------------------------------------------- the indexed path
 
-fn ndjson_for(f: &VaultFixture, rows: &[(&str, f64, Option<&str>)]) -> String {
-    rows.iter()
-        .map(|(rel, score, snippet)| {
+/// The `--simple-output` envelope, v2-shaped (`relevance` is the higher-is-better score),
+/// one chunk entry per row — the real CLI emits one entry per matched chunk.
+fn envelope_for(f: &VaultFixture, rows: &[(&str, f64, Option<&str>)]) -> String {
+    let entries: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, (rel, score, snippet))| {
             let path = f.vault.join(rel);
             match snippet {
                 Some(s) => format!(
-                    "{{\"path\": \"{}\", \"score\": {score}, \"snippet\": \"{s}\"}}",
+                    "{{\"rank\":{},\"relevance\":{score},\"relevance_score\":{score},\
+                     \"collection\":\"test-vault\",\"document_id\":\"doc{idx}\",\
+                     \"document_url\":\"{}\",\"chunk_number\":1,\"text\":\"{s}\"}}",
+                    idx + 1,
                     path.display()
                 ),
-                None => format!("{{\"path\": \"{}\", \"score\": {score}}}", path.display()),
+                None => format!(
+                    "{{\"rank\":{},\"relevance\":{score},\"relevance_score\":{score},\
+                     \"collection\":\"test-vault\",\"document_id\":\"doc{idx}\",\
+                     \"document_url\":\"{}\",\"chunk_number\":1}}",
+                    idx + 1,
+                    path.display()
+                ),
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    format!(
+        "{{\"query\":\"q\",\"total_collections_searched\":1,\
+              \"total_documents_found\":{},\"total_chunks_found\":{},\
+              \"results\":[{}],\"collection_errors\":[]}}",
+        rows.len(),
+        rows.len(),
+        entries.join(",")
+    )
 }
 
 #[test]
 fn the_indexed_search_argv_is_byte_exact() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, Some("s"))]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, Some("s"))]));
     let got = hits(&f, &["search", "hello world", "--limit", "5"]);
     assert_eq!(ids(&got), ["n-AAAA"]);
     assert_eq!(
         f.indexed_argv(),
-        ["index search hello world --collection test-vault --json --limit 5"]
+        ["index search hello world --collection test-vault --limit 5"]
+    );
+}
+
+#[test]
+fn the_wrapper_puts_the_cli_in_simple_output_mode() {
+    let f = seeded_with(&hybrid_config());
+    // The output mode is an environment contract, not an argv flag: `--simple-output` is
+    // global-only in the CLI, so the child is switched over by env. Pin that it arrives.
+    let log = f.dir.path().join("indexed-argv.log");
+    f.write_bin(
+        "indexed",
+        &format!(
+            "#!/bin/sh\nprintf '%s env=%s\\n' \"$*\" \"$INDEXED_SIMPLE_OUTPUT\" >> {log}\n\
+             printf '%s' '{{\"query\":\"q\",\"results\":[]}}'\n",
+            log = log.display()
+        ),
+    );
+    let _ = hits(&f, &["search", "zebra"]);
+    let argv = f.indexed_argv();
+    assert_eq!(argv.len(), 1);
+    assert!(
+        argv[0].ends_with("env=1") && !argv[0].contains("--json"),
+        "{argv:?}"
     );
 }
 
@@ -764,7 +811,7 @@ fn a_filtered_indexed_query_fetches_unbounded_and_caps_after_filtering() {
         "---\nid: n-CCCN\ntype: note\ntitle: Third\ntags: []\n\
          updated: 2026-05-01T00:00:00Z\n---\n\nzebra\n",
     );
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-AAAA.md", 0.9, None),
@@ -798,7 +845,7 @@ fn a_filtered_indexed_query_fetches_unbounded_and_caps_after_filtering() {
     );
     // With no filter, the limit still reaches `indexed` verbatim.
     let bare = seeded_with(&hybrid_config());
-    bare.fake_indexed(&ndjson_for(&bare, &[("notes/n-AAAA.md", 0.9, None)]));
+    bare.fake_indexed(&envelope_for(&bare, &[("notes/n-AAAA.md", 0.9, None)]));
     hits(&bare, &["search", "zebra", "--limit", "2"]);
     assert!(
         bare.indexed_argv()[0].ends_with("--limit 2"),
@@ -822,7 +869,7 @@ fn indexed_ties_break_on_path_ascending() {
         "---\nid: n-YYYY\ntype: note\ntitle: Why\ntags: []\n\
          updated: 2026-06-01T00:00:00Z\n---\n\nzebra\n",
     );
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-ZZZZ.md", 0.8, None),
@@ -835,7 +882,7 @@ fn indexed_ties_break_on_path_ascending() {
 #[test]
 fn indexed_hits_carry_the_external_score_and_snippet() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[("notes/n-AAAA.md", 0.91, Some("ranked"))],
     ));
@@ -847,7 +894,7 @@ fn indexed_hits_carry_the_external_score_and_snippet() {
 #[test]
 fn indexed_hits_are_re_filtered_against_the_conjunctive_filters() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-AAAA.md", 0.9, None),
@@ -871,17 +918,17 @@ fn an_unset_config_threshold_never_filters_the_indexed_path() {
     // omits the key for exactly this reason. The indexed branch applied the nominal 0.65
     // anyway, so every indexed hit in the 0.4-0.65 band was dropped at exit 0 — on the
     // config mesh itself writes. It now uses the same floor the built-in branch uses.
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
     assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-AAAA"]);
     // The engine's own floor still applies.
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.3, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.3, None)]));
     assert!(hits(&f, &["search", "zebra"]).is_empty());
 }
 
 #[test]
 fn an_explicit_config_threshold_does_filter_the_indexed_path() {
     let f = seeded_with(&format!("{}threshold = 0.65\n", hybrid_config()));
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.5, None)]));
     assert!(hits(&f, &["search", "zebra"]).is_empty());
     assert_eq!(
         ids(&hits(&f, &["search", "zebra", "--threshold", "0.4"])),
@@ -892,7 +939,7 @@ fn an_explicit_config_threshold_does_filter_the_indexed_path() {
 #[test]
 fn indexed_hits_below_the_threshold_are_dropped() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/n-AAAA.md", 0.9, None),
@@ -910,10 +957,17 @@ fn an_indexed_hit_outside_the_sandbox_is_dropped() {
     let f = seeded_with(&hybrid_config());
     let outside = f.dir.path().join("outside.md");
     std::fs::write(&outside, "---\nid: n-OUT\n---\n\nx\n").expect("write outside");
+    // One envelope, both hits: only the sandbox-resolvable one survives.
+    let entry = |url: &std::path::Path| {
+        format!(
+            "{{\"rank\":1,\"relevance\":0.9,\"document_url\":\"{}\"}}",
+            url.display()
+        )
+    };
     f.fake_indexed(&format!(
-        "{{\"path\": \"{}\", \"score\": 0.9}}\n{}",
-        outside.display(),
-        ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)])
+        "{{\"query\":\"q\",\"results\":[{},{}]}}",
+        entry(&outside),
+        entry(&f.vault.join("notes/n-AAAA.md"))
     ));
     assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-AAAA"]);
 }
@@ -921,7 +975,7 @@ fn an_indexed_hit_outside_the_sandbox_is_dropped() {
 #[test]
 fn an_indexed_hit_whose_file_vanished_is_dropped() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[("notes/gone.md", 0.9, None), ("notes/n-AAAA.md", 0.9, None)],
     ));
@@ -933,7 +987,7 @@ fn the_indexed_path_orders_by_the_epsilon_comparator() {
     let f = seeded_with(&hybrid_config());
     // n-BBBB scores lower but is inside the 0.02 band and… older, so n-AAAA still wins;
     // n-AAAA is the more recently updated of the pair.
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/logs/n-BBBB.md", 0.91, None),
@@ -946,7 +1000,7 @@ fn the_indexed_path_orders_by_the_epsilon_comparator() {
 #[test]
 fn the_indexed_path_prefers_score_outside_the_band() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(
+    f.fake_indexed(&envelope_for(
         &f,
         &[
             ("notes/logs/n-BBBB.md", 0.95, None),
@@ -957,19 +1011,26 @@ fn the_indexed_path_prefers_score_outside_the_band() {
 }
 
 #[test]
-fn malformed_ndjson_lines_are_skipped_and_the_query_continues() {
+fn a_garbage_envelope_yields_no_hits_and_never_an_error() {
     let f = seeded_with(&hybrid_config());
-    let good = ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]);
-    f.fake_indexed(&format!(
-        "\n{{not json}}\n{{\"path\": \"/x.md\"}}\n{{\"path\": \"/x.md\", \"score\": true}}\n{good}"
-    ));
-    assert_eq!(ids(&hits(&f, &["search", "zebra"])), ["n-AAAA"]);
+    // The envelope is one JSON document, so a malformed payload is zero hits on the indexed
+    // branch at exit 0 — not a crash, and not a fallback (the subprocess ran fine).
+    f.fake_indexed("{not json}\n{\"path\": \"/x.md\"}\n");
+    let out = run(&f, &["search", "zebra"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        stderr_of(&out),
+        "",
+        "the subprocess succeeded, so no notice"
+    );
+    let got: Json = serde_json::from_str(stdout_of(&out).trim_end()).expect("json");
+    assert_eq!(got.as_array().map(Vec::len), Some(0));
 }
 
 #[test]
 fn the_indexed_path_emits_no_degradation_notice() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
     let out = run(&f, &["search", "zebra"]);
     assert_eq!(stderr_of(&out), "");
 }
@@ -1010,7 +1071,7 @@ fn a_hanging_indexed_times_out_and_degrades() {
 #[test]
 fn engine_builtin_never_shells_indexed() {
     let f = seeded_with(&hybrid_config());
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
     let _ = hits(&f, &["search", "zebra", "--engine", "builtin"]);
     assert!(f.indexed_argv().is_empty());
 }
@@ -1022,12 +1083,93 @@ fn engine_indexed_shells_indexed_even_with_hybrid_off() {
         common::DEFAULT_CONFIG
     );
     let f = seeded_with(&cfg);
-    f.fake_indexed(&ndjson_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
+    f.fake_indexed(&envelope_for(&f, &[("notes/n-AAAA.md", 0.9, None)]));
     assert_eq!(
         ids(&hits(&f, &["search", "zebra", "--engine", "indexed"])),
         ["n-AAAA"]
     );
     assert_eq!(f.indexed_argv().len(), 1);
+}
+
+// ---------------------------------------------------------------- reindex routing
+
+/// A stub that exits 3: the rebuild fails, so `reindex` must report the degradation.
+const REINDEX_NOTICE: &str = "search index unavailable (indexed binary missing or failed)";
+
+#[test]
+fn reindex_updates_a_collection_that_already_exists() {
+    let f = seeded_with(&hybrid_config());
+    // A stub that succeeds: the update-when-exists route is ONE refresh for the collection,
+    // never a per-root create (create would PROMPT on an existing collection and mesh never
+    // answers a prompt, so it must not be the first move).
+    f.fake_indexed("");
+    let out = run(&f, &["reindex"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stderr_of(&out), "", "a successful refresh is silent");
+    assert_eq!(f.indexed_argv(), ["index update test-vault"]);
+}
+
+#[test]
+fn reindex_creates_each_root_when_the_collection_is_missing() {
+    let f = seeded_with(&hybrid_config());
+    install_fake(&f, "no-collection.sh");
+    let log = f.dir.path().join("indexed-argv.log");
+    let out = f
+        .cmd()
+        .env("INDEXED_ARGV_LOG", &log)
+        .arg("reindex")
+        .output()
+        .expect("run reindex");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(
+        stderr_of(&out),
+        "",
+        "the create succeeded, so no degradation notice"
+    );
+    // Update is the existence probe; create follows, once per root (the vault root here).
+    let text = std::fs::read_to_string(&log).expect("argv log");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0], "index update test-vault", "probe first");
+    assert!(
+        lines[1].starts_with("index create files --path "),
+        "{:?}",
+        lines[1]
+    );
+    assert!(
+        lines[1].ends_with("--collection test-vault"),
+        "{:?}",
+        lines[1]
+    );
+}
+
+#[test]
+fn reindex_reports_a_degradation_when_the_refresh_fails() {
+    let f = seeded_with(&hybrid_config());
+    // A non-zero exit that is NOT the missing-collection error: no fallback to create.
+    install_fake(&f, "fail.sh");
+    let out = run(&f, &["reindex"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stderr_of(&out).trim_end(), REINDEX_NOTICE);
+}
+
+#[test]
+fn an_ingest_timeout_override_reaches_the_reindex_clock() {
+    let f = seeded_with(&hybrid_config());
+    install_fake(&f, "hang.sh");
+    let started = std::time::Instant::now();
+    let out = f
+        .cmd()
+        .env("MESH_INDEXED_TIMEOUT_MS", "250")
+        .arg("reindex")
+        .output()
+        .expect("run reindex");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the ingest clock honoured the override"
+    );
+    assert!(stderr_of(&out).contains(REINDEX_NOTICE));
 }
 
 // ---------------------------------------------------------------- notices and output class
@@ -1131,6 +1273,7 @@ fn search_help_lists_the_whole_flag_surface() {
         "--meta-only",
         "--full",
         "--health",
+        "--project",
     ] {
         assert!(text.contains(flag), "{flag} missing from help");
     }
@@ -1151,4 +1294,337 @@ fn the_payload_path_is_the_file_on_disk() {
     let got = hits(&f, &["search", "--space", "memories"]);
     let path = PathBuf::from(got[0]["path"].as_str().expect("path string"));
     assert!(path.is_file(), "{path:?}");
+}
+
+// ---------------------------------------------------------------- project scoping
+
+/// A vault holding one project envelope: the seed, members in the three envelope spaces,
+/// non-members that match the same query in each, and an asset that is never a member.
+///
+/// Every body says `pricing`, so every entity matches the query and only membership decides
+/// what a scoped search returns.
+fn project_envelope(cfg: &str) -> VaultFixture {
+    let f = VaultFixture::with(cfg);
+    scoped_note(&f, "n-PROJ", &[]);
+    scoped_note(&f, "n-MEMB", &["n-PROJ"]);
+    scoped_note(&f, "n-MEMB2", &["n-PROJ"]);
+    scoped_note(&f, "n-OTHER", &["n-elsewhere"]);
+    scoped_task(&f, "t-MEMB", "open", "n-PROJ", &["b"]);
+    scoped_task(&f, "t-DONE", "done", "n-PROJ", &[]);
+    scoped_task(&f, "t-OPEN", "open", "null", &["b"]);
+    scoped_memory(&f, "m-MEMB", "n-PROJ");
+    scoped_memory(&f, "m-OTHER", "");
+    f.write(
+        "assets/a-ONE.md",
+        "---\nid: a-ONE\ntype: asset\ntitle: pricing asset\nfilename: p.png\n\
+         updated: 2026-02-01T00:00:00Z\n---\n\npricing body\n",
+    );
+    f
+}
+
+fn scoped_note(f: &VaultFixture, id: &str, related: &[&str]) {
+    f.write(
+        &format!("notes/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: note\ntitle: {id} note\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+             related:{}\n---\n\npricing body\n",
+            yaml_list(related)
+        ),
+    );
+}
+
+fn scoped_task(f: &VaultFixture, id: &str, status: &str, project: &str, tags: &[&str]) {
+    let folder = if status == "done" { "done" } else { "open" };
+    f.write(
+        &format!("tasks/{folder}/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: task\ntitle: {id} task\nstatus: {status}\ntags:{}\n\
+             owner: test-agent\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+             related: []\npriority: null\nclaimed_by: null\nproject: {project}\nblocks: []\n\
+             blocked_by: []\n---\n\npricing body\n",
+            yaml_list(tags)
+        ),
+    );
+}
+
+fn scoped_memory(f: &VaultFixture, id: &str, project: &str) {
+    let project_line = if project.is_empty() {
+        String::new()
+    } else {
+        format!("project: {project}\n")
+    };
+    f.write(
+        &format!("memories/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: memory\ntitle: {id} memory\ntags: []\nowner: null\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n\
+             kind: fact\nscope: shared\n{project_line}importance: 3\nsource: null\n\
+             expires: null\nsuperseded_by: null\n---\n\npricing body\n"
+        ),
+    );
+}
+
+fn yaml_list(items: &[&str]) -> String {
+    if items.is_empty() {
+        " []".to_string()
+    } else {
+        format!(
+            "\n{}",
+            items
+                .iter()
+                .map(|item| format!("  - {item}\n"))
+                .collect::<String>()
+        )
+    }
+}
+
+fn sorted_ids(hits: &[Json]) -> Vec<String> {
+    let mut out = ids(hits);
+    out.sort();
+    out
+}
+
+#[test]
+fn a_scoped_search_returns_only_envelope_members() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    let got = hits(
+        &f,
+        &[
+            "search",
+            "pricing",
+            "--project",
+            "n-PROJ",
+            "--engine",
+            "builtin",
+            "--limit=-1",
+            "--quiet",
+        ],
+    );
+    // Notes by `related` containment, tasks and memories by `project` equality.
+    assert_eq!(
+        sorted_ids(&got),
+        ["m-MEMB", "n-MEMB", "n-MEMB2", "t-DONE", "t-MEMB"]
+    );
+    // The seed itself outscores every member and is still not a member of its own envelope.
+    assert!(!ids(&got).contains(&"n-PROJ".to_string()));
+}
+
+#[test]
+fn a_scoped_search_composes_with_tags_and_status() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    // Tag `b` and status `open` together: the member task survives, the non-member that
+    // carries both attributes stays out.
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--tags",
+                "b",
+                "--status",
+                "open",
+                "--limit=-1",
+                "--quiet",
+            ]
+        )),
+        ["t-MEMB"]
+    );
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--status",
+                "done",
+                "--limit=-1",
+                "--quiet",
+            ]
+        )),
+        ["t-DONE"]
+    );
+    // A conjunction that matches nothing is an empty page, never an error.
+    assert!(hits(
+        &f,
+        &[
+            "search",
+            "pricing",
+            "--project",
+            "n-PROJ",
+            "--tags",
+            "no-such-tag",
+            "--limit=-1",
+            "--quiet",
+        ]
+    )
+    .is_empty());
+}
+
+#[test]
+fn a_scoped_tag_pull_keeps_members_only() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &["search", "--project", "n-PROJ", "--tags", "b", "--limit=-1"]
+        )),
+        ["t-MEMB"]
+    );
+}
+
+#[test]
+fn the_space_flag_narrows_the_corpus_not_the_envelope() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--space",
+                "notes",
+                "--limit=-1",
+                "--quiet",
+            ]
+        )),
+        ["n-MEMB", "n-MEMB2"]
+    );
+    // An asset is never an envelope member, so a project-scoped asset search is an empty
+    // page — the envelope is a property of the project, not of the space flag.
+    assert!(!hits(
+        &f,
+        &["search", "pricing", "--space", "assets", "--limit=-1"]
+    )
+    .is_empty());
+    assert!(hits(
+        &f,
+        &[
+            "search",
+            "pricing",
+            "--project",
+            "n-PROJ",
+            "--space",
+            "assets",
+            "--limit=-1",
+            "--quiet",
+        ]
+    )
+    .is_empty());
+}
+
+#[test]
+fn a_scoped_indexed_search_fetches_unbounded_filters_then_caps() {
+    let f = project_envelope(&hybrid_config());
+    // More hits than the display limit, with non-members ranked above the members: asking
+    // `indexed` for `--limit 2` would fill the page with rows the envelope excludes.
+    f.fake_indexed(&envelope_for(
+        &f,
+        &[
+            ("notes/n-OTHER.md", 0.95, None),
+            ("notes/n-PROJ.md", 0.90, None),
+            ("notes/n-MEMB.md", 0.80, None),
+            ("notes/n-MEMB2.md", 0.70, None),
+            ("memories/m-MEMB.md", 0.60, None),
+            ("memories/m-OTHER.md", 0.50, None),
+        ],
+    ));
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--limit",
+                "2",
+                "--threshold",
+                "0",
+            ]
+        )),
+        ["n-MEMB", "n-MEMB2"]
+    );
+    // The fetch itself was unbounded, and the display cap came after the member filter.
+    assert!(
+        f.indexed_argv()
+            .iter()
+            .all(|line| line.ends_with("--limit -1")),
+        "{:?}",
+        f.indexed_argv()
+    );
+    // The scope composes with the other filters on this branch too.
+    f.fake_indexed(&envelope_for(
+        &f,
+        &[
+            ("tasks/open/t-OPEN.md", 0.90, None),
+            ("tasks/open/t-MEMB.md", 0.80, None),
+        ],
+    ));
+    assert_eq!(
+        ids(&hits(
+            &f,
+            &[
+                "search",
+                "pricing",
+                "--project",
+                "n-PROJ",
+                "--tags",
+                "b",
+                "--limit=-1",
+                "--threshold",
+                "0",
+            ]
+        )),
+        ["t-MEMB"]
+    );
+}
+
+#[test]
+fn an_unknown_project_exits_three_with_the_not_found_envelope_and_candidates() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    let out = run(&f, &["search", "--project", "n-NOPE", "pricing"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(stderr_of(&out).trim_end(), "project not found: n-NOPE");
+    assert_eq!(stdout_of(&out), "");
+
+    let out = run(&f, &["--json", "search", "--project", "n-NOPE", "pricing"]);
+    assert_eq!(out.status.code(), Some(3));
+    let payload: Json = serde_json::from_str(stderr_of(&out).trim()).expect("json envelope");
+    assert_eq!(payload["kind"], Json::String("not_found".into()));
+    assert_eq!(
+        payload["message"],
+        Json::String("project not found: n-NOPE".into())
+    );
+    assert!(
+        payload["candidates"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|id| id == "n-PROJ")),
+        "{payload}"
+    );
+}
+
+#[test]
+fn a_foreign_project_seed_is_never_a_project() {
+    let f = project_envelope(common::DEFAULT_CONFIG);
+    f.write(
+        "notes/ndc-rollout-status.md",
+        "---\ntype: Project\ntitle: NDC Rollout Status\n---\n\nforeign workstream\n",
+    );
+    let out = run(
+        &f,
+        &["search", "--project", "ndc-rollout-status", "pricing"],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        stderr_of(&out).trim_end(),
+        "seed is not mesh-native (no mesh id): ndc-rollout-status"
+    );
 }

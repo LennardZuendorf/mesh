@@ -95,6 +95,14 @@ fn session_row(entry: &Json) -> String {
     )
 }
 
+/// One lens section: an absent or non-array key reads as an empty slice.
+fn section<'a>(payload: &'a Json, key: &str) -> &'a [Json] {
+    match payload.get(key).and_then(Json::as_array) {
+        Some(entries) => entries.as_slice(),
+        None => &[],
+    }
+}
+
 // --------------------------------------------------------------------------------------------
 // the five lenses
 // --------------------------------------------------------------------------------------------
@@ -154,26 +162,24 @@ pub fn graph(ctx: &mut Ctx, args: GraphArgs) -> Result<()> {
     Ok(())
 }
 
-/// `mesh project PROJECT_ID` — a project note and the tasks scoped to it.
+/// `mesh project PROJECT_ID` — a project note and the envelope scoped to it.
 pub fn project(ctx: &mut Ctx, args: ProjectArgs) -> Result<()> {
     ctx.coalesce(args.out.json, args.out.quiet, None);
     let cfg = ctx.cfg()?;
-    let spaces = spaces_for(cfg, args.space.as_deref(), &lenses::DEFAULT_SPACES)?;
+    let spaces = spaces_for(cfg, args.space.as_deref(), &lenses::PROJECT_SPACES)?;
     let payload = lenses::project_view_in(cfg, &args.project_id, &spaces)?;
     if ctx.g.json {
         emit_json(&payload);
         return Ok(());
     }
-    let empty: Vec<Json> = Vec::new();
-    let tasks = payload
-        .get("tasks")
-        .and_then(Json::as_array)
-        .unwrap_or(&empty);
+    let tasks = section(&payload, "tasks");
+    let notes = section(&payload, "notes");
+    let memories = section(&payload, "memories");
     let project_node = payload.get("project").cloned().unwrap_or(Json::Null);
     if ctx.g.quiet {
         out::line(&text_of(&project_node, "id"));
-        for task in tasks {
-            out::line(&text_of(task, "id"));
+        for entry in tasks.iter().chain(notes).chain(memories) {
+            out::line(&text_of(entry, "id"));
         }
         return Ok(());
     }
@@ -189,6 +195,16 @@ pub fn project(ctx: &mut Ctx, args: ProjectArgs) -> Result<()> {
             text_of(task, "id"),
             text_of(task, "status"),
             text_of(task, "title")
+        ));
+    }
+    // The envelope's other spaces ride the same indented row shape, showing their own `type`
+    // where a task shows its `status`.
+    for entry in notes.iter().chain(memories) {
+        out::line(&format!(
+            "  {}\t{}\t{}",
+            text_of(entry, "id"),
+            text_of(entry, "type"),
+            text_of(entry, "title")
         ));
     }
     Ok(())

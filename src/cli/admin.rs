@@ -176,7 +176,14 @@ pub fn status_block(report: &Json) -> String {
         lines.push(format!("vault: {path}{suffix}"));
     }
     if let Some(notes) = obj.get("notes") {
-        lines.push(format!("notes: {}", scalar_text(notes)));
+        lines.push(format!("notes: {} (mesh-native)", scalar_text(notes)));
+    }
+    if let Some(count) = obj.get("notes_foreign").and_then(Json::as_u64) {
+        if count > 0 {
+            lines.push(format!(
+                "foreign markdown: {count} (visible to search, not to lenses)"
+            ));
+        }
     }
     if let Some(line) = obj
         .get("tasks")
@@ -188,7 +195,14 @@ pub fn status_block(report: &Json) -> String {
         let age = freshness.get("age_seconds").and_then(Json::as_f64);
         lines.push(match age {
             Some(age) => format!("freshness: {age:.1}s ago"),
-            None => "freshness: (no vault files)".to_string(),
+            None => {
+                let foreign = obj.get("notes_foreign").and_then(Json::as_u64).unwrap_or(0);
+                if foreign > 0 {
+                    format!("freshness: (no mesh-native files; {foreign} foreign markdown)")
+                } else {
+                    "freshness: (no vault files)".to_string()
+                }
+            }
         });
     }
     if let Some(dangling) = obj.get("dangling_links") {
@@ -224,9 +238,18 @@ pub fn status_block(report: &Json) -> String {
                 let open = as_i64(row.get("owns_open")).unwrap_or(0);
                 let claimed = as_i64(row.get("claimed")).unwrap_or(0);
                 let stale = as_i64(row.get("stale_claims")).unwrap_or(0);
-                lines.push(format!(
-                    "  {name}: open={open} claimed={claimed} stale={stale}"
-                ));
+                let mut line = format!("  {name}: open={open} claimed={claimed} stale={stale}");
+                // Note counts ride at the end of the row, and only when nonzero: an agent
+                // that owns or claims no note renders exactly as it did before the census
+                // widened (the `notes_foreign` shape rule).
+                let notes_owned = as_i64(row.get("notes_owned")).unwrap_or(0);
+                let notes_claimed = as_i64(row.get("notes_claimed")).unwrap_or(0);
+                if notes_owned > 0 || notes_claimed > 0 {
+                    line.push_str(&format!(
+                        " notes_owned={notes_owned} notes_claimed={notes_claimed}"
+                    ));
+                }
+                lines.push(line);
             }
         }
     }
@@ -703,7 +726,7 @@ mod tests {
         let block = status_block(&report);
         assert_eq!(
             block,
-            "vault: /v (does not exist)\nnotes: 2\n\
+            "vault: /v (does not exist)\nnotes: 2 (mesh-native)\n\
              tasks: open=1 claimed=0 done=0 cancelled=0\nagents: (none)"
         );
         assert!(!block.contains("freshness"));
@@ -720,8 +743,10 @@ mod tests {
             "stale_locks": ["/v/tasks/.locks/t-x.lock"],
             "vault": {"path": "/v", "exists": true},
             "daemon": {"running": false, "pid": null},
-            "agents": {"bob": {"owns_open": 0, "claimed": 1, "stale_claims": 0},
-                       "alice": {"owns_open": 2, "claimed": 0, "stale_claims": 0}},
+            "agents": {"bob": {"owns_open": 0, "claimed": 1, "stale_claims": 0,
+                               "notes_owned": 0, "notes_claimed": 0},
+                       "alice": {"owns_open": 2, "claimed": 0, "stale_claims": 0,
+                                 "notes_owned": 2, "notes_claimed": 1}},
             "dangling_links_total": 3,
             "memories": {"total": 4, "expired": 1, "superseded": 0},
             "scratch": {"files": 2, "agents": 1},
@@ -733,14 +758,18 @@ mod tests {
         let block = status_block(&report);
         let lines: Vec<&str> = block.lines().collect();
         assert_eq!(lines[0], "vault: /v");
-        assert_eq!(lines[1], "notes: 1");
+        assert_eq!(lines[1], "notes: 1 (mesh-native)");
         assert_eq!(lines[2], "tasks: open=0 claimed=1 done=0 cancelled=0");
         assert_eq!(lines[3], "freshness: 0.2s ago");
         assert_eq!(lines[4], "dangling links: 3 (Ghost)");
         assert_eq!(lines[5], "stale locks: 1");
         assert_eq!(lines[6], "daemon: stopped");
         assert_eq!(lines[7], "agents:");
-        assert_eq!(lines[8], "  alice: open=2 claimed=0 stale=0");
+        assert_eq!(
+            lines[8],
+            "  alice: open=2 claimed=0 stale=0 notes_owned=2 notes_claimed=1"
+        );
+        // A zero-note agent keeps the pre-change line byte for byte.
         assert_eq!(lines[9], "  bob: open=0 claimed=1 stale=0");
         assert_eq!(lines[10], "memories: total=4 expired=1 superseded=0");
         assert_eq!(lines[11], "scratch: files=2 agents=1");
@@ -767,6 +796,28 @@ mod tests {
         assert!(block.contains("freshness: (no vault files)"));
         assert!(block.contains("dangling links: 0"));
         assert!(!block.contains("dangling links: 0 ("));
+    }
+
+    #[test]
+    fn foreign_markdown_is_labelled_and_freshness_says_which_half_is_missing() {
+        let report = serde_json::json!({
+            "notes": 0,
+            "notes_foreign": 490,
+            "freshness": {"mtime": null, "age_seconds": null},
+        });
+        let block = status_block(&report);
+        assert!(block.contains("notes: 0 (mesh-native)"));
+        assert!(block.contains("foreign markdown: 490 (visible to search, not to lenses)"));
+        assert!(block.contains("freshness: (no mesh-native files; 490 foreign markdown)"));
+        // zero foreign files: no foreign line, and the old freshness label stands
+        let report = serde_json::json!({
+            "notes": 0,
+            "notes_foreign": 0,
+            "freshness": {"mtime": null, "age_seconds": null},
+        });
+        let block = status_block(&report);
+        assert!(block.contains("freshness: (no vault files)"));
+        assert!(!block.contains("foreign markdown"));
     }
 
     #[test]

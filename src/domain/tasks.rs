@@ -419,6 +419,7 @@ pub fn claim(cfg: &Config, id: &str, claimer: &str, strict: bool) -> Result<(Tas
         Some(ref who) if who == claimer => Ok((validated(&doc.meta, id)?, unsatisfied)),
         // 3. Someone else holds it.
         Some(who) => Err(MeshError::ClaimConflict {
+            noun: "task",
             task_id: id.to_string(),
             existing_owner: who,
         }),
@@ -450,6 +451,7 @@ pub fn release(cfg: &Config, id: &str, releaser: &str, force: bool) -> Result<Ta
     // `force` is a cooperation override and an audit affordance, never an auth check.
     if holder != releaser && !force {
         return Err(MeshError::ClaimConflict {
+            noun: "task",
             task_id: id.to_string(),
             existing_owner: holder,
         });

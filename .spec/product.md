@@ -5,7 +5,7 @@ children:
   - tech.md
   - design.md
   - plan.md
-updated: 2026-09-08
+updated: 2026-09-26
 ---
 
 # Mesh — Product
@@ -31,20 +31,24 @@ job queue) and memory-only tools (Mem0, Basic Memory) that don't coordinate.
 1. **One verb family per space.** `note`, `task`, `memory`, `scratch`, `asset` — plus `search`
    over any subset of them, read-only lenses (`recent-activity`, `build-context`, `graph`,
    `project`, `session-start`) and human-only admin (`init`, `status`, `reindex`, `watch`,
-   `config`, `completions`). No sixth space and no lens becomes a space without a spec change.
+   `dashboard`, `config`, `completions`). No sixth space and no lens becomes a space without a
+   spec change.
    → [tech.md](tech.md) § Implemented surfaces
 2. **Spaces are configuration, not layout.** Each space is a folder relative to the vault root,
    an absolute folder, the vault root itself, or disabled. The notes space may *be* the vault, so
-   an existing Markdown vault is exposed as-is; foreign files stay readable and searchable and
-   are never mutated. → [tech.md](tech.md) § Invariants
+   an existing Markdown vault is exposed as-is; foreign files stay readable and searchable. Mesh
+   never mutates a foreign file except through the operator's explicit `note adopt`, which
+   inserts the minimal mesh block (id and absent bookkeeping keys) and preserves everything
+   else. → [tech.md](tech.md) § Invariants, § Implemented surfaces · Adoption & note claims
 3. **Markdown is truth.** Schema-valid frontmatter, unknown keys round-trip, clean bodies. Mesh
    owns the interface, the operator owns the vault.
 4. **Tasks are handoff with a live graph.** `owner` / `claimed_by` / `claim` / `release` /
    `finish` / `cancel` / `list`, plus `blocks` / `blocked_by` readiness derived at read time,
    `block` / `unblock`, a strict claim gate and `task next`. Phase 3 is delivered.
 5. **Memories are recall, not a memory subsystem.** Note-shaped Markdown files with a kind,
-   scope, importance, optional source, soft expiry and supersession; recall ranks by match,
-   importance and recency. Nothing is ever deleted automatically.
+   scope, importance, optional source, soft expiry and supersession, and an optional `project`
+   that joins a memory to a workstream envelope; recall ranks by match, importance and recency,
+   and `--project` scopes it to one envelope. Nothing is ever deleted automatically.
 6. **Hybrid recall via `indexed`.** Ranked search over the configured spaces; a built-in ranked
    engine when `indexed` is absent, and a substring mode that reproduces the legacy scoring.
 7. **`$MESH_AGENT` identity.** Defaults `--owner`, drives `--mine`, validated against

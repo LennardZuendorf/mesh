@@ -1,4 +1,4 @@
-//! The tool table: 37 tools, their descriptions, their JSON Schemas and their annotations.
+//! The tool table: 40 tools, their descriptions, their JSON Schemas and their annotations.
 //!
 //! One `ToolDef` per registered tool, in `TOOL_NAMES` order. Every parameter carries a
 //! non-empty description; every enum is generated from the domain's own vocabulary constants
@@ -218,13 +218,17 @@ const D_KIND_FILTER: &str = "Exact match on a memory's kind.";
 const D_SECTION_SHORT: &str =
     "Append under this '## {section}' heading, creating it at the end when absent.";
 const D_OWNER_WRITE_SHORT: &str = "Defaults to the configured agent; an explicit value must be in [tasks].collections when that roster is set.";
+const D_PROJECT_ENVELOPE: &str = "Scope hits to one project's envelope: the project note, the tasks and notes pointed at it, and the memories scoped to it. The id or slug must resolve to a mesh note; an unknown or foreign one is an error, never an empty page.";
+const D_PROJECT_RECALL: &str = "Scope recall to one project's memories. The id or slug must resolve to a mesh note; an unknown or foreign one is an error.";
+const D_PROJECT_LINK: &str = "Optional soft link to a project note's id — joins the memory to that project's envelope. A plain string, never validated or checked for existence.";
+const D_PROJECT_LINK_UPDATE: &str = "New soft link to a project note's id — joins the memory to that project's envelope; omit to keep it.";
 
 // ---------------------------------------------------------------------------------------
-// The 37 tools, in registration order.
+// The 40 tools, in registration order.
 // ---------------------------------------------------------------------------------------
 
 /// The registered tool table, in `TOOL_NAMES` order.
-pub const TOOLS: [ToolDef; 37] = [
+pub const TOOLS: [ToolDef; 40] = [
     ToolDef {
         name: "mesh_note_get",
         description: "Read one note by id or title slug: frontmatter, body, and path.",
@@ -290,6 +294,7 @@ pub const TOOLS: [ToolDef; 37] = [
             p("owner", Kind::OptStr, D_OWNER_FILTER),
             p("status", Kind::OptEnum(STATUS_VALUES), "Exact task-status filter. Notes carry no status field, so this excludes every note hit whenever it is set."),
             p("kind", Kind::OptEnum(KIND_VALUES), "Exact memory-kind filter; excludes non-memory hits when set."),
+            p("project", Kind::OptStr, D_PROJECT_ENVELOPE),
             p("spaces", Kind::OptList, "Spaces to search: notes, tasks, memories, scratch, assets. Omit for the configured default."),
             p("engine", Kind::OptEnum(ENGINE_VALUES), "Force a path: indexed recall, builtin ranking, or substring tiers. Omit for auto."),
             p("limit", Kind::IntDefault(10), "Maximum hits returned."),
@@ -336,7 +341,7 @@ pub const TOOLS: [ToolDef; 37] = [
     },
     ToolDef {
         name: "mesh_project",
-        description: "Show a project note and the tasks scoped to it: ``{project, tasks}``.",
+        description: "Show a project's envelope: ``{project, tasks, notes, memories}`` — the project note plus the tasks, notes and memories scoped to it.",
         ann: Ann::ReadOnly,
         params: &[p(
             "project_id",
@@ -416,6 +421,34 @@ pub const TOOLS: [ToolDef; 37] = [
         ],
     },
     ToolDef {
+        name: "mesh_note_adopt",
+        description: "Adopt existing Markdown files in place: mint a mesh id into each, adding only absent keys.",
+        ann: Ann::Idempotent,
+        params: &[
+            p("paths", Kind::ReqList, "Markdown file paths inside a notes space; each is adopted as its own atomic transaction."),
+            p("owner", Kind::OptStr, "Area the note belongs to; inserted only when the key is absent. An explicit value must be in [tasks].collections when that roster is set."),
+        ],
+    },
+    ToolDef {
+        name: "mesh_note_claim",
+        description: "Claim a note for an agent (atomic test-and-set on claimed_by; same-agent reclaim is a no-op).",
+        ann: Ann::Write,
+        params: &[
+            p("target", Kind::Str, "Note id (n-...) or title slug to claim."),
+            p("claimer", Kind::OptStr, "Acting agent identity; defaults to [core].agent. A same-agent reclaim is a no-op; a different agent already holding it raises a conflict."),
+        ],
+    },
+    ToolDef {
+        name: "mesh_note_release",
+        description: "Release a note claim, clearing claimed_by (idempotent; force breaks another holder).",
+        ann: Ann::Idempotent,
+        params: &[
+            p("target", Kind::Str, "Note id (n-...) or title slug to release."),
+            p("owner", Kind::OptStr, "Acting agent identity; defaults to [core].agent. Releasing an unclaimed note is an idempotent no-op."),
+            p("force", Kind::Bool, "Break another agent's live claim. Omit to release only your own."),
+        ],
+    },
+    ToolDef {
         name: "mesh_task_claim",
         description: "Claim a task for an agent (atomic test-and-set; same-owner reclaim is a no-op).",
         ann: Ann::Idempotent,
@@ -477,6 +510,7 @@ pub const TOOLS: [ToolDef; 37] = [
             p("scope", Kind::EnumDefault(SCOPE_VALUES, "shared"), "shared is visible to every agent; private only to its owner."),
             p("importance", Kind::OptInt, "1..5, default 3; weights recall ranking."),
             p("source", Kind::OptStr, "Free-text provenance."),
+            p("project", Kind::OptStr, D_PROJECT_LINK),
             p("expires", Kind::OptStr, "When it stops being recalled: '7d'/'2w' from now, or ISO-8601. Nothing is auto-deleted."),
             p("supersedes", Kind::OptStr, "Memory id (m-...) this one replaces; the old one drops out of recall."),
             p("tags", Kind::OptList, "Initial tag list."),
@@ -507,6 +541,7 @@ pub const TOOLS: [ToolDef; 37] = [
             p("scope", Kind::OptEnum(SCOPE_VALUES), "New scope; omit to keep it."),
             p("importance", Kind::OptInt, "New importance, 1..5; omit to keep it."),
             p("source", Kind::OptStr, "New provenance; omit to keep it."),
+            p("project", Kind::OptStr, D_PROJECT_LINK_UPDATE),
             p("expires", Kind::OptStr, "New expiry ('7d', '2w' or ISO-8601); the literal 'none' clears it."),
             p("owner", Kind::OptStr, "Reassigns the owner; must be in [tasks].collections when that roster is set."),
         ],
@@ -550,6 +585,7 @@ pub const TOOLS: [ToolDef; 37] = [
             p("tags", Kind::OptList, D_TAGS_AND),
             p("owner", Kind::OptStr, D_OWNER_FILTER),
             p("mine", Kind::Bool, D_MINE),
+            p("project", Kind::OptStr, D_PROJECT_RECALL),
             p("min_importance", Kind::OptInt, D_MIN_IMPORTANCE),
             p("limit", Kind::IntDefault(10), "Maximum hits returned."),
             p("threshold", Kind::OptNum, "Minimum final score (0-1), applied after importance and decay weighting."),
@@ -814,8 +850,10 @@ mod tests {
     #[test]
     fn the_serialised_tool_list_fits_the_budget() {
         let text = serde_json::to_string(&tools_list()).unwrap();
+        // Raised 32 -> 40 KiB by note-adoption/6 (three tools) — the 32 KiB table had
+        // ~125 bytes of headroom left, so the growth could not be absorbed by wording.
         assert!(
-            text.len() <= 32 * 1024,
+            text.len() <= 40 * 1024,
             "tools/list is {} bytes",
             text.len()
         );

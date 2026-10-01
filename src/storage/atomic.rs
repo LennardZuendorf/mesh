@@ -28,10 +28,12 @@ pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
 }
 
 /// The mode a brand-new file gets: `0o666 & !umask`.
+// `mode_t` is u16 on macOS and u32 on Linux, so the widening is a no-op on one platform.
+#[allow(clippy::useless_conversion)]
 pub fn fresh_file_mode() -> u32 {
     let current = rustix::process::umask(rustix::fs::Mode::empty());
     rustix::process::umask(current);
-    0o666 & !current.bits()
+    0o666 & !u32::from(current.bits())
 }
 
 fn match_destination_mode(file: &std::fs::File, path: &Path) {
@@ -39,10 +41,7 @@ fn match_destination_mode(file: &std::fs::File, path: &Path) {
         Ok(meta) => meta.permissions().mode() & 0o7777,
         Err(_) => fresh_file_mode(),
     };
-    let Some(mode) = rustix::fs::Mode::from_bits(mode) else {
-        return;
-    };
-    let _ = rustix::fs::fchmod(file, mode);
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
 }
 
 fn fsync_dir(dir: &Path) {

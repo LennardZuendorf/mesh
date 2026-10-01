@@ -260,6 +260,118 @@ fn new_rejects_a_bad_scope() {
 }
 
 #[test]
+fn new_with_project_round_trips_to_disk_and_get() {
+    let f = VaultFixture::new();
+    let out = f
+        .cmd()
+        .args([
+            "memory",
+            "new",
+            "Scoped",
+            "--body",
+            "x",
+            "--project",
+            "n-P1",
+            "--quiet",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    let text = f.read(&format!("memories/{id}.md"));
+    assert!(text.contains("project: n-P1\n"), "{text}");
+    // `project` is declared after `scope` on disk.
+    let keys: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .take_while(|l| *l != "---")
+        .filter_map(|l| l.split(':').next())
+        .collect();
+    let scope = keys.iter().position(|k| *k == "scope").expect("scope");
+    assert_eq!(keys.get(scope + 1).copied(), Some("project"));
+
+    let got = f
+        .cmd()
+        .args(["memory", "get", &id, "--json"])
+        .output()
+        .expect("get");
+    assert_eq!(json_of(&got)["project"], Json::String("n-P1".into()));
+
+    // The default human block shows it too.
+    let human = f
+        .cmd()
+        .args(["memory", "get", &id, "--meta-only"])
+        .output()
+        .expect("get");
+    assert!(
+        stdout_of(&human).contains("project: n-P1"),
+        "{}",
+        stdout_of(&human)
+    );
+}
+
+#[test]
+fn new_without_project_never_carries_the_key() {
+    let f = VaultFixture::new();
+    let id = new_memory(&f, "Plain", "x");
+    let text = f.read(&format!("memories/{id}.md"));
+    assert!(!text.contains("project"), "{text}");
+    let got = f
+        .cmd()
+        .args(["memory", "get", &id, "--json"])
+        .output()
+        .expect("get");
+    assert!(json_of(&got).get("project").is_none());
+}
+
+#[test]
+fn new_tolerates_an_unknown_project_id() {
+    let f = VaultFixture::new();
+    let out = f
+        .cmd()
+        .args([
+            "memory",
+            "new",
+            "Dangling",
+            "--body",
+            "x",
+            "--project",
+            "n-NOPE",
+            "--quiet",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    assert!(f
+        .read(&format!("memories/{id}.md"))
+        .contains("project: n-NOPE\n"));
+}
+
+#[test]
+fn update_sets_the_project_and_leaves_it_when_unset() {
+    let f = VaultFixture::new();
+    let id = new_memory(&f, "Alpha", "x");
+    assert!(!f.read(&format!("memories/{id}.md")).contains("project"));
+    f.cmd()
+        .args(["memory", "update", &id, "--project", "n-P2"])
+        .assert()
+        .success()
+        .stdout(format!("updated {id}\n"));
+    assert!(f
+        .read(&format!("memories/{id}.md"))
+        .contains("project: n-P2\n"));
+    // An update that names no project leaves the existing one in place.
+    f.cmd()
+        .args(["memory", "update", &id, "--title", "Renamed"])
+        .assert()
+        .success();
+    assert!(f
+        .read(&format!("memories/{id}.md"))
+        .contains("project: n-P2\n"));
+}
+
+#[test]
 fn new_rejects_an_out_of_range_importance() {
     let f = VaultFixture::new();
     for value in ["0", "6"] {
@@ -728,17 +840,17 @@ fn a_memory_is_addressable_by_its_title_slug() {
 // ---------------------------------------------------------------------------------------
 
 #[test]
-fn get_prints_fourteen_meta_lines_then_a_preview() {
+fn get_prints_fifteen_meta_lines_then_a_preview() {
     let f = VaultFixture::new();
     let id = new_memory(&f, "Alpha", "the body");
     let out = f.cmd().args(["memory", "get", &id]).output().expect("run");
     let text = stdout_of(&out);
     let (block, body) = text.split_once("\n\n").expect("a blank line");
-    assert_eq!(block.lines().count(), 14, "{block}");
+    assert_eq!(block.lines().count(), 15, "{block}");
     assert!(block.starts_with(&format!(
         "id: {id}\ntype: memory\ntitle: Alpha\nkind: fact\n"
     )));
-    assert!(block.contains("\nscope: shared\nimportance: 3\n"));
+    assert!(block.contains("\nscope: shared\nproject: \nimportance: 3\n"));
     assert_eq!(body.trim_end(), "the body");
 }
 
@@ -933,6 +1045,25 @@ fn list_json_beats_quiet_on_a_class_l_verb() {
         .output()
         .expect("run");
     assert_eq!(ids_of(&json_of(&out)), ["m-SEED"]);
+}
+
+#[test]
+fn list_json_shows_the_project_field_when_set() {
+    let f = VaultFixture::new();
+    let id = new_memory(&f, "Scoped", "x");
+    f.cmd()
+        .args(["memory", "update", &id, "--project", "n-P1"])
+        .assert()
+        .success();
+    let out = f
+        .cmd()
+        .args(["memory", "list", "--json"])
+        .output()
+        .expect("run");
+    let payload = json_of(&out);
+    assert_eq!(ids_of(&payload), vec![id.clone()]);
+    assert_eq!(payload[0]["id"], Json::String(id));
+    assert_eq!(payload[0]["project"], Json::String("n-P1".into()));
 }
 
 #[test]
@@ -1647,6 +1778,176 @@ fn a_recall_with_no_match_is_an_empty_array() {
         .output()
         .expect("run");
     assert_eq!(stdout_of(&out), "[]\n");
+}
+
+// ---------------------------------------------------------------- recall project scoping
+
+/// A mesh-native project note — the seed gate a `--project` recall resolves.
+fn project_note(f: &VaultFixture, id: &str, title: &str) {
+    f.write(
+        &format!("notes/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: note\ntitle: {title}\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n---\n\n\
+             project body\n"
+        ),
+    );
+}
+
+/// A hand-written memory that may carry a `project`, so membership is pinned exactly.
+/// Every body says `preferences`, so only membership and the filters decide what recall
+/// returns.
+fn scoped_memory(f: &VaultFixture, id: &str, project: Option<&str>, kind: &str, importance: i64) {
+    let project_line = project.map_or_else(String::new, |value| format!("project: {value}\n"));
+    f.write(
+        &format!("memories/{id}.md"),
+        &format!(
+            "---\nid: {id}\ntype: memory\ntitle: {id} memory\ntags: []\nowner: test-agent\n\
+             created: 2026-01-01T00:00:00Z\nupdated: 2026-01-02T00:00:00Z\nrelated: []\n\
+             kind: {kind}\nscope: shared\n{project_line}importance: {importance}\nsource: null\n\
+             expires: null\nsuperseded_by: null\n---\n\npreferences for the widget\n"
+        ),
+    );
+}
+
+/// The recall ids for `memory recall preferences` plus the given extra flags.
+fn recall_ids(f: &VaultFixture, extra: &[&str]) -> Vec<String> {
+    let mut cmd = f.cmd();
+    cmd.args(["memory", "recall", "preferences"]);
+    cmd.args(extra);
+    ids_of(&json_of(&cmd.output().expect("run")))
+}
+
+#[test]
+fn a_scoped_recall_returns_only_the_projects_memories_ranked_as_usual() {
+    let f = VaultFixture::new();
+    project_note(&f, "n-P1", "Project One");
+    scoped_memory(&f, "m-IN-HI", Some("n-P1"), "fact", 5);
+    scoped_memory(&f, "m-IN-LO", Some("n-P1"), "fact", 1);
+    scoped_memory(&f, "m-OUT", None, "fact", 5);
+    // Unscoped, every memory that matches the topic is eligible.
+    assert_eq!(
+        recall_ids(&f, &["--no-decay"]),
+        ["m-IN-HI", "m-OUT", "m-IN-LO"]
+    );
+    // Scoped, only the project's memories are eligible, ranked by the existing rules
+    // (importance first, under --no-decay).
+    assert_eq!(
+        recall_ids(&f, &["--project", "n-P1", "--no-decay"]),
+        ["m-IN-HI", "m-IN-LO"]
+    );
+    // The filter runs on the resolved id, so a title-slug seed finds the same memories.
+    assert_eq!(
+        recall_ids(&f, &["--project", "project-one", "--no-decay"]),
+        ["m-IN-HI", "m-IN-LO"]
+    );
+}
+
+#[test]
+fn a_scoped_recall_composes_with_the_other_filters() {
+    let f = VaultFixture::new();
+    project_note(&f, "n-P1", "Project One");
+    scoped_memory(&f, "m-FACT", Some("n-P1"), "fact", 3);
+    scoped_memory(&f, "m-INSIGHT", Some("n-P1"), "insight", 5);
+    scoped_memory(&f, "m-OUT-INSIGHT", None, "insight", 5);
+    // A plain conjunction: the kind and the min-importance filters narrow the same set.
+    assert_eq!(
+        recall_ids(
+            &f,
+            &["--project", "n-P1", "--kind", "insight", "--no-decay"]
+        ),
+        ["m-INSIGHT"]
+    );
+    assert_eq!(
+        recall_ids(
+            &f,
+            &["--project", "n-P1", "--min-importance", "4", "--no-decay"]
+        ),
+        ["m-INSIGHT"]
+    );
+    // A conjunction that matches nothing is an empty result at exit 0, never an error.
+    let out = f
+        .cmd()
+        .args([
+            "memory",
+            "recall",
+            "preferences",
+            "--project",
+            "n-P1",
+            "--kind",
+            "episode",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), "[]\n");
+}
+
+#[test]
+fn an_unknown_project_exits_three_with_the_not_found_envelope_and_candidates() {
+    let f = VaultFixture::new();
+    project_note(&f, "n-P1", "Project One");
+    scoped_memory(&f, "m-IN", Some("n-P1"), "fact", 3);
+    let out = f
+        .cmd()
+        .args(["memory", "recall", "--project", "n-NOPE", "preferences"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+    assert_eq!(stderr_of(&out).trim_end(), "project not found: n-NOPE");
+    assert_eq!(stdout_of(&out), "");
+
+    let out = f
+        .cmd()
+        .args([
+            "--json",
+            "memory",
+            "recall",
+            "--project",
+            "n-NOPE",
+            "preferences",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+    let envelope: Json = serde_json::from_str(stderr_of(&out).trim()).expect("json envelope");
+    assert_eq!(envelope["kind"], Json::String("not_found".into()));
+    assert_eq!(
+        envelope["message"],
+        Json::String("project not found: n-NOPE".into())
+    );
+    assert!(
+        envelope["candidates"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|id| id == "n-P1")),
+        "{envelope}"
+    );
+}
+
+#[test]
+fn a_foreign_project_seed_is_never_a_project() {
+    let f = VaultFixture::new();
+    scoped_memory(&f, "m-IN", Some("n-P1"), "fact", 3);
+    f.write(
+        "notes/ndc-rollout-status.md",
+        "---\ntype: Project\ntitle: NDC Rollout Status\n---\n\nforeign workstream\n",
+    );
+    let out = f
+        .cmd()
+        .args([
+            "memory",
+            "recall",
+            "--project",
+            "ndc-rollout-status",
+            "preferences",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+    assert_eq!(
+        stderr_of(&out).trim_end(),
+        "seed is not mesh-native (no mesh id): ndc-rollout-status"
+    );
 }
 
 // ---------------------------------------------------------------------------------------

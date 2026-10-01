@@ -2,8 +2,8 @@
 type: entrypoint
 scope: implementation
 covers: feature sequence, build order, validation criteria
-children: []
-updated: 2026-09-08
+children:
+updated: 2026-09-26
 ---
 
 # Mesh — Plan
@@ -13,10 +13,10 @@ updated: 2026-09-08
 spaces, shipped the deferred dependency graph (phase 3), and removed the daemon. All arcs are
 compounded into this root layer and their feature folders deleted.
 
-**Focus:** none in flight. The next arc starts with `/spec feature <name>`. Two adversarial
-review sweeps over the landed Rust surface are closed and compounded into
-[tech.md](tech.md) § Invariants and § Implemented surfaces; the open items are the
-product-positioning review and the two known gaps below.
+**Focus:** every feature row is DONE. note-adoption, project-envelope and dashboard-tui are
+compounded into [tech.md](tech.md) § Implemented surfaces (adopt + note claims; the workstream
+envelope + `--project` filters; the dashboard). Remaining open items: the product-positioning
+review and the two known gaps below.
 
 ---
 
@@ -37,6 +37,9 @@ product-positioning review and the two known gaps below.
 | 11 | team-awareness | ✅ DONE | inbound mentions, `task append`/`release`, `session-start --team` |
 | 12 | agent-usability | ✅ DONE | MCP instructions, tool schemas, flag contract, `mesh init` |
 | 13 | rust-rewrite | ✅ DONE | the whole `src/` tree and `tests/`; five spaces (`src/spaces.rs`), the 37-tool MCP surface (`src/mcp/`), no daemon → [tech.md](tech.md) |
+| 14 | note-adoption | ✅ DONE | `note adopt/claim/release`, `--mine`, census, 40-tool MCP parity → [tech.md](tech.md) § Implemented surfaces · Adoption & note claims |
+| 15 | project-envelope | ✅ DONE | workstream envelope lens + `--project` filters (CLI + MCP) → [tech.md](tech.md) § Implemented surfaces · Project envelope |
+| 16 | dashboard-tui | ✅ DONE | read-only live TUI dashboard → [tech.md](tech.md) § Implemented surfaces · Dashboard |
 
 ---
 

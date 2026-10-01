@@ -178,3 +178,33 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** a green test is evidence about the assertion, not about the spec. When a test and the spec disagree the spec wins — so read a test's assertion against the spec sentence it claims to cover before trusting it, especially one whose *name* states a behaviour. Treat a test encoding a behaviour no spec line supports as a finding in its own right, and fix the test in the same commit as the code, or the next reviewer will read it as the contract.
 **Tags:** testing, spec-conformance, search, threshold, review, gates
 **Date:** 2026-09-08
+
+### A silent degrade hides a broken contract
+**Pattern:** `mesh reindex` failed twice before the real cause was found. The first failure was attributed to the 30 s wall clock (a 656-file ingest takes minutes); the second ran with a 600 s budget and still degraded. The actual cause: `indexed index create` prompts `Overwrite? [y/N]` when the collection exists, and mesh passes a null stdin, so the child aborts every refresh. The degrade-to-notice design (exit 0, stderr notice) made the failure look like a timeout unless the notice was read carefully — and the wiring had been declared done on the strength of a degraded exit 0 plus a working search path.
+**Rule:** when a wrapper degrades by design, a green exit proves nothing about the wrapped call: verify the happy path end-to-end against the real dependency before calling the wiring done. Never route a non-interactive caller through an interactive verb — if the dependency prompts on an existing resource, pick the non-interactive sibling (`index update`, not `index create`), because no timeout budget fixes a prompt that will never be answered. Pin the routing in a stub fixture so the contract cannot drift back.
+**Tags:** search, indexed, wrapper, degrade, prompts, wiring, verification
+**Date:** 2026-09-25
+
+### A merge block drafted before the code is a claim to re-verify
+**Pattern:** the project-envelope feature tech.md carried a pre-written `<!-- merge -->` block listing the memory per-space additions as `kind, scope, importance, source, project, …`, but the landed model declares `project` directly after `scope` (exactly as the same file's Files section specified). Compounding the block verbatim would have written a field order into the root spec that the code does not have.
+**Rule:** treat a pre-written merge block as a draft, never as scripture: at wrap-up, re-verify every concrete claim it makes — orders, counts, names — against the landed code before promoting it into the root layer. Code is truth, and the root spec must never describe an ordering the model does not declare.
+**Tags:** spec, compounding, merge-blocks, field-order, code-is-truth
+**Date:** 2026-09-26
+
+### A wall-clock pin asserts the minimum of N runs, never one sample
+**Pattern:** the cold-start budget (under 10 ms) had been documented for the whole Rust rewrite but never tested — a trace finding the dashboard feature was created to close. A single timed run is noise-dominated (locally 6.8–24.9 ms on the same binary, first-run cache effects worse), and a p-quantile pin would flake under CI load. Pinning min-of-ten is monotone against scheduling noise — noise only ever slows a run — so it stays stable under load while still lifting the moment startup work is actually added.
+**Rule:** pin a startup/wall-clock budget on the **minimum of several** warm end-to-end runs, with one discard pass to warm the loader and page cache; choose the bound from measured distribution (idle floor AND full-load floor), with generous-but-real headroom, and print the full timing vector in the failure message so a red pin is diagnosable, not mysterious. Calibrate with real measurements recorded in the spec, never by copying the marketing number into the assert.
+**Tags:** performance, cold-start, testing, wall-clock, pins, noise
+**Date:** 2026-09-26
+
+### A libc type alias has a different width on every target
+**Pattern:** `2f6dab8` fixed a macOS compile error by narrowing the mode to `u16` before `rustix::fs::Mode::from_bits`. On macOS `mode_t` is `u16`; on Linux it is `u32`. The branch was verified on macOS only, so `check (ubuntu-latest)`, `coverage` and `package` all failed with E0631 on the pushed head.
+**Rule:** never name a concrete width for a libc alias (`mode_t`, `dev_t`, `ino_t`, `off_t`). Use the std API that fixes the width (`Permissions::from_mode(u32)`, `File::set_permissions`), or convert through the alias with a scoped `#[allow(clippy::useless_conversion)]`. A fix to platform-dependent code is verified only when CI is green on both matrix targets.
+**Tags:** portability, linux, macos, rustix, ci, verification
+**Date:** 2026-10-01
+
+### A single-path writer must pass the same gates as the walk and the reader
+**Pattern:** `note adopt` takes an explicit path, so it never went through `iter_md`. It minted ids into `.obsidian/` templates, `.txt` files and files whose existing `tags: draft` or `created: last tuesday` fail `Note::from_meta`. Each run exited 0, and every read verb then answered `note not found` for the new id.
+**Rule:** a verb that writes an entity at a caller-named path must check, before the write, that the walk would yield that path (`storage::walk::walk_sees`) and that the resulting frontmatter parses as the entity (`from_meta`). Never report success for an entity no read verb can address.
+**Tags:** adopt, walk, schema, validation, notes
+**Date:** 2026-10-01

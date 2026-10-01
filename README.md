@@ -31,6 +31,13 @@ Four things worth knowing before you point it at a folder you care about.
   engine and ignored on the `indexed` path, and `mesh reindex` hands `indexed` the whole vault
   root by default — so with a collection configured, a search can return rows from spaces you
   filtered out, scratch among them. `mesh search --health` says which engine would answer.
+- **Lenses read mesh-authored entities only.** Point `notes` at an existing vault and
+  `mesh search` (plus `note get/list --foreign`) sees every file in it — but `graph`,
+  `build-context`, `project` and `session-start` resolve by mesh id, so adopted Markdown
+  stays outside the coordination layer until mesh itself writes entities there. `mesh status`
+  makes the split visible (`notes: N (mesh-native)` plus a `foreign markdown` count), and a
+  lens seed naming a foreign file answers `seed is not mesh-native (no mesh id)` instead of
+  `seed not found`.
 - **A Markdown file over 4 MiB is invisible.** The walk skips it, so it is absent from every
   list, search and lens, and `note get` on its id reports "not found". There is no diagnostic
   and no count. Mesh refuses to *write* past that limit; a file an external editor grew past it
@@ -207,7 +214,7 @@ mesh [--version] [--json] [--quiet] [--owner ID] [--mine] [--config PATH] [--vau
 
 `--json`, `--quiet`, `--owner` and `--mine` are accepted **on either side of the command name**
 on every non-admin command, with identical effect. Admin commands (`init`, `status`, `reindex`,
-`watch`, `config`, `completions`, `mcp`) take them on the global side only.
+`watch`, `dashboard`, `config`, `completions`, `mcp`) take them on the global side only.
 
 **Output classes.** Every command declares one, so precedence is never a guess:
 
@@ -421,7 +428,7 @@ an image tool. `asset remove` on a still-referenced asset is exit 2 unless you p
 
 ```
 mesh search [QUERY] [--type T] [--tags CSV]... [--owner O] [--status CSV] [--kind K]
-            [--space CSV] [--engine auto|indexed|builtin|substring] [--limit 10]
+            [--project ID] [--space CSV] [--engine auto|indexed|builtin|substring] [--limit 10]
             [--threshold F] [--meta-only] [--full] [--health]
 ```
 
@@ -430,6 +437,10 @@ every tag is ANDed; `--status` is a CSV union whose unknown value is exit 2, exa
 `task list`. With no query it becomes an exact tag pull (`score = 1.0`, metadata only). Hit keys,
 in order: `id`, `type`, `title`, `score`, `path` always; then `tags`, `owner`, `updated`,
 `snippet` and `space` when they apply. There is no `body` key — `--full` overloads `snippet`.
+`--project ID` scopes hits to one project's envelope — its notes, tasks and memories, by the
+same rules `mesh project` reports. The seed resolves before any engine work: an id that does not
+resolve exits 3 with `candidates`, and a foreign file answers
+`seed is not mesh-native (no mesh id)`.
 
 Engines:
 
@@ -478,6 +489,7 @@ every entry; `--budget N` trims bodies first, then whole entries, and records th
 final `{"reason": "truncated", "dropped": N}` entry.
 
 Admin: `mesh init`, `mesh status`, `mesh reindex`, `mesh watch`,
+`mesh dashboard` (a live read-only terminal screen over the vault; `q` quits),
 `mesh config {path,show,get,set}`, `mesh completions SHELL`, `mesh mcp`. `mesh status` is
 strictly read-only and reports counts per space, freshness, dangling links (capped at 50, with
 the real total alongside), stale locks, the per-agent claim breakdown, the dependency summary
@@ -557,12 +569,12 @@ roster, the vault path, the current search mode and which-space-wins guidance �
 oriented before making any tool call, with no separate skill required. A config that fails to
 load is never fatal: tools then fail per call with a structured `config_missing` error.
 
-**37 tools**, each carrying explicit `readOnlyHint` / `idempotentHint` / `destructiveHint`
+**40 tools**, each carrying explicit `readOnlyHint` / `idempotentHint` / `destructiveHint`
 annotations (RO = read-only, IDEM = idempotent):
 
 | Family | Tools |
 |---|---|
-| notes | `mesh_note_get` (RO), `mesh_note_list` (RO), `mesh_note_new`, `mesh_note_append`, `mesh_note_update` (IDEM) |
+| notes | `mesh_note_get` (RO), `mesh_note_list` (RO), `mesh_note_new`, `mesh_note_append`, `mesh_note_update` (IDEM), `mesh_note_adopt` (IDEM), `mesh_note_claim`, `mesh_note_release` (IDEM) |
 | tasks | `mesh_task_get` (RO), `mesh_task_list` (RO), `mesh_task_new`, `mesh_task_append`, `mesh_task_claim` (IDEM), `mesh_task_release` (IDEM), `mesh_task_finish` (IDEM), `mesh_task_update` (IDEM), **`mesh_task_cancel` (DESTRUCTIVE)**, `mesh_task_block` (IDEM), `mesh_task_unblock` (IDEM), `mesh_task_next` |
 | memories | `mesh_memory_new`, `mesh_memory_append`, `mesh_memory_update` (IDEM), `mesh_memory_get` (RO), `mesh_memory_list` (RO), `mesh_memory_recall` (RO) |
 | scratch | `mesh_scratch_set` (IDEM), `mesh_scratch_append`, `mesh_scratch_get` (RO), `mesh_scratch_list` (RO) |
@@ -572,8 +584,9 @@ annotations (RO = read-only, IDEM = idempotent):
 `mesh_task_cancel` is the **only** destructive tool, which is exactly why every removal verb is
 withheld. **Not exposed over MCP:** `note delete`, `task delete`, `memory forget`,
 `scratch clear`, `asset remove`, `asset add` (it reads an arbitrary filesystem path — a human
-act), `asset gc`, and all admin (`init`, `status`, `reindex`, `watch`, `config`, `completions`,
-`daemon`). No registered tool name contains `delete`, `daemon`, `reindex` or `status`. Failures
+act), `asset gc`, and all admin (`init`, `status`, `reindex`, `watch`, `dashboard`, `config`,
+`completions`, `daemon`). No registered tool name contains `delete`, `daemon`, `reindex` or
+`status`. Failures
 cross as the same structured envelope the CLI emits under `--json`, never a stack trace.
 
 Register the server by hand with any MCP-capable client:
@@ -611,7 +624,7 @@ not a config.
 upload (`name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`), so the
 same file works as this plugin's local skill and as an account-enabled skill for Cowork sessions,
 which never read a local `.claude/skills/` directory — those sessions get their orientation from
-the MCP `instructions` block instead. `allowed-tools` lists the 36 non-destructive tools;
+the MCP `instructions` block instead. `allowed-tools` lists the 39 non-destructive tools;
 `mesh_task_cancel` is deliberately left out so it always asks first.
 
 ---

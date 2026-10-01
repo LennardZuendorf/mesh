@@ -37,6 +37,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
             scope,
             importance,
             source,
+            project,
             expires,
             supersedes,
             tags,
@@ -54,6 +55,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
                     scope,
                     importance,
                     source,
+                    project,
                     expires,
                     supersedes,
                     tags,
@@ -80,6 +82,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
             scope,
             importance,
             source,
+            project,
             expires,
             owner,
             out,
@@ -96,6 +99,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
                     scope,
                     importance,
                     source,
+                    project,
                     expires,
                     owner,
                 },
@@ -147,6 +151,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
         MemorySub::Recall {
             query,
             kind,
+            project,
             tags,
             owner,
             mine,
@@ -166,6 +171,7 @@ pub fn run(ctx: &mut Ctx, sub: MemorySub) -> Result<()> {
                 &query,
                 RecallFlags {
                     kind,
+                    project,
                     tags,
                     min_importance,
                     limit,
@@ -199,6 +205,7 @@ struct NewFlags {
     scope: String,
     importance: i64,
     source: Option<String>,
+    project: Option<String>,
     expires: Option<String>,
     supersedes: Option<String>,
     tags: Option<String>,
@@ -267,6 +274,7 @@ fn new(ctx: &mut Ctx, title: &str, flags: NewFlags) -> Result<()> {
             scope: flags.scope,
             importance: Some(flags.importance),
             source: flags.source,
+            project: flags.project,
             expires,
             supersedes: flags.supersedes,
             tags: flags.tags.as_deref().map(parse_csv).unwrap_or_default(),
@@ -334,6 +342,7 @@ struct UpdateFlags {
     scope: Option<String>,
     importance: Option<i64>,
     source: Option<String>,
+    project: Option<String>,
     expires: Option<String>,
     owner: Option<String>,
 }
@@ -357,6 +366,7 @@ fn update(ctx: &mut Ctx, target: &str, flags: UpdateFlags) -> Result<()> {
             scope: flags.scope,
             importance: flags.importance,
             source: flags.source,
+            project: flags.project,
             expires,
             owner: flags.owner,
         },
@@ -394,7 +404,7 @@ fn string_list(entry: &Json, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The fourteen-line human metadata block, rendered from the same JSON the payload uses so
+/// The fifteen-line human metadata block, rendered from the same JSON the payload uses so
 /// the two surfaces cannot print a timestamp differently.
 fn meta_block(entry: &Json) -> String {
     [
@@ -403,6 +413,7 @@ fn meta_block(entry: &Json) -> String {
         format!("title: {}", scalar(entry, "title")),
         format!("kind: {}", scalar(entry, "kind")),
         format!("scope: {}", scalar(entry, "scope")),
+        format!("project: {}", scalar(entry, "project")),
         format!("importance: {}", scalar(entry, "importance")),
         format!("owner: {}", scalar(entry, "owner")),
         format!("source: {}", scalar(entry, "source")),
@@ -525,6 +536,7 @@ fn list(ctx: &mut Ctx, flags: ListFlags) -> Result<()> {
 /// The `memory recall` flags, grouped so the verb takes one argument.
 struct RecallFlags {
     kind: Option<String>,
+    project: Option<String>,
     tags: Option<String>,
     min_importance: Option<i64>,
     limit: i64,
@@ -559,6 +571,7 @@ fn recall(ctx: &mut Ctx, query: &str, flags: RecallFlags) -> Result<()> {
         decay: !flags.no_decay,
         include_expired: flags.include_expired,
         min_importance: flags.min_importance,
+        project: flags.project,
         meta_only: flags.meta_only,
         full: flags.full,
     };
@@ -672,6 +685,7 @@ mod tests {
             "related": [],
             "kind": "fact",
             "scope": "shared",
+            "project": "n-P1",
             "importance": 3,
             "source": Json::Null,
             "expires": Json::Null,
@@ -680,29 +694,30 @@ mod tests {
     }
 
     #[test]
-    fn the_meta_block_is_fourteen_lines_in_order() {
+    fn the_meta_block_is_fifteen_lines_in_order() {
         let text = meta_block(&entry());
         let lines: Vec<&str> = text.split('\n').collect();
-        assert_eq!(lines.len(), 14);
+        assert_eq!(lines.len(), 15);
         assert_eq!(lines[0], "id: m-CFCC");
         assert_eq!(lines[1], "type: memory");
         assert_eq!(lines[2], "title: Alpha Memory");
         assert_eq!(lines[3], "kind: fact");
         assert_eq!(lines[4], "scope: shared");
-        assert_eq!(lines[5], "importance: 3");
-        assert_eq!(lines[6], "owner: demo-agent");
-        assert_eq!(lines[7], "source: ");
-        assert_eq!(lines[8], "expires: ");
-        assert_eq!(lines[9], "superseded_by: ");
-        assert_eq!(lines[10], "tags: a, b");
-        assert_eq!(lines[11], "created: 2026-09-05T07:27:18.265543Z");
-        assert_eq!(lines[12], "updated: 2026-09-05T07:27:18.265543Z");
+        assert_eq!(lines[5], "project: n-P1");
+        assert_eq!(lines[6], "importance: 3");
+        assert_eq!(lines[7], "owner: demo-agent");
+        assert_eq!(lines[8], "source: ");
+        assert_eq!(lines[9], "expires: ");
+        assert_eq!(lines[10], "superseded_by: ");
+        assert_eq!(lines[11], "tags: a, b");
+        assert_eq!(lines[12], "created: 2026-09-05T07:27:18.265543Z");
+        assert_eq!(lines[13], "updated: 2026-09-05T07:27:18.265543Z");
         // An empty related list keeps the trailing space.
-        assert_eq!(lines[13], "related: ");
+        assert_eq!(lines[14], "related: ");
     }
 
     #[test]
-    fn the_meta_block_names_the_documented_fourteen_keys() {
+    fn the_meta_block_names_the_documented_fifteen_keys() {
         let text = meta_block(&entry());
         let keys: Vec<&str> = text
             .split('\n')
@@ -716,6 +731,7 @@ mod tests {
                 "title",
                 "kind",
                 "scope",
+                "project",
                 "importance",
                 "owner",
                 "source",

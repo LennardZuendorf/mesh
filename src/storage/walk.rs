@@ -48,6 +48,18 @@ pub fn iter_md(root: &Path, recursive: bool, excl: &[PathBuf]) -> std::vec::Into
     out.into_iter()
 }
 
+/// Whether [`iter_md`] over `root` would yield `path`: a `.md` file beneath `root`, no dot
+/// component below it, within the size cap. A writer that targets a single file (adopt)
+/// asks this so it never mints an entity the walk cannot find again.
+pub fn walk_sees(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    path.extension().and_then(|e| e.to_str()) == Some("md")
+        && !rel.components().any(|c| is_dot(c.as_os_str()))
+        && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= MAX_FILE_BYTES)
+}
+
 fn is_dot(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|s| s.starts_with('.'))
 }
@@ -81,6 +93,31 @@ mod tests {
         std::fs::write(root.join("logs/e.md"), "x").unwrap();
         assert_eq!(names(root, true, &[]), ["a.md", "logs/e.md"]);
         assert_eq!(names(root, false, &[]), ["a.md"]);
+    }
+
+    #[test]
+    fn walk_sees_agrees_with_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        for name in ["a.md", "b.txt", ".obsidian/c.md", "logs/e.md"] {
+            std::fs::write(root.join(name), "x").unwrap();
+        }
+        let big = root.join("big.md");
+        std::fs::write(&big, vec![b'x'; (MAX_FILE_BYTES + 1) as usize]).unwrap();
+        for name in [
+            "a.md",
+            "b.txt",
+            ".obsidian/c.md",
+            "logs/e.md",
+            "big.md",
+            "missing.md",
+        ] {
+            let seen = names(root, true, &[]).contains(&name.to_string());
+            assert_eq!(walk_sees(root, &root.join(name)), seen, "{name}");
+        }
+        assert!(!walk_sees(&root.join("logs"), &root.join("a.md")));
     }
 
     #[test]

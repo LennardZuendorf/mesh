@@ -148,8 +148,24 @@ fn basename(value: &Json) -> String {
 
 /// Stamp the corpus copy with the mtimes the Python golden recorded, so mtime-ordered output
 /// is comparable row for row.
+///
+/// The golden stamps are pinned to the day they were generated, and a rolling `--since`
+/// window (session-start's 7d) decays to empty once that day leaves the window: a fixture
+/// that encodes an absolute date couples the suite to the calendar (lessons.md). Every stamp
+/// is therefore shifted by `now - the newest golden stamp` at materialisation: a uniform
+/// shift preserves the golden's ordering and puts the whole corpus back inside the window.
 fn apply_golden_mtimes(fixture: &VaultFixture) {
-    for entry in golden("recent_activity.json").as_array().expect("array") {
+    let entries = golden("recent_activity.json");
+    let entries = entries.as_array().expect("array");
+    let reference = entries
+        .iter()
+        .filter_map(|entry| entry.get("mtime").and_then(Json::as_f64))
+        .fold(0.0, f64::max);
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock is after the epoch");
+    let shift = now.as_secs_f64() - reference;
+    for entry in entries {
         let name = basename(entry.get("path").unwrap_or(&Json::Null));
         let mtime = entry
             .get("mtime")
@@ -158,7 +174,7 @@ fn apply_golden_mtimes(fixture: &VaultFixture) {
         let Some(path) = find_file(&fixture.vault, &name) else {
             continue;
         };
-        let when = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(mtime);
+        let when = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(mtime + shift);
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
@@ -285,11 +301,28 @@ fn task(
 }
 
 fn memory(fixture: &VaultFixture, id: &str, title: &str, importance: i64, scope: &str) {
+    write_memory(fixture, id, title, importance, scope, None);
+}
+
+/// A memory whose `project` names the envelope seed — declared after `scope`, as on disk.
+fn memory_in_project(fixture: &VaultFixture, id: &str, title: &str, project: &str) {
+    write_memory(fixture, id, title, 3, "shared", Some(project));
+}
+
+fn write_memory(
+    fixture: &VaultFixture,
+    id: &str,
+    title: &str,
+    importance: i64,
+    scope: &str,
+    project: Option<&str>,
+) {
+    let project_line = project.map_or(String::new(), |value| format!("project: {value}\n"));
     let text = format!(
         "---\nid: {id}\ntype: memory\ntitle: {title}\ntags: []\nowner: null\n\
          created: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\nrelated: []\n\
-         kind: fact\nscope: {scope}\nimportance: {importance}\nsource: null\nexpires: null\n\
-         superseded_by: null\n---\n\nmemory body\n"
+         kind: fact\nscope: {scope}\n{project_line}importance: {importance}\nsource: null\n\
+         expires: null\nsuperseded_by: null\n---\n\nmemory body\n"
     );
     fixture.write(&format!("memories/{id}.md"), &text);
 }
@@ -1051,7 +1084,7 @@ fn project_renders_the_note_then_indented_tasks() {
 }
 
 #[test]
-fn project_json_has_project_and_tasks() {
+fn project_json_appends_notes_and_memories_after_project_and_tasks() {
     let fixture = VaultFixture::new();
     note(&fixture, "n-p", "Proj", "test-agent", &[], "b");
     task(
@@ -1065,11 +1098,23 @@ fn project_json_has_project_and_tasks() {
         &[],
         "b",
     );
+    // The containment rule: a note joins by naming the project in its `related` list, which
+    // is what a `[[n-p]]` body link backfills to.
+    note(
+        &fixture,
+        "n-linked",
+        "Linked",
+        "test-agent",
+        &["n-p"],
+        "links [[n-p]]",
+    );
+    memory_in_project(&fixture, "m-a", "Fact", "n-p");
     let out = fixture
         .cmd()
         .args(["project", "n-p", "--json"])
         .output()
         .expect("run mesh");
+    assert_eq!(out.status.code(), Some(0));
     let payload = json_of(&out);
     let keys: Vec<&str> = payload
         .as_object()
@@ -1077,10 +1122,22 @@ fn project_json_has_project_and_tasks() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["project", "tasks"]);
+    // Append only: the two pre-existing keys keep their positions, the envelope sections
+    // land last, `notes` before `memories`.
+    assert_eq!(keys, ["project", "tasks", "notes", "memories"]);
     assert_eq!(payload["project"]["id"], Json::String("n-p".into()));
     assert_eq!(ids_of(&payload["tasks"]), ["t-a"]);
-    assert!(payload["tasks"][0]["path"].as_str().is_some());
+    assert_eq!(ids_of(&payload["notes"]), ["n-linked"]);
+    assert_eq!(ids_of(&payload["memories"]), ["m-a"]);
+    // Every envelope entry reads like the other lens entries: frontmatter plus a path, no body.
+    for section in ["tasks", "notes", "memories"] {
+        assert!(payload[section][0]["path"].as_str().is_some(), "{section}");
+        assert!(payload[section][0].get("body").is_none(), "{section}");
+    }
+    assert_eq!(
+        payload["memories"][0]["project"],
+        Json::String("n-p".into())
+    );
 }
 
 #[test]
@@ -1174,7 +1231,125 @@ fn project_with_no_tasks_is_still_a_result() {
         .output()
         .expect("run mesh");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(json_of(&out)["tasks"], serde_json::json!([]));
+    let payload = json_of(&out);
+    // Zero members is an empty envelope, never an error — in every section.
+    assert_eq!(payload["tasks"], serde_json::json!([]));
+    assert_eq!(payload["notes"], serde_json::json!([]));
+    assert_eq!(payload["memories"], serde_json::json!([]));
+}
+
+#[test]
+fn project_envelope_holds_only_members_and_never_the_seed_itself() {
+    let fixture = VaultFixture::new();
+    // The seed links itself: containment alone would match, so the self-member rule is pinned
+    // here. Nothing else about the seed makes it a member of its own envelope.
+    note(&fixture, "n-p", "Proj", "test-agent", &["n-p"], "self");
+    note(&fixture, "n-linked", "Linked", "test-agent", &["n-p"], "b");
+    note(
+        &fixture,
+        "n-other",
+        "Other",
+        "test-agent",
+        &["n-elsewhere"],
+        "b",
+    );
+    task(
+        &fixture,
+        "t-other",
+        "Other",
+        "open",
+        "test-agent",
+        "",
+        "n-elsewhere",
+        &[],
+        "b",
+    );
+    memory_in_project(&fixture, "m-mine", "Mine", "n-p");
+    memory_in_project(&fixture, "m-other", "Other", "n-elsewhere");
+    let out = fixture
+        .cmd()
+        .args(["project", "n-p", "--json"])
+        .output()
+        .expect("run mesh");
+    let payload = json_of(&out);
+    assert_eq!(ids_of(&payload["notes"]), ["n-linked"]);
+    assert_eq!(ids_of(&payload["memories"]), ["m-mine"]);
+    assert_eq!(payload["tasks"], serde_json::json!([]));
+}
+
+#[test]
+fn project_space_narrows_each_envelope_section() {
+    let fixture = VaultFixture::new();
+    note(&fixture, "n-p", "Proj", "test-agent", &[], "b");
+    task(
+        &fixture,
+        "t-a",
+        "Scoped",
+        "open",
+        "test-agent",
+        "",
+        "n-p",
+        &[],
+        "b",
+    );
+    note(&fixture, "n-linked", "Linked", "test-agent", &["n-p"], "b");
+    memory_in_project(&fixture, "m-a", "Fact", "n-p");
+    let out = fixture
+        .cmd()
+        .args(["project", "n-p", "--space", "notes", "--json"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(0));
+    let payload = json_of(&out);
+    // `--space notes` narrows the corpus each section reads, exactly as it does for `tasks`
+    // today: the keys stay in place and the sections outside the corpus read empty.
+    assert_eq!(
+        payload.as_object().expect("object").keys().count(),
+        4,
+        "the payload shape does not change with --space"
+    );
+    assert_eq!(ids_of(&payload["notes"]), ["n-linked"]);
+    assert_eq!(payload["tasks"], serde_json::json!([]));
+    assert_eq!(payload["memories"], serde_json::json!([]));
+}
+
+#[test]
+fn project_renders_the_envelope_sections_after_the_tasks() {
+    let fixture = VaultFixture::new();
+    note(&fixture, "n-p", "Proj", "test-agent", &[], "b");
+    task(
+        &fixture,
+        "t-a",
+        "Scoped",
+        "open",
+        "test-agent",
+        "",
+        "n-p",
+        &[],
+        "b",
+    );
+    note(&fixture, "n-linked", "Linked", "test-agent", &["n-p"], "b");
+    memory_in_project(&fixture, "m-a", "Fact", "n-p");
+    let human = fixture
+        .cmd()
+        .args(["project", "n-p"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(
+        lines(&human),
+        [
+            "n-p\tnote\tProj",
+            "  t-a\topen\tScoped",
+            "  n-linked\tnote\tLinked",
+            "  m-a\tmemory\tFact",
+        ]
+    );
+    let quiet = fixture
+        .cmd()
+        .args(["project", "n-p", "--quiet"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(lines(&quiet), ["n-p", "t-a", "n-linked", "m-a"]);
 }
 
 #[test]
@@ -1190,6 +1365,52 @@ fn project_reports_an_unknown_id_as_not_found() {
 }
 
 #[test]
+fn project_not_found_carries_the_near_miss_candidates() {
+    let fixture = VaultFixture::new();
+    note(
+        &fixture,
+        "n-PROJ",
+        "Pricing Workstream",
+        "test-agent",
+        &[],
+        "pricing body",
+    );
+    let out = fixture
+        .cmd()
+        .args(["--json", "project", "n-nope"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(3));
+    let payload: Json = serde_json::from_str(stderr_of(&out).trim()).expect("json envelope");
+    assert_eq!(payload["kind"], Json::String("not_found".into()));
+    assert!(
+        payload["candidates"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|id| id == "n-PROJ")),
+        "{payload}"
+    );
+}
+
+#[test]
+fn project_seed_naming_a_foreign_file_is_not_mesh_native() {
+    let fixture = VaultFixture::new();
+    fixture.write(
+        "notes/ndc-rollout-status.md",
+        "---\ntype: Project\ntitle: NDC Rollout Status\n---\n\nforeign workstream\n",
+    );
+    let out = fixture
+        .cmd()
+        .args(["project", "ndc-rollout-status"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        stderr_of(&out).trim(),
+        "seed is not mesh-native (no mesh id): ndc-rollout-status"
+    );
+}
+
+#[test]
 fn project_matches_the_python_golden() {
     let fixture = corpus();
     let out = fixture
@@ -1197,10 +1418,23 @@ fn project_matches_the_python_golden() {
         .args(["project", "n-19EP", "--json"])
         .output()
         .expect("run mesh");
-    assert_eq!(
-        normalise(&json_of(&out)),
-        normalise(&golden("project_p1.json"))
-    );
+    let got = json_of(&out);
+    let want = golden("project_p1.json");
+    // The golden stays authoritative over the two keys the Python era wrote. The payload
+    // extends by append, so the comparison is per key and the appended sections are pinned
+    // against the corpus itself — a whole-document comparison would fail on the append.
+    assert_eq!(normalise(&got["project"]), normalise(&want["project"]));
+    assert_eq!(normalise(&got["tasks"]), normalise(&want["tasks"]));
+    let keys: Vec<&str> = got
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["project", "tasks", "notes", "memories"]);
+    // No corpus note names n-19EP, and the corpus holds no memories.
+    assert_eq!(got["notes"], serde_json::json!([]));
+    assert_eq!(got["memories"], serde_json::json!([]));
 }
 
 #[test]
@@ -1812,6 +2046,7 @@ fn status_on_an_empty_vault_has_the_pinned_key_order() {
             "deps",
             "spaces",
             "watcher",
+            "notes_foreign",
         ]
     );
     assert_eq!(payload["notes"], Json::from(0));
@@ -1836,18 +2071,58 @@ fn status_on_an_empty_vault_has_the_pinned_key_order() {
 }
 
 #[test]
+fn a_foreign_only_vault_is_searchable_and_labeled_not_mesh_native() {
+    let fixture = VaultFixture::with(CORPUS_CONFIG);
+    std::fs::create_dir_all(fixture.vault.join("notes")).expect("create notes space");
+    std::fs::write(
+        fixture.vault.join("notes/NDC Rollout Status.md"),
+        "# NDC Rollout Status\n\nraw transcript about NDC flights\n",
+    )
+    .expect("seed the foreign file");
+    let out = fixture.cmd().args(["status"]).output().expect("run mesh");
+    let text = stdout_of(&out);
+    assert!(text.contains("notes: 0 (mesh-native)"), "{text}");
+    assert!(
+        text.contains("foreign markdown: 1 (visible to search, not to lenses)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("freshness: (no mesh-native files; 1 foreign markdown)"),
+        "{text}"
+    );
+    // search sees the file; the graph lens names it instead of reading as a typo
+    let out = fixture
+        .cmd()
+        .args(["search", "NDC flights"])
+        .output()
+        .expect("run mesh");
+    assert!(stdout_of(&out).contains("NDC Rollout Status"));
+    let out = fixture
+        .cmd()
+        .args(["graph", "ndc-rollout-status"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(
+        stderr_of(&out).trim_end(),
+        "seed is not mesh-native (no mesh id): ndc-rollout-status"
+    );
+}
+
+#[test]
 fn status_human_block_renders_every_group() {
     let fixture = corpus_with_a_fresh_claim();
     let out = fixture.cmd().args(["status"]).output().expect("run mesh");
     let text = stdout_of(&out);
     for expected in [
-        "notes: 8",
+        "notes: 8 (mesh-native)",
+        "foreign markdown: 1 (visible to search, not to lenses)",
         "tasks: open=3 claimed=1 done=1 cancelled=1",
         "dangling links: 1 (Missing Title)",
         "stale locks: 1",
         "daemon: stopped",
         "agents:",
-        "  demo-agent: open=3 claimed=1 stale=0",
+        "  demo-agent: open=3 claimed=1 stale=0 notes_owned=7 notes_claimed=0",
         "memories: total=0 expired=0 superseded=0",
         "scratch: files=0 agents=0",
         "assets: count=0 bytes=0 orphan_blobs=0",
@@ -2028,9 +2303,93 @@ fn status_agent_rows_register_owners_and_claimers() {
     assert_eq!(names, ["alice", "bob", "carol"]);
     assert_eq!(agents["alice"]["owns_open"], Json::from(1));
     assert_eq!(agents["bob"]["claimed"], Json::from(1));
+    // The per-agent keys are pinned: the note counts are appended after the task-shaped
+    // counters, never spliced in the middle (the `notes_foreign` append precedent).
+    let row_keys: Vec<&str> = agents["alice"]
+        .as_object()
+        .expect("agent object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        row_keys,
+        [
+            "owns_open",
+            "claimed",
+            "stale_claims",
+            "notes_owned",
+            "notes_claimed"
+        ]
+    );
     assert_eq!(
         agents["carol"],
-        serde_json::json!({"owns_open": 0, "claimed": 0, "stale_claims": 0})
+        serde_json::json!({
+            "owns_open": 0,
+            "claimed": 0,
+            "stale_claims": 0,
+            "notes_owned": 0,
+            "notes_claimed": 0
+        })
+    );
+}
+
+#[test]
+fn status_census_counts_note_ownership_and_claims() {
+    let fixture = VaultFixture::new();
+    // `nora` owns two notes and claims a third owned by nobody.
+    note(&fixture, "n-one", "One", "nora", &[], "b");
+    note(&fixture, "n-two", "Two", "nora", &[], "b");
+    fixture.write(
+        "notes/n-three.md",
+        "---\nid: n-three\ntype: note\ntitle: Three\ntags: []\nowner: null\n\
+         claimed_by: nora\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n\
+         related: []\n---\n\nb\n",
+    );
+    // `tina` owns a task only: zero notes, so her line must render exactly as before.
+    task(&fixture, "t-a", "A", "open", "tina", "", "", &[], "b");
+
+    let out = fixture
+        .cmd()
+        .args(["--json", "status"])
+        .output()
+        .expect("run mesh");
+    let agents = json_of(&out)["agents"].clone();
+    let names: Vec<&str> = agents
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    // A note owner who owns no task still appears in the census.
+    assert_eq!(names, ["nora", "tina"]);
+    assert_eq!(agents["nora"]["notes_owned"], Json::from(2));
+    assert_eq!(agents["nora"]["notes_claimed"], Json::from(1));
+    assert_eq!(
+        agents["tina"],
+        serde_json::json!({
+            "owns_open": 1,
+            "claimed": 0,
+            "stale_claims": 0,
+            "notes_owned": 0,
+            "notes_claimed": 0
+        })
+    );
+
+    // Human block: the note counts ride at the end of the row; a zero-note agent is
+    // byte-identical to the pre-change line.
+    let human = fixture.cmd().args(["status"]).output().expect("run mesh");
+    let text = stdout_of(&human);
+    assert!(
+        text.contains("  nora: open=0 claimed=0 stale=0 notes_owned=2 notes_claimed=1"),
+        "missing nora row in:\n{text}"
+    );
+    assert!(
+        text.contains("  tina: open=1 claimed=0 stale=0\n"),
+        "zero-note row changed in:\n{text}"
+    );
+    assert!(
+        !text.contains("  tina: open=1 claimed=0 stale=0 notes_"),
+        "a zero-note agent must carry no note segment:\n{text}"
     );
 }
 

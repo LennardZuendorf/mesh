@@ -206,7 +206,7 @@ pub fn list(
 
     // The generic engine's tiebreak is path-ascending; scratch wants name-ascending, so the
     // composition is built by hand: name asc first, then updated desc on top (stable sort).
-    views.sort_by(|a, b| a.item.name.to_lowercase().cmp(&b.item.name.to_lowercase()));
+    views.sort_by_key(|a| a.item.name.to_lowercase());
     sort_views(&mut views, SortKey::Updated);
 
     if let Some(n) = f.limit {

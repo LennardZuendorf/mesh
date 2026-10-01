@@ -1235,7 +1235,9 @@ fn note_help_lists_the_six_subcommands_in_order() {
     let out = f.cmd().args(["note", "--help"]).output().expect("run");
     let text = stdout_of(&out);
     let mut at = 0usize;
-    for name in ["new", "append", "update", "get", "list", "delete"] {
+    for name in [
+        "new", "adopt", "append", "update", "get", "list", "claim", "release", "delete",
+    ] {
         let found = text.get(at..).and_then(|rest| rest.find(name));
         let offset = found.unwrap_or_else(|| panic!("{name} missing or out of order in {text}"));
         at += offset + name.len();
@@ -1470,4 +1472,614 @@ fn the_corpus_lock_directory_is_never_listed_as_a_note() {
     assert!(!text.contains("gitkeep"), "{text}");
     // Eight mesh notes plus the one foreign file; n-BAD is skipped.
     assert_eq!(text.lines().count(), 9, "{text}");
+}
+
+// ---------------------------------------------------------------------------------------
+// adopted-shaped files (note-adoption/1): mesh-native is the frontmatter id, not the stem
+// ---------------------------------------------------------------------------------------
+
+const ADOPTED: &str = "---\nid: n-SOL1\ntype: Team\ntitle: Team Sol\nbelongs_to: []\nschema: 3\n\
+                       created: 2026-01-02T00:00:00Z\nupdated: 2026-01-03T00:00:00Z\n\
+                       ---\n\n# Team Sol\n";
+
+#[test]
+fn an_adopted_shaped_file_lists_and_resolves_by_id() {
+    let f = VaultFixture::new();
+    f.write("notes/team-sol.md", ADOPTED);
+    f.write("notes/loose.md", "# Loose\n");
+
+    let out = f
+        .cmd()
+        .args(["note", "list", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let rows = json_of(&out);
+    let rows = rows.as_array().expect("list is an array");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["id"], Json::String("n-SOL1".into()));
+    assert_eq!(rows[0]["type"], Json::String("Team".into()));
+
+    // The foreign type filters by raw equality, and the id resolves from the frontmatter.
+    let out = f
+        .cmd()
+        .args(["note", "list", "--type", "Team", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(json_of(&out).as_array().expect("array").len(), 1);
+    let out = f
+        .cmd()
+        .args(["note", "get", "n-SOL1", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["id"], Json::String("n-SOL1".into()));
+    assert_eq!(payload["title"], Json::String("Team Sol".into()));
+    assert_eq!(payload["type"], Json::String("Team".into()));
+
+    // The slug still resolves by title over the foreign stem.
+    f.cmd()
+        .args(["note", "get", "team sol", "--quiet"])
+        .assert()
+        .success()
+        .stdout("n-SOL1\n");
+
+    // And the loose file stays invisible, as before.
+    let out = f
+        .cmd()
+        .args(["note", "get", "loose"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+}
+
+#[test]
+fn status_counts_id_bearing_files_as_mesh_native() {
+    let f = VaultFixture::new();
+    f.write("notes/team-sol.md", ADOPTED);
+    f.write("notes/loose.md", "# Loose\n");
+    let out = f.cmd().args(["--json", "status"]).output().expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["notes"], Json::from(1));
+    assert_eq!(payload["notes_foreign"], Json::from(1));
+}
+
+#[test]
+fn an_adopted_shaped_file_is_deletable_by_id() {
+    let f = VaultFixture::new();
+    f.write("notes/team-sol.md", ADOPTED);
+    f.cmd()
+        .args(["note", "delete", "n-SOL1", "--force", "--quiet"])
+        .assert()
+        .success();
+    assert!(!f.files().contains(&"notes/team-sol.md".to_string()));
+}
+
+// ---------------------------------------------------------------------------------------
+// adopt
+// ---------------------------------------------------------------------------------------
+
+/// The brain-style layout: notes live at the vault root, tasks in a nested folder.
+const BRAIN_CFG: &str = "[core]\nvault_path = \"{VAULT}\"\nagent = \"test-agent\"\n\n[spaces]\n\
+                         notes = \".\"\ntasks = \"Agents/tasks\"\n";
+
+/// A foreign file: rich frontmatter, no mesh id.
+const FOREIGN: &str =
+    "---\ntype: Team\ntitle: Team Sol\nbelongs_to: []\nschema: 3\nstatus: captured\n\
+                       ---\n\n# Team Sol\n\nBody text.\n";
+
+#[test]
+fn adopt_mints_ids_into_existing_vault_files() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("Team & Organization/team-sol.md", FOREIGN);
+    f.write("Raw/loose.md", "# Loose\n");
+
+    let out = f
+        .cmd()
+        .args([
+            "note",
+            "adopt",
+            "Team & Organization/team-sol.md",
+            "--quiet",
+        ])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    assert!(id.starts_with("n-"), "{}", id);
+    let text = f.read("Team & Organization/team-sol.md");
+    assert!(text.contains(&format!("id: {id}\n")), "{text}");
+    assert!(
+        text.contains("type: Team\n"),
+        "foreign keys survive: {text}"
+    );
+    assert!(
+        text.contains("# Team Sol\n\nBody text.\n"),
+        "body untouched: {text}"
+    );
+
+    // Human mode names the file it adopted.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "Raw/loose.md"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    let id2 = stdout
+        .strip_prefix("adopted ")
+        .and_then(|rest| rest.split_once(' '))
+        .map(|(id, _)| id)
+        .expect("adopted {id} → {path}")
+        .to_string();
+    assert!(id2.starts_with("n-"), "{stdout}");
+    assert_eq!(stdout, format!("adopted {id2} → Raw/loose.md\n"));
+
+    // JSON is one array of {id, path} rows.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "Raw/loose.md", "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    let rows = payload.as_array().expect("a JSON array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], Json::String(id2.clone()));
+    assert_eq!(rows[0]["path"], Json::String("Raw/loose.md".into()));
+
+    // The adopted files are addressable by id, and the census moved.
+    let out = f
+        .cmd()
+        .args(["note", "get", &id, "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), id);
+    let out = f.cmd().args(["--json", "status"]).output().expect("run");
+    let status = json_of(&out);
+    assert_eq!(status["notes"], Json::from(2));
+    assert_eq!(status["notes_foreign"], Json::from(0));
+}
+
+#[test]
+fn adopt_is_idempotent_byte_for_byte() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("one.md", FOREIGN);
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+    let before = f.read("one.md");
+
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), id);
+    assert_eq!(f.read("one.md"), before);
+}
+
+#[test]
+fn adopt_rejects_other_spaces_and_paths_outside_the_vault() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("Agents/tasks/foreign-task.md", "---\ntitle: X\n---\n\nx\n");
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "Agents/tasks/foreign-task.md"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+    assert!(
+        stderr_of(&out).to_lowercase().contains("space"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(
+        f.read("Agents/tasks/foreign-task.md")
+            .starts_with("---\ntitle: X"),
+        "the file is untouched"
+    );
+
+    let outside = tempfile::tempdir().expect("outside dir");
+    let path = outside.path().join("elsewhere.md");
+    std::fs::write(&path, "# Elsewhere\n").expect("write");
+    let out = f
+        .cmd()
+        .args(["note", "adopt"])
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "missing.md"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+}
+
+#[test]
+fn adopt_refuses_files_the_walk_cannot_see() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write(".obsidian/templates/tpl.md", "# Template\n");
+    f.write("Raw/notes.txt", "plain text\n");
+    for path in [".obsidian/templates/tpl.md", "Raw/notes.txt"] {
+        let before = f.read(path);
+        let out = f.cmd().args(["note", "adopt", path]).output().expect("run");
+        assert_eq!(code_of(&out), Some(2), "{path}: {}", stderr_of(&out));
+        assert!(
+            stderr_of(&out).contains("mesh cannot see"),
+            "{path}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(f.read(path), before, "{path} is untouched");
+    }
+}
+
+#[test]
+fn adopt_refuses_frontmatter_that_fails_the_note_schema() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    for (path, text) in [
+        ("scalar-tags.md", "---\ntags: draft\n---\n\nbody\n"),
+        (
+            "bad-created.md",
+            "---\ncreated: last tuesday\n---\n\nbody\n",
+        ),
+        ("numeric-title.md", "---\ntitle: 7\n---\n\nbody\n"),
+    ] {
+        f.write(path, text);
+        let out = f.cmd().args(["note", "adopt", path]).output().expect("run");
+        assert_eq!(code_of(&out), Some(2), "{path}: {}", stderr_of(&out));
+        assert!(
+            stderr_of(&out).contains("note schema"),
+            "{path}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(f.read(path), text, "{path} is untouched");
+    }
+}
+
+#[test]
+fn an_adopt_batch_stops_and_heals_on_re_run() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write("one.md", FOREIGN);
+    f.write("two.md", FOREIGN);
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "missing.md", "two.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(3));
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains("re-run"), "{stderr}");
+    let one = f.read("one.md");
+    assert!(one.contains("\nid: n-"), "the first file committed: {one}");
+    assert!(
+        !f.read("two.md").contains("\nid: n-"),
+        "the batch stopped before two.md"
+    );
+
+    // Re-running the same verb with the surviving paths heals the batch.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "two.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(
+        f.read("one.md"),
+        one,
+        "re-adoption is a byte-identical no-op"
+    );
+    assert!(f.read("two.md").contains("\nid: n-"));
+}
+
+/// The brain layout plus a roster: only `alice` and `test-agent` are valid identities.
+const BRAIN_ROSTER_CFG: &str = "[core]\nvault_path = \"{VAULT}\"\nagent = \"test-agent\"\n\n\
+                                [spaces]\nnotes = \".\"\ntasks = \"Agents/tasks\"\n\n\
+                                [tasks]\ncollections = [\"alice\", \"test-agent\"]\n";
+
+const FOREIGN_OWNERED: &str = "---\ntype: Team\ntitle: Owned\nowner: bob\n---\n\n# Owned\n";
+
+#[test]
+fn adopt_stamps_the_owner_when_absent_only() {
+    let f = VaultFixture::with(BRAIN_ROSTER_CFG);
+    f.write("bare.md", FOREIGN);
+    f.write("owned.md", FOREIGN_OWNERED);
+    f.write("quiet.md", FOREIGN);
+
+    // Identity is validated at the write boundary; the file is untouched.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "bare.md", "--owner", "ghost", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+    assert_eq!(stderr_of(&out).trim(), "unknown owner: 'ghost'");
+    assert!(!f.read("bare.md").contains("\nid: n-"));
+
+    // Given and absent: inserted.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "bare.md", "--owner", "alice", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let bare = f.read("bare.md");
+    assert!(bare.contains("owner: alice\n"), "{bare}");
+
+    // Given but present: untouched.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "owned.md", "--owner", "alice", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let owned = f.read("owned.md");
+    assert!(owned.contains("owner: bob\n"), "{owned}");
+    assert!(!owned.contains("owner: alice"), "{owned}");
+
+    // No flag: the key is never injected.
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "quiet.md", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let quiet = f.read("quiet.md");
+    assert!(!quiet.contains("owner:"), "{quiet}");
+}
+
+#[test]
+fn update_owner_sets_the_area_explicitly() {
+    let f = VaultFixture::with(BRAIN_ROSTER_CFG);
+    f.write("one.md", FOREIGN);
+    let out = f
+        .cmd()
+        .args(["note", "adopt", "one.md", "--owner", "alice", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let id = stdout_of(&out).trim().to_string();
+
+    let out = f
+        .cmd()
+        .args(["note", "update", &id, "--owner", "test-agent", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let text = f.read("one.md");
+    assert!(text.contains("owner: test-agent\n"), "{text}");
+    assert!(!text.contains("owner: alice"), "{text}");
+
+    // The roster gates the explicit set too.
+    let out = f
+        .cmd()
+        .args(["note", "update", &id, "--owner", "ghost", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(2));
+    assert_eq!(stderr_of(&out).trim(), "unknown owner: 'ghost'");
+}
+
+// ---------------------------------------------------------------------------------------
+// claim / release (note-adoption/4): task-grade atomicity, no lifecycle
+// ---------------------------------------------------------------------------------------
+
+/// One frontmatter field's line, or an empty string when the key is absent.
+fn field_of(text: &str, key: &str) -> String {
+    text.lines()
+        .find(|l| l.starts_with(&format!("{key}:")))
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn claim_writes_claimed_by_only() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    let before = f.read(&rel);
+
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "claim", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("claimed {id}"));
+
+    let after = f.read(&rel);
+    assert!(after.contains("claimed_by: bob\n"), "{after}");
+    assert_eq!(
+        field_of(&after, "owner"),
+        "owner: test-agent",
+        "the durable owner is untouched: {after}"
+    );
+    assert!(
+        !after.contains("status:"),
+        "a note never gains a status: {after}"
+    );
+    assert_eq!(field_of(&before, "created"), field_of(&after, "created"));
+    assert_ne!(field_of(&before, "updated"), field_of(&after, "updated"));
+}
+
+#[test]
+fn claim_json_carries_the_holder_and_the_updated_stamp() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let out = f
+        .cmd()
+        .args(["note", "claim", &id, "--json"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    let payload = json_of(&out);
+    let keys: Vec<&str> = payload
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["id", "type", "claimed_by", "updated"]);
+    assert_eq!(payload["claimed_by"], Json::String("test-agent".into()));
+}
+
+#[test]
+fn a_foreign_claim_is_exit_four_and_writes_nothing() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    f.cmd()
+        .args(["--owner", "alice", "note", "claim", &id, "--quiet"])
+        .assert()
+        .success();
+    let before = f.read(&rel);
+
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "claim", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(4));
+    assert_eq!(
+        stderr_of(&out).trim(),
+        format!("note {id} already claimed by alice"),
+        "the note conflict names its own entity, the task claim envelope's keys"
+    );
+    assert_eq!(f.read(&rel), before, "a conflict writes nothing");
+}
+
+#[test]
+fn a_same_identity_reclaim_leaves_the_bytes_untouched() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    f.cmd()
+        .args(["--owner", "alice", "note", "claim", &id, "--quiet"])
+        .assert()
+        .success();
+    let before = f.read(&rel);
+
+    let out = f
+        .cmd()
+        .args(["--owner", "alice", "note", "claim", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("claimed {id}"));
+    assert_eq!(f.read(&rel), before, "a re-claim never rewrites");
+}
+
+#[test]
+fn release_is_idempotent_and_force_breaks_a_foreign_claim() {
+    let f = VaultFixture::new();
+    let id = new_note(&f, "Alpha", "x");
+    let rel = format!("notes/{id}.md");
+    let before = f.read(&rel);
+
+    // An unclaimed note reports the found state, exits 0, and is byte-identical.
+    let out = f
+        .cmd()
+        .args(["note", "release", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("released {id}"));
+    assert_eq!(f.read(&rel), before, "an unclaimed release is a no-op");
+
+    f.cmd()
+        .args(["--owner", "alice", "note", "claim", &id, "--quiet"])
+        .assert()
+        .success();
+    let held = f.read(&rel);
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "release", &id])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(4), "a foreign release needs --force");
+    assert_eq!(f.read(&rel), held, "a refused release writes nothing");
+
+    let out = f
+        .cmd()
+        .args(["--owner", "bob", "note", "release", &id, "--force"])
+        .output()
+        .expect("run");
+    assert_eq!(code_of(&out), Some(0), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), format!("released {id}"));
+    assert!(
+        f.read(&rel).contains("claimed_by: null\n"),
+        "a released claim is emitted as null: {}",
+        f.read(&rel)
+    );
+}
+
+#[test]
+fn list_mine_lists_owned_or_claimed_notes() {
+    let f = VaultFixture::new();
+    let owned = new_note(&f, "Owned", "x");
+    let theirs = {
+        let out = f
+            .cmd()
+            .args(["note", "new", "Theirs", "--owner", "bob", "--body", "x"])
+            .args(["--quiet"])
+            .output()
+            .expect("run");
+        stdout_of(&out).trim().to_string()
+    };
+    let claimed = {
+        let out = f
+            .cmd()
+            .args(["note", "new", "Claimed", "--owner", "bob", "--body", "x"])
+            .args(["--quiet"])
+            .output()
+            .expect("run");
+        stdout_of(&out).trim().to_string()
+    };
+    f.cmd()
+        .args(["note", "claim", &claimed, "--quiet"])
+        .assert()
+        .success();
+
+    let ids = |args: &[&str]| {
+        let mut cmd = f.cmd();
+        cmd.args(["note", "list", "--quiet"]);
+        cmd.args(args);
+        let out = cmd.output().expect("run");
+        stdout_of(&out)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<String>>()
+    };
+    let mine = ids(&["--mine"]);
+    assert!(mine.contains(&owned), "an owned note is mine: {mine:?}");
+    assert!(mine.contains(&claimed), "a claimed note is mine: {mine:?}");
+    assert!(
+        !mine.contains(&theirs),
+        "another agent's note is not mine: {mine:?}"
+    );
+
+    // The global flag agrees with the local one.
+    let out = f
+        .cmd()
+        .args(["--mine", "note", "list", "--quiet"])
+        .output()
+        .expect("run");
+    assert_eq!(
+        stdout_of(&out)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<String>>(),
+        mine
+    );
 }

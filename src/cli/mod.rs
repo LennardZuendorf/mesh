@@ -6,6 +6,7 @@
 
 pub mod admin;
 pub mod asset;
+pub mod dashboard;
 pub mod globals;
 pub mod lens;
 pub mod memory;
@@ -188,11 +189,16 @@ pub enum Command {
         about = "Watch the vault and keep the search index fresh (foreground)."
     )]
     Watch(WatchArgs),
-    #[command(display_order = 16, about = "Inspect and edit the mesh config.")]
+    #[command(
+        display_order = 16,
+        about = "Live read-only dashboard over the vault (foreground; q quits)."
+    )]
+    Dashboard(DashboardArgs),
+    #[command(display_order = 17, about = "Inspect and edit the mesh config.")]
     Config(ConfigArgs),
-    #[command(display_order = 17, about = "Print a shell completion script.")]
+    #[command(display_order = 18, about = "Print a shell completion script.")]
     Completions(CompletionsArgs),
-    #[command(display_order = 18, about = "Run the stdio MCP server.")]
+    #[command(display_order = 19, about = "Run the stdio MCP server.")]
     Mcp(McpArgs),
     #[command(hide = true, about = "Removed — use 'mesh watch'.")]
     Daemon(DaemonArgs),
@@ -234,7 +240,23 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 2, about = "Append a block to a note's body.")]
+    #[command(
+        display_order = 2,
+        about = "Adopt existing Markdown: mint a mesh id in place, in the notes space."
+    )]
+    Adopt {
+        #[arg(
+            value_name = "PATH",
+            required = true,
+            help = "Files to adopt: vault-relative or absolute."
+        )]
+        paths: Vec<PathBuf>,
+        #[arg(long, value_name = "TEXT", help = OWNER_WRITE_HELP)]
+        owner: Option<String>,
+        #[command(flatten)]
+        out: OutFlags,
+    },
+    #[command(display_order = 3, about = "Append a block to a note's body.")]
     Append {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -247,7 +269,7 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 3, about = "Update a note's tags, type or title.")]
+    #[command(display_order = 4, about = "Update a note's tags, type or title.")]
     Update {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -261,10 +283,12 @@ pub enum NoteSub {
         new_type: Option<String>,
         #[arg(long, value_name = "TEXT", help = "Rewrite the note title.")]
         title: Option<String>,
+        #[arg(long, value_name = "TEXT", help = "Set the owner: the long-term area.")]
+        owner: Option<String>,
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 4, about = "Read one note.")]
+    #[command(display_order = 5, about = "Read one note.")]
     Get {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -282,7 +306,7 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 5, about = "List notes.")]
+    #[command(display_order = 6, about = "List notes.")]
     List {
         #[arg(long, value_name = "TEXT", help = TAGS_FILTER_HELP)]
         tags: Option<String>,
@@ -290,6 +314,8 @@ pub enum NoteSub {
         any_tag: bool,
         #[arg(long, value_name = "TEXT", help = OWNER_FILTER_HELP)]
         owner: Option<String>,
+        #[arg(long, help = "Only notes I own or have claimed.")]
+        mine: bool,
         #[arg(long = "type", value_name = "TEXT", help = "Filter by note type.")]
         note_type: Option<String>,
         #[arg(long, value_name = "TEXT", help = "Recency: 7d or an ISO date.")]
@@ -311,7 +337,29 @@ pub enum NoteSub {
         #[command(flatten)]
         out: OutFlags,
     },
-    #[command(display_order = 6, about = "Delete a note.")]
+    #[command(
+        display_order = 7,
+        about = "Claim a note (atomic test-and-set on claimed_by)."
+    )]
+    Claim {
+        #[arg(help = "Note id or title slug.")]
+        target: String,
+        #[command(flatten)]
+        out: OutFlags,
+    },
+    #[command(display_order = 8, about = "Release a note claim.")]
+    Release {
+        #[arg(help = "Note id or title slug.")]
+        target: String,
+        #[arg(
+            long,
+            help = "Break another agent's claim (cooperation override, not auth)."
+        )]
+        force: bool,
+        #[command(flatten)]
+        out: OutFlags,
+    },
+    #[command(display_order = 9, about = "Delete a note.")]
     Delete {
         #[arg(help = "Note id or title slug.")]
         target: String,
@@ -656,6 +704,12 @@ pub enum MemorySub {
         #[arg(
             long,
             value_name = "TEXT",
+            help = "Soft-link this memory to a project note id (no existence check)."
+        )]
+        project: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
             help = "Soft TTL: 7d, 12h, 2w or an ISO datetime."
         )]
         expires: Option<String>,
@@ -705,6 +759,12 @@ pub enum MemorySub {
         importance: Option<i64>,
         #[arg(long, value_name = "TEXT", help = "Set the source.")]
         source: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "Set the project soft link (a project note id; no existence check)."
+        )]
+        project: Option<String>,
         #[arg(
             long,
             value_name = "TEXT",
@@ -780,6 +840,12 @@ pub enum MemorySub {
         query: String,
         #[arg(long, value_name = "TEXT", help = "Filter by kind.")]
         kind: Option<String>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "Scope recall to one project's memories (id or slug)."
+        )]
+        project: Option<String>,
         #[arg(long, value_name = "TEXT", help = TAGS_FILTER_HELP)]
         tags: Option<String>,
         #[arg(long, value_name = "TEXT", help = OWNER_FILTER_HELP)]
@@ -1076,6 +1142,12 @@ pub struct SearchArgs {
     pub status: Option<String>,
     #[arg(long, value_name = "TEXT", help = "Filter by memory kind.")]
     pub kind: Option<String>,
+    #[arg(
+        long,
+        value_name = "TEXT",
+        help = "Scope hits to a project's envelope (id or slug)."
+    )]
+    pub project: Option<String>,
     #[arg(long, value_name = "TEXT", help = SPACE_HELP)]
     pub space: Option<String>,
     #[arg(
@@ -1310,6 +1382,19 @@ pub struct ReindexArgs {
     pub space: Option<String>,
 }
 
+/// `mesh dashboard` — the human-only live screen (admin family: no local output flags).
+#[derive(Args, Debug)]
+pub struct DashboardArgs {
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_name = "SECONDS",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Seconds between refreshes (the tick, at least 1)."
+    )]
+    pub interval: u64,
+}
+
 /// `mesh watch`.
 #[derive(Args, Debug)]
 pub struct WatchArgs {
@@ -1447,6 +1532,7 @@ pub fn dispatch(ctx: &mut Ctx, command: Command) -> Result<i32> {
         Command::Project(args) => lens::project(ctx, args).map(|()| 0),
         Command::SessionStart(args) => lens::session_start(ctx, args).map(|()| 0),
         Command::Watch(args) => watch::run(ctx, args).map(|()| 0),
+        Command::Dashboard(args) => dashboard::run(ctx, args).map(|()| 0),
         Command::Config(args) => match args.sub {
             None => Ok(help_to_stdout(&["config"])),
             Some(sub) => admin::config(ctx, sub).map(|()| 0),
@@ -1514,6 +1600,7 @@ mod tests {
                 "project",
                 "session-start",
                 "watch",
+                "dashboard",
                 "config",
                 "completions",
                 "mcp"
@@ -1542,7 +1629,7 @@ mod tests {
         let command = Cli::command();
         assert_eq!(
             sub_names(&command, "note"),
-            ["new", "append", "update", "get", "list", "delete"]
+            ["new", "adopt", "append", "update", "get", "list", "claim", "release", "delete"]
         );
         assert_eq!(
             sub_names(&command, "task"),
@@ -1573,7 +1660,14 @@ mod tests {
     #[test]
     fn admin_commands_declare_no_local_output_flags() {
         let command = Cli::command();
-        for name in ["init", "status", "reindex", "completions", "mcp"] {
+        for name in [
+            "init",
+            "status",
+            "reindex",
+            "dashboard",
+            "completions",
+            "mcp",
+        ] {
             let sub = command.find_subcommand(name).unwrap();
             let has = sub.get_arguments().any(|a| a.get_id() == "json");
             assert!(!has, "{name} must not declare a local --json");

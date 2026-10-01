@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-09-08
+updated: 2026-10-01
 ---
 
 # Mesh — Technical Architecture
@@ -25,6 +25,7 @@ CLI and MCP are two thin renderers over the same domain.
 | Config | `toml` (read) + `toml_edit` (format-preserving edits) |
 | Time / hashing / syscalls | `chrono`, `sha2`, `rustix` (O_EXCL, flock, fstat, kill, umask) |
 | Walking / watching | `walkdir`, `notify` + `notify-debouncer-full` |
+| Terminal UI | `ratatui` + `crossterm` — the dashboard only, feature-trimmed to the crossterm backend, imported only by `src/cli/dashboard.rs` |
 | Agents | Hand-rolled JSON-RPC 2.0 over stdio (no MCP SDK) |
 | Search engine | `indexed` (first-party hybrid; mesh wraps its CLI) |
 | Dev | `assert_cmd`, `predicates`, `tempfile`, `serial_test`; `cargo llvm-cov`, `cargo deny` |
@@ -53,8 +54,8 @@ src/
 ├── model/                       # per-space typed views + FieldOrder (note, task, memory, scratch, asset)
 ├── domain/                      # verbs + select/tags/owner/wikilinks/deps/activity/context/lenses
 ├── search/                      # route, corpus, tokenize, builtin, tagpull, indexed, health
-├── cli/                         # one file per verb family + globals, out, admin, watch
-└── mcp/                         # stdio JSON-RPC server, schemas, 37-tool table, instructions
+├── cli/                         # one file per verb family + globals, out, admin, watch, dashboard
+└── mcp/                         # stdio JSON-RPC server, schemas, 40-tool table, instructions
 tests/                           # one per verb family + compat corpus, race, bundle, review regressions
 ```
 
@@ -116,8 +117,13 @@ tests/                           # one per verb family + compat corpus, race, bu
 
 **Goal:** instant CLI. **Target:** cold start under 10 ms for a read command on a warm
 filesystem, asserted by a wall-clock test that also proves the MCP tool table is never
-constructed off the MCP path. Heavy work does not exist: a full-vault scan of thousands of files
-in Rust is milliseconds, which is what let the warm daemon be deleted rather than ported.
+constructed off the MCP path. The pin asserts the **minimum of ten** warm end-to-end runs of
+the suite's own binary stays under 50 ms — min-of-N is monotone against scheduling noise, so it
+is stable under CI load while still lifting on a real regression — with ~6× headroom over the
+measured ~7.5 ms idle floor. Heavy work does not exist: a full-vault scan of thousands of files
+in Rust is milliseconds, which is what let the warm daemon be deleted rather than ported. The
+dashboard's TUI crates are linked into the binary but imported only by
+`src/cli/dashboard.rs`, and the same pin proves they tax no other verb's startup.
 
 **The Rust rewrite decision was reversed (2026-09).** It was shelved when the trade was a ~2–10 ms
 Rust floor against a ~150–180 ms Python floor for a three-verb CLI a human invoked occasionally.
@@ -160,15 +166,17 @@ families share — never per-verb copies:
 
 ### Note fields
 
-`id`, `type` (note|log|decision|reference|project), `title`, `tags`, `owner`, `created`,
-`updated`, `related` — the shared base block for every space, in declaration order.
+`id`, `type` (any string on read; `note|log|decision|reference|project` on mesh writes), `title`,
+`tags`, `owner`, `claimed_by` (absent when never claimed, `null` after release), `created`,
+`updated`, `related` — the shared base block for every space, in declaration order. Mesh-native
+is the frontmatter id, never the stem: an adopted file keeps its foreign filename.
 
 ### Per-space additions
 
 | Space | Adds |
 |---|---|
 | tasks | `status` (open|claimed|done|cancelled), `priority`, `claimed_by`, `project`, `blocks`, `blocked_by` — readiness derived from both directions |
-| memories | `kind`, `scope`, `importance`, `source`, `expires`, `superseded_by` |
+| memories | `kind`, `scope`, `project` (optional raw string mirroring the task field — workstream-envelope membership; the shared/private `scope` axis is untouched), `importance`, `source`, `expires`, `superseded_by` |
 | scratch | `type`, `name`, `agent`, `tags`, `created`, `updated` — name-addressed, no id |
 | assets | `filename`, `media_type`, `bytes`, `sha256`, `blob` on the sidecar; the blob is written first |
 
@@ -189,6 +197,37 @@ has to be rebuilt. Phases 1–3 are all delivered; the live sequence is in [plan
 Contracts compounded from the (now-deleted) feature specs. Full detail lives in the code plus the
 tests cited.
 
+- **Adoption & note claims** — `note adopt` mints a mesh id into an existing foreign file in
+  place: insert-only-absent keys (`id`, `title`, `created`, `updated`; `owner` additionally only
+  when the flag is given), foreign keys and the filename untouched, byte-identical re-run.
+  Adopt refuses (exit 2, file untouched) a file the walk cannot see — a dot component, a
+  non-`.md` extension, over 4 MiB — and a file whose existing keys fail the note schema, so a
+  minted id is always addressable. A
+  batch is a sequence of single-entity transactions: the first failure stops the run naming what
+  committed; the idempotent re-run heals. `note claim`/`release` are the task machinery minus the
+  lifecycle: test-and-set on `claimed_by` only, conflict = the shared claim-conflict envelope
+  (same shape, message names its own entity), `--force` on release breaks a foreign holder.
+  `--mine` on note list is owner-or-claimed_by. The status census carries per-agent
+  `notes_owned`/`notes_claimed`, JSON keys appended last. Pinned by `tests/note_cli.rs`,
+  `tests/race.rs` (8-way real-process claim race), `tests/review_regressions.rs`, and the MCP
+  parity tests (`src/mcp/`, `tests/mcp_cli.rs`, `tests/bundle.rs`).
+
+- **Project envelope** — one membership rule per space, all read-time: tasks by `project`
+  equality, notes by `related` containment (the stored, wikilink-backfilled list), memories by
+  `project` equality over the optional field. The `project` lens appends the `notes` then
+  `memories` sections last (append contract, pinned key order); `search --project` and
+  `memory recall --project` scope to the members — recall as an eligibility filter before the
+  unchanged ranking rules, search as an active filter on both engine branches (built-in: after
+  scoring, before `--limit`; `indexed`: unbounded fetch, post-filter, display cap, the tag pull
+  included) — and both compose with every other filter as a plain conjunction; a zero-row
+  conjunction is an empty result, never an error. Membership reads the envelope spaces the vault
+  enables, so `--space` narrows the corpus, never the envelope. MCP carries the `project` param
+  on `mesh_search`, `mesh_memory_recall` and the memory write tools with CLI-identical
+  semantics; the tool count stays 40. The seed gate is unchanged and shared by lens, search and
+  recall: an unknown id → exit 3 with candidates; a foreign seed → `seed is not mesh-native`.
+  Unknown and dangling `project` values stay tolerated (zero-member envelopes) — a read-time
+  join, never a validated reference. Pinned by `tests/{lens,search,memory,mcp}_cli.rs`.
+
 - **Wikilinks** — `[[Title]]` → id by title match against the notes index; `[[n-id]]`/`[[t-id]]`/
   `[[m-id]]`/`[[a-id]]` pass through; alias and anchor forms (`|`, `#`, `^`) strip at the lookup
   boundary; `related` is deduped; unresolvable links are dangling and counted by `mesh status`.
@@ -203,7 +242,9 @@ tests cited.
   comma-split and ANDed, `--status` is a membership union whose unknown value is exit 2, the same
   rule `task list` obeys. Under an active filter the `indexed` fetch is unbounded and `--limit` is
   a display cap applied after filtering, so a filtered page is never short of rows that were
-  simply never fetched.
+  simply never fetched. `--project` scopes the corpus to one project's envelope members
+  (→ Project envelope): the seed resolves through the shared gate before any engine I/O, and the
+  member filter composes with every other filter as a plain conjunction.
 - **Tasks** — atomic `O_EXCL` claim; idempotent release/finish/cancel that never rewrite a
   no-op and that report the status they *found*, not the one asked for; `--available` unchanged
   and dependency-blind; `--ready`/`--blocked` are the dependency-aware filters; a strict claim on
@@ -226,21 +267,43 @@ tests cited.
   an index update it did not make. Reconciliation *moves* a file and never destroys one: an
   occupied destination leaves the source in place. `status.deps.cycles` reports **strongly
   connected components**, not one entry per DFS back edge — while a component is listed the
-  graph is still cyclic, and it disappears only when it is really gone.
-- **MCP** — stdio JSON-RPC, 37 `mesh_*` tools mirroring the safe verbs plus the read-only
+  graph is still cyclic, and it disappears only when it is really gone. `status` names the
+  notes-corpus split explicitly: the human block labels the count `notes: N (mesh-native)` and
+  adds a `foreign markdown` line when foreign files exist, and the payload **appends** a
+  `notes_foreign` count — never mid-payload, per the append contract — so `notes: 0` beside a
+  vault full of adopted files cannot read as blindness.
+
+- **Dashboard** — `mesh dashboard [--interval]` (default 2 s, minimum 1 s): a foreground, read-only, human-only
+  terminal view of the vault — one screen, four fixed panes (agents census incl. note
+  ownership/claims, tasks by ready/blocked/claimed, recent activity, vault health). Every number
+  comes from the same domain reads the CLI uses (`status_report`, `tasks::list`, the
+  recent-activity lens, the search-health line) — the dashboard adds no second source of truth.
+  Every refresh is a direct read (identical with no watcher); a failed refresh keeps the last
+  good frame with a dim status line, never a crash. Terminal restoration is a Drop guard, so
+  quit, error and the panic-catch all restore cooked mode, cursor and colors; no tty → exit 2
+  `dashboard needs a terminal`. Keys are minimal and read-only: `q`/Ctrl-C quit, `r` refresh, `m`
+  mine-only (seeds from the global `--mine`), `Tab` pane focus, arrows scroll the focused pane.
+  Not exposed over MCP (asserted). No lock, no signal handler: two dashboards are two harmless
+  readers. Pinned by `src/cli/dashboard.rs` unit tests (headless snapshot composition), the
+  `Session`/`FrameSource` seams, `tests/dashboard_cli.rs`, and the cold-start pin in
+  `tests/foundation_cli.rs` → § Performance.
+- **MCP** — stdio JSON-RPC, 40 `mesh_*` tools mirroring the safe verbs plus the read-only
   lenses, each carrying explicit read-only/idempotent/destructive hints with exactly one
   destructive tool (`mesh_task_cancel`). Withheld: every removal verb, asset ingest and gc, and
   all admin. Every parameter carries a description; enums render domain literals; a config-derived
   instructions block is sent on connect and degrades to naming `mesh init`. Failures cross as
   the structured error envelope, never a trace.
 - **Session lenses** — `recent-activity`, `build-context`, `graph` (`--direction in|out|both`,
-  inbound index inverted at read time), `project` (a `type: project` note plus every task
-  pointing at it), and `session-start` (tasks → mentions → memories → activity, deduped by id,
+  inbound index inverted at read time), `project` (the workstream envelope — the `type: project`
+  note plus the notes, tasks and memories that belong to it; → Project envelope), and `session-start` (tasks → mentions → memories → activity, deduped by id,
   a `reason` on every entry, `--team` widening only the activity half, `--budget` trimming bodies
   before entries and recording the drop). All are read-only and accept a space filter. `--mine`
   resolves against the **acting** identity — `--owner` when given, else `[core].agent` — on every
   lens and list verb, the same identity a claim would be written as. A lens narrows its corpus
   when a space is disabled; any other listing failure is still an error, never an empty result.
+  A seed that names a foreign file — one `search` can see but no lens can address — fails as
+  `seed is not mesh-native (no mesh id)` (exit 3, envelope `not_found`), never confused with
+  `seed not found`.
 
 ---
 
@@ -250,7 +313,7 @@ tests cited.
 |---|---|
 | YAML compatibility with Python-era vaults | The read side accepts every form PyYAML wrote (sorted keys, space-separated timestamps, bare dates, naive and offset datetimes, quoted scalars, anchors, unknown keys); a byte-frozen Python-written corpus gates the foundation unit on semantic round-trip before any verb work starts → `tests/compat_corpus.rs` |
 | Lock-semantics parity in a new language | The staleness table, the `PermissionError`-means-alive rule and both compare-and-swaps are ported rule-for-rule and pinned by real multi-process race tests (8-way claim, concurrent appends, stale reclaim, release CAS) → `tests/race.rs` |
-| `indexed` contract drift | One wrapper, byte-identical argv, tolerant NDJSON decode, a 30 s wall clock that degrades instead of failing, and a stub engine fixture that pins argv and every decode-tolerance rule; `search --health` reports the branch actually taken |
+| `indexed` contract drift | One wrapper, byte-identical argv (search/update/create against the shipped `indexed` CLI; machine output is requested through the child's `INDEXED_SIMPLE_OUTPUT` env, never an argv flag), a tolerant decode of its single `--simple-output` envelope (v2 `relevance` used as-is, v1 squared-L2 normalised via `1/(1+s)`, chunks deduped to their document's best), and a stub engine fixture that pins argv and every decode-tolerance rule. `mesh reindex` routes **update-when-exists** — `index update <collection>` when the collection exists, `index create files --path <root> --collection <C>` only when it does not, because create prompts to overwrite an existing collection and mesh never answers a prompt. The ingest path (create/update) runs on a **600 s** wall clock while search keeps its 30 s; `MESH_INDEXED_TIMEOUT_MS` overrides both, and every clock degrades instead of failing. `search --health` reports the branch actually taken |
 | A hostile or huge file in a vault-root notes space | One walk, one skip set: dot components, nested space roots, files over 4 MiB, non-UTF-8; the safe reader yields nothing rather than failing |
 | Windows | Locks and the watcher are POSIX-shaped; POSIX-first, Windows best-effort |
 | Untrusted content | Multi-root sandbox on every resolved path; agent content is never shell input |

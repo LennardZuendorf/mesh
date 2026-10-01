@@ -1,10 +1,11 @@
-//! `mesh note …` — the six note subcommands and their output branches.
+//! `mesh note …` — the note subcommands and their output branches.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value as Json};
 
 use crate::cli::out;
+use crate::cli::task::identity;
 use crate::cli::NoteSub;
 use crate::ctx::Ctx;
 use crate::domain::notes::{self, AppendOpts, NewNote, UpdateNote};
@@ -37,6 +38,11 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
             ctx.coalesce(out.json, out.quiet, owner);
             new(ctx, &title, &note_type, tags.as_deref(), body, file)
         }
+        NoteSub::Adopt { paths, owner, out } => {
+            // The reassignment --owner is not the global identity --owner (the R6 rule).
+            ctx.coalesce(out.json, out.quiet, None);
+            adopt(ctx, paths, owner)
+        }
         NoteSub::Append {
             target,
             text,
@@ -52,10 +58,12 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
             tags,
             new_type,
             title,
+            owner,
             out,
         } => {
+            // The reassignment --owner is not the global identity --owner (the R6 rule).
             ctx.coalesce(out.json, out.quiet, None);
-            update(ctx, &target, tags, new_type, title)
+            update(ctx, &target, tags, new_type, title, owner)
         }
         NoteSub::Get {
             target,
@@ -72,6 +80,7 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
             tags,
             any_tag,
             owner,
+            mine,
             note_type,
             since,
             sort,
@@ -81,6 +90,7 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
         } => {
             // The filter reads the *coalesced* owner: `mesh --owner bob note list` must behave
             // exactly like `mesh note list --owner bob`.
+            ctx.coalesce_mine(mine);
             ctx.coalesce(out.json, out.quiet, owner);
             let owner = ctx.g.owner.clone();
             list(
@@ -94,6 +104,14 @@ pub fn run(ctx: &mut Ctx, sub: NoteSub) -> Result<()> {
                 limit,
                 foreign,
             )
+        }
+        NoteSub::Claim { target, out } => {
+            ctx.coalesce(out.json, out.quiet, None);
+            claim(ctx, &target)
+        }
+        NoteSub::Release { target, force, out } => {
+            ctx.coalesce(out.json, out.quiet, None);
+            release(ctx, &target, force)
         }
         NoteSub::Delete { target, force, out } => {
             ctx.coalesce(out.json, out.quiet, None);
@@ -194,6 +212,40 @@ fn report(ctx: &Ctx, note: &Note, verb: &str) {
 }
 
 // ---------------------------------------------------------------------------------------
+// adopt
+// ---------------------------------------------------------------------------------------
+
+/// Adopt existing foreign Markdown: mint a mesh id into each file, in place.
+fn adopt(ctx: &mut Ctx, paths: Vec<PathBuf>, owner: Option<String>) -> Result<()> {
+    let cfg = ctx.cfg()?;
+    let adopted = notes::adopt(cfg, &paths, owner.as_deref())?;
+    let entries: Vec<Json> = adopted
+        .iter()
+        .map(|a| {
+            let mut row = Map::new();
+            row.insert("id".to_string(), Json::String(a.id.clone()));
+            row.insert("path".to_string(), Json::String(vault_rel(cfg, &a.path)));
+            Json::Object(row)
+        })
+        .collect();
+    out::rows(ctx, &entries, |row| {
+        format!(
+            "adopted {} → {}",
+            row.get("id").and_then(Json::as_str).unwrap_or_default(),
+            row.get("path").and_then(Json::as_str).unwrap_or_default()
+        )
+    });
+    Ok(())
+}
+
+/// A path rendered vault-relative when possible, absolute otherwise.
+fn vault_rel(cfg: &crate::config::Config, path: &Path) -> String {
+    path.strip_prefix(cfg.vault())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+// ---------------------------------------------------------------------------------------
 // append / update
 // ---------------------------------------------------------------------------------------
 
@@ -249,6 +301,7 @@ fn update(
     tags: Option<String>,
     new_type: Option<String>,
     title: Option<String>,
+    owner: Option<String>,
 ) -> Result<()> {
     let cfg = ctx.cfg()?;
     // Count title-form backlinks before the rename: a renamed note silently dangles every
@@ -269,10 +322,44 @@ fn update(
             tags,
             new_type,
             title,
+            owner,
         },
     )?;
     dangling_advisory(ctx, &dangled);
     report(ctx, &note, "updated");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// claim / release
+// ---------------------------------------------------------------------------------------
+
+/// `mesh note claim` — a Class M mutation, mirroring `task claim`.
+fn claim(ctx: &Ctx, target: &str) -> Result<()> {
+    let claimer = identity(ctx)?;
+    let note = notes::claim(ctx.cfg()?, target, &claimer)?;
+    let fields: [(&str, Json); 2] = [
+        ("type", Json::String(note.note_type.clone())),
+        (
+            "claimed_by",
+            note.claimed_by.clone().map_or(Json::Null, Json::String),
+        ),
+    ];
+    out::mutation(
+        ctx,
+        &note.id,
+        "claimed",
+        &fields,
+        note.updated.unwrap_or_else(now_utc),
+    );
+    Ok(())
+}
+
+/// `mesh note release` — idempotent; `--force` breaks another holder's claim.
+fn release(ctx: &Ctx, target: &str, force: bool) -> Result<()> {
+    let releaser = identity(ctx)?;
+    let note = notes::release(ctx.cfg()?, target, &releaser, force)?;
+    report(ctx, &note, "released");
     Ok(())
 }
 
@@ -417,6 +504,10 @@ fn list(
         tags: tags.map(parse_csv).filter(|t| !t.is_empty()),
         any_tag,
         owner,
+        // `--mine` limits to owner-or-claimed_by == the acting identity, exactly like
+        // `task list`: `me` is the acting identity (`--owner` else `[core].agent`).
+        mine: ctx.g.mine,
+        me: ctx.actor().map(str::to_string),
         cutoff,
         sort,
         limit: Some(limit),
