@@ -376,6 +376,12 @@ struct DashState {
     status: Option<String>,
 }
 
+/// The config the panes read: the global `--owner` swaps the effective identity, exactly as
+/// the lenses do, so `--mine` resolves `me` from the flag rather than `[core].agent`.
+fn effective_config(ctx: &Ctx) -> Result<Config> {
+    Ok(ctx.cfg()?.with_agent(ctx.g.owner.as_deref()))
+}
+
 /// `mesh dashboard` — the whole verb. Never returns until the operator quits.
 pub fn run(ctx: &mut Ctx, args: DashboardArgs) -> Result<()> {
     // The gate comes first: with no terminal there is nothing to read keys from or draw on,
@@ -384,7 +390,7 @@ pub fn run(ctx: &mut Ctx, args: DashboardArgs) -> Result<()> {
     let opts = DashOpts {
         interval: Duration::from_secs(args.interval),
     };
-    let cfg = ctx.cfg()?.clone();
+    let cfg = effective_config(ctx)?;
 
     let session = CrosstermSession::enter()?;
     // From here on every exit path is the guard's: a quit, an error, or the unwind `main`
@@ -1107,6 +1113,17 @@ mod tests {
             frame.health.search_reason.as_deref(),
             Some(crate::search::health::REASON_COLLECTION)
         );
+    }
+
+    #[test]
+    fn the_global_owner_becomes_the_effective_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = crate::cli::globals::GlobalOpts {
+            owner: Some("bob".into()),
+            ..Default::default()
+        };
+        let ctx = Ctx::with_config(g, config_for(dir.path()), true);
+        assert_eq!(effective_config(&ctx).unwrap().agent(), Some("bob"));
     }
 
     #[test]

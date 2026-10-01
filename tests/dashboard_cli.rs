@@ -30,6 +30,22 @@ fn a_headless_dashboard_exits_two_naming_the_terminal() {
     );
 }
 
+/// A zero tick would re-snapshot the vault in a busy loop; the parser refuses it before the
+/// terminal gate runs.
+#[test]
+fn a_zero_interval_is_a_usage_error() {
+    let fixture = VaultFixture::new();
+    let out = fixture
+        .cmd()
+        .args(["dashboard", "--interval", "0"])
+        .output()
+        .expect("run mesh");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--interval"), "{stderr}");
+    assert!(!stderr.contains("needs a terminal"), "{stderr}");
+}
+
 /// The clap surface: the verb exists, and `--interval` is the one knob it takes.
 #[test]
 fn the_dashboard_help_renders_the_interval_flag() {

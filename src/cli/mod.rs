@@ -1389,7 +1389,8 @@ pub struct DashboardArgs {
         long,
         default_value_t = 2,
         value_name = "SECONDS",
-        help = "Seconds between refreshes (the tick)."
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Seconds between refreshes (the tick, at least 1)."
     )]
     pub interval: u64,
 }
