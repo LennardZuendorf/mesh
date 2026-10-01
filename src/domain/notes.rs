@@ -355,6 +355,13 @@ fn adopt_one(cfg: &Config, root: &Path, target: &Path, owner: Option<&str>) -> R
             target.display()
         )));
     }
+    if !crate::storage::walk::walk_sees(root, &resolved) {
+        return Err(MeshError::validation(format!(
+            "{} cannot be adopted: mesh cannot see dot folders, non-.md files \
+             or files over 4 MiB, so an id minted there would be unaddressable",
+            target.display()
+        )));
+    }
 
     let _guard = hold(&create_lock(root))?;
     let text = std::fs::read_to_string(&resolved).map_err(|_| missing())?;
@@ -411,6 +418,16 @@ fn adopt_one(cfg: &Config, root: &Path, target: &Path, owner: Option<&str>) -> R
         if meta.get("owner").is_none() {
             meta.insert("owner".to_string(), Value::str(owner));
         }
+    }
+    // Only absent keys are inserted, so a foreign value of the wrong shape survives: refuse
+    // rather than mint an id that every read verb would then report as not found.
+    if Note::from_meta(&meta).is_none() {
+        return Err(MeshError::validation(format!(
+            "{} fails the note schema: `tags` and `related` must be lists, `title`, `type`, \
+             `owner` and `claimed_by` strings, `created` and `updated` timestamps — fix the \
+             frontmatter, then adopt",
+            target.display()
+        )));
     }
     let doc = Doc::new(meta, body);
     write_doc(&cfg.spaces, &resolved, &ordered(&NOTE_FIELDS, &doc))?;

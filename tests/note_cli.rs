@@ -1708,6 +1708,47 @@ fn adopt_rejects_other_spaces_and_paths_outside_the_vault() {
 }
 
 #[test]
+fn adopt_refuses_files_the_walk_cannot_see() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    f.write(".obsidian/templates/tpl.md", "# Template\n");
+    f.write("Raw/notes.txt", "plain text\n");
+    for path in [".obsidian/templates/tpl.md", "Raw/notes.txt"] {
+        let before = f.read(path);
+        let out = f.cmd().args(["note", "adopt", path]).output().expect("run");
+        assert_eq!(code_of(&out), Some(2), "{path}: {}", stderr_of(&out));
+        assert!(
+            stderr_of(&out).contains("mesh cannot see"),
+            "{path}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(f.read(path), before, "{path} is untouched");
+    }
+}
+
+#[test]
+fn adopt_refuses_frontmatter_that_fails_the_note_schema() {
+    let f = VaultFixture::with(BRAIN_CFG);
+    for (path, text) in [
+        ("scalar-tags.md", "---\ntags: draft\n---\n\nbody\n"),
+        (
+            "bad-created.md",
+            "---\ncreated: last tuesday\n---\n\nbody\n",
+        ),
+        ("numeric-title.md", "---\ntitle: 7\n---\n\nbody\n"),
+    ] {
+        f.write(path, text);
+        let out = f.cmd().args(["note", "adopt", path]).output().expect("run");
+        assert_eq!(code_of(&out), Some(2), "{path}: {}", stderr_of(&out));
+        assert!(
+            stderr_of(&out).contains("note schema"),
+            "{path}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(f.read(path), text, "{path} is untouched");
+    }
+}
+
+#[test]
 fn an_adopt_batch_stops_and_heals_on_re_run() {
     let f = VaultFixture::with(BRAIN_CFG);
     f.write("one.md", FOREIGN);
