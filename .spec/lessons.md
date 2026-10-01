@@ -202,3 +202,9 @@ Tags make entries retrievable — scan for tags matching the work in hand.
 **Rule:** never name a concrete width for a libc alias (`mode_t`, `dev_t`, `ino_t`, `off_t`). Use the std API that fixes the width (`Permissions::from_mode(u32)`, `File::set_permissions`), or convert through the alias with a scoped `#[allow(clippy::useless_conversion)]`. A fix to platform-dependent code is verified only when CI is green on both matrix targets.
 **Tags:** portability, linux, macos, rustix, ci, verification
 **Date:** 2026-10-01
+
+### A single-path writer must pass the same gates as the walk and the reader
+**Pattern:** `note adopt` takes an explicit path, so it never went through `iter_md`. It minted ids into `.obsidian/` templates, `.txt` files and files whose existing `tags: draft` or `created: last tuesday` fail `Note::from_meta`. Each run exited 0, and every read verb then answered `note not found` for the new id.
+**Rule:** a verb that writes an entity at a caller-named path must check, before the write, that the walk would yield that path (`storage::walk::walk_sees`) and that the resulting frontmatter parses as the entity (`from_meta`). Never report success for an entity no read verb can address.
+**Tags:** adopt, walk, schema, validation, notes
+**Date:** 2026-10-01

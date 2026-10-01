@@ -3,7 +3,7 @@ type: entrypoint
 scope: technical
 children:
   - plan.md
-updated: 2026-09-26
+updated: 2026-10-01
 ---
 
 # Mesh — Technical Architecture
@@ -199,7 +199,10 @@ tests cited.
 
 - **Adoption & note claims** — `note adopt` mints a mesh id into an existing foreign file in
   place: insert-only-absent keys (`id`, `title`, `created`, `updated`; `owner` additionally only
-  when the flag is given), foreign keys and the filename untouched, byte-identical re-run. A
+  when the flag is given), foreign keys and the filename untouched, byte-identical re-run.
+  Adopt refuses (exit 2, file untouched) a file the walk cannot see — a dot component, a
+  non-`.md` extension, over 4 MiB — and a file whose existing keys fail the note schema, so a
+  minted id is always addressable. A
   batch is a sequence of single-entity transactions: the first failure stops the run naming what
   committed; the idempotent re-run heals. `note claim`/`release` are the task machinery minus the
   lifecycle: test-and-set on `claimed_by` only, conflict = the shared claim-conflict envelope
@@ -270,7 +273,7 @@ tests cited.
   `notes_foreign` count — never mid-payload, per the append contract — so `notes: 0` beside a
   vault full of adopted files cannot read as blindness.
 
-- **Dashboard** — `mesh dashboard [--interval]` (default 2 s): a foreground, read-only, human-only
+- **Dashboard** — `mesh dashboard [--interval]` (default 2 s, minimum 1 s): a foreground, read-only, human-only
   terminal view of the vault — one screen, four fixed panes (agents census incl. note
   ownership/claims, tasks by ready/blocked/claimed, recent activity, vault health). Every number
   comes from the same domain reads the CLI uses (`status_report`, `tasks::list`, the
